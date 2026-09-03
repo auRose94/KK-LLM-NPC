@@ -80,8 +80,9 @@ codebase right now and what to watch out for on resume.
 - 2 instances in plugins folder (`KKLLMNPC.dll`, `KKLLMNPC2.dll`). Both move, look, chat,
   and interact. The drift from earlier today is fixed (no rigidbody rotation by us; idle
   damping only on horizontal velocity).
-- `KKLLMNPC.cs` is 3,440 lines. **SPLIT-PLAN.md** documents the partial-class split and the
-  follow-up single-plugin `MaxKobolds` refactor. Both are safe next steps in a fresh session.
+- `KKLLMNPC.cs` is now split into `src/*.cs` (partial classes) — see SPLIT-PLAN.md.
+  **SPLIT-PLAN.md** documents the completed split and the follow-up single-plugin
+  `MaxKobolds` refactor. Both are safe next steps in a fresh session.
 - The only warning: `CS0414 _user assigned but never used` — deliberate (reserved for future
   use); leave it.
 

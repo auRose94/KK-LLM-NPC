@@ -14,7 +14,7 @@ COUNT="${1:-1}"   # how many instances to build (1..4)
 build() {
   local n="$1" out define
   if [ "$n" = "1" ]; then out="KKLLMNPC.dll";  define=""; else out="KKLLMNPC${n}.dll"; define="-define:KK_INSTANCE_${n}"; fi
-  mcs -target:library $define -out:"$out" KKLLMNPC.cs \
+  mcs -target:library $define -out:"$out" src/*.cs \
     -r:"$CORE/BepInEx.dll" \
     -r:"$CORE/0Harmony.dll" \
     -r:"$MGMT/UnityEngine.dll" \

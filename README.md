@@ -137,7 +137,17 @@ Requires the game's Managed/ assemblies; paths are at the top of `build.sh`.
 
 ## Layout / roadmap
 
-- `KKLLMNPC.cs` — everything (about to split)
-- `build.sh` — multi-instance build/deploy
-- `SPLIT-PLAN.md` — the planned split into partial-class files + the follow-up
+- `src/` — the plugin source, one `public partial class LLMNPCPlugin` per concern:
+  - `Main.cs` — `[BepInPlugin]` decl, config fields, Unity lifecycle (`Awake`/`Update`/
+    `OnDestroy`), main-thread marshalling, scene gating, memory (history/facts)
+  - `Body.cs` — possession/teardown, camera, belly/egg + penetration awareness
+  - `Senses.cs` — perception build, ray fan, clearance, nearby, equipment
+  - `Movement.cs` — `FixedUpdate`, move/stop, gaze, camera-clip auto-crouch
+  - `Llm.cs` — decision loop, HTTP, act-schema parsing, ask/commentary workers
+  - `Vision.cs` — background vision caption thread
+  - `Tools.cs` — the `Tool*` action implementations + `RunTool` switch
+  - `Chat.cs` — Photon chat listener, `ToolSay`, naming
+  - `Json.cs` — `Json` + `JsonObj` (independent helpers)
+- `build.sh` — multi-instance build/deploy (compiles `src/*.cs`)
+- `SPLIT-PLAN.md` — the (now done) split into partial-class files + the follow-up
   single-plugin-multi-body refactor
