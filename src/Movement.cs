@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// FixedUpdate: walk validation, burst timers, idle friction damping, gaze steering, camera-clip fix.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -45,9 +25,7 @@ namespace KKLLMNPC
 
         private string _bumpInfo;             // human-readable "hit wall to the left"
 
-
         private const float WalkProbeRange = 1.4f; // how far ahead we validate walking
-
 
         // True if the collider belongs to our own kobold (its body/limbs) — ignore it.
         private bool IsOwnCollider(Collider c)
@@ -56,9 +34,11 @@ namespace KKLLMNPC
             return c.transform.root == _kobold.transform.root;
         }
 
-
         // Fan out left/right to find a heading with no near obstacle; return the
         // yaw delta to steer, or 0 if everything is blocked.
+        // Obstacle fanning: scan progressively wider left/right offsets from the blocked
+        // direction (biased along the wall's tangent) until a clear heading is found,
+        // so the kobold slides along walls instead of grinding into them.
         private float FindClearHeading(Vector3 eye, Vector3 hitNormal)
         {
             // Try increasingly wide offsets, preferring the side of the surface normal
@@ -74,10 +54,10 @@ namespace KKLLMNPC
             return 0f; // boxed in
         }
 
-
         // LLM-facing continuous movement command, written by LLM thread,
         // consumed in FixedUpdate on the main thread. Plain fields + Interlocked.
         private float _moveLocalZ;      // forward speed
+        private float _moveLocalX;      // strafe (right=+, left=-)
 
         private bool  _moveJump;
 
@@ -99,28 +79,25 @@ namespace KKLLMNPC
 
         private float _yawDeg;          // absolute yaw (derived from body + offset)
 
-
         private readonly object _stateLock = new object();
-
 
         // ------------------------------------------------------------------
         // movement plumbing: LLM thread sets fields; FixedUpdate applies them
         // ------------------------------------------------------------------
-        private void SetMove(float forwardSpeed, bool jump, float turnDeg, float durationSec, bool run)
+        // Queue a bounded walk burst. duration>0 auto-stops after that many simulated
+        // seconds (a burst expires promptly, so a forgotten command can't drift).
+        private void SetMove(float forwardSpeed, float strafeSpeed, bool jump, float turnDeg, float durationSec, bool run)
         {
             lock (_stateLock)
             {
                 _moveLocalZ = Mathf.Clamp(forwardSpeed, -8f, 8f);
+                _moveLocalX = Mathf.Clamp(strafeSpeed, -8f, 8f);
                 _moveJump = jump;
-                _moveRun = run;                          // false => use the game's walk speed
+                _moveRun = run;
                 _yawOffsetDeg = turnDeg;
-                // Walk only for this long, then auto-stop — one command = one burst.
-                _moveUntilTime = durationSec > 0f
-                    ? Time.unscaledTime + durationSec
-                    : 0f; // 0 = run until told otherwise
+                _moveUntilTime = durationSec > 0f ? Time.unscaledTime + durationSec : 0f;
             }
         }
-
 
         // Small unsolicited reactions to stimuli the LLM might miss or react to too
         // slowly. Only fires on state changes; cooldown keeps it from spamming.
@@ -143,7 +120,6 @@ namespace KKLLMNPC
             _ambientStimPrev = _kobold.stimulation;
         }
 
-
         // Say a short ambient line: bubble + console, no chat-window spam.
         private void EmitAmbient(string text)
         {
@@ -160,10 +136,8 @@ namespace KKLLMNPC
             });
         }
 
-
         // direction of stimulation, reused by ambient.
         private float _ambientStimPrev = -1f;
-
 
         // True if the kobold was addressed by its name in the chat text.
         private bool AddressedToMe(string chat)
@@ -174,7 +148,8 @@ namespace KKLLMNPC
             return c.Contains(me) || c.StartsWith(me + ",") || c.StartsWith("hey " + me);
         }
 
-
+        // Hard stop: clears the queued intent AND the controller input immediately,
+        // so the body doesn't coast on a stale direction between think ticks.
         private void StopMove()
         {
             lock (_stateLock) { _moveLocalZ = 0f; _moveJump = false; _moveUntilTime = 0f; _crouch = 0f; }
@@ -186,7 +161,6 @@ namespace KKLLMNPC
             }
         }
 
-
         private void FixedUpdate()
         {
             try { FixedUpdateSafe(); }
@@ -197,7 +171,11 @@ namespace KKLLMNPC
             }
         }
 
-
+        // The only Unity-physics touchpoint for motion. Reads queued movement intent
+        // written by the LLM thread, expends burst timers, probes walls/ledges ahead,
+        // keeps yaw in sync (only when there's actual intent), then writes inputDir +
+        // inputJump + inputWalking + SetInputCrouched on the game's own controller.
+        // Idle → rigidbody velocity is damped (prevents the 'magnetized drift' bug).
         private void FixedUpdateSafe()
         {
             if (_controller == null || _kobold == null) return;
@@ -214,8 +192,8 @@ namespace KKLLMNPC
                 try { if (!_photonView.IsMine) _photonView.RequestOwnership(); } catch (Exception) { }
             }
 
-            float fwd, turn, crouch; bool jump, run; float until;
-            lock (_stateLock) { fwd = _moveLocalZ; turn = _yawOffsetDeg; jump = _moveJump; run = _moveRun; crouch = _crouch; _yawOffsetDeg = 0f; until = _moveUntilTime; }
+            float fwd, strafe, turn, crouch; bool jump; float until;
+            lock (_stateLock) { fwd = _moveLocalZ; strafe = _moveLocalX; turn = _yawOffsetDeg; jump = _moveJump; crouch = _crouch; _yawOffsetDeg = 0f; until = _moveUntilTime; }
 
             // If a go_to target is active, steer toward it (a bounded "approach"
             // behavior); clear it once we're close or the walk burst expired.
@@ -241,13 +219,13 @@ namespace KKLLMNPC
             // Burst timed out — stop before applying any more drive.
             if (until > 0f && Time.unscaledTime >= until)
             {
-                lock (_stateLock) { _moveLocalZ = 0f; _moveUntilTime = 0f; }
-                fwd = 0f;
+                lock (_stateLock) { _moveLocalZ = 0f; _moveLocalX = 0f; _moveUntilTime = 0f; }
+                fwd = 0f; strafe = 0f;
             }
 
             // When there's no active walk command, zero the drive every frame so no
             // residual inputDir lingers between LLM calls (the "magnetize" drift).
-            if (Mathf.Approximately(fwd, 0f))
+            if (Mathf.Approximately(fwd, 0f) && Mathf.Approximately(strafe, 0f))
             {
                 try { _controller.inputDir = Vector3.zero; } catch (Exception) { }
                 // And bleed off the rigidbody's leftover velocity — Friction() alone
@@ -341,24 +319,34 @@ namespace KKLLMNPC
 
             // inputDir is consumed as a world-space direction by the controller's
             // Accelerate(); walls stop it via normal rigidbody collision.
-            Vector3 worldDir = Quaternion.Euler(0, _yawDeg, 0) * Vector3.forward * fwdOut;
+            Vector3 worldDir = Quaternion.Euler(0, _yawDeg, 0) * new Vector3(Mathf.Clamp(strafe, -1f, 1f), 0f, fwdOut);
+            float mag = worldDir.magnitude;
+            if (mag > 1f) worldDir /= mag;
             _controller.inputDir = new Vector3(worldDir.x, 0f, worldDir.z);
             _controller.inputJump = jump;
             // Walk vs run: inputWalking=true scales effectiveSpeed down by the
             // game's walkSpeedMultiplier; default is walk, run only when asked.
-            try { _controller.inputWalking = !run; } catch (Exception) { }
+            // inputWalking=false means "run" which ALSO enables the CharacterControllerAnimator's
+            // body-follows-eye rule (IL: when !inputWalking, facingRot is taken from eyeRot).
+            // We WANT body == eye, so we always run the body in "run" mode here. True walk
+            // speed is still gated by the controller's own speedMultiplier elsewhere.
+            try { _controller.inputWalking = false; } catch (Exception) { }
             try { _controller.SetInputCrouched(crouch); } catch (Exception) { }
             if (jump) lock (_stateLock) { _moveJump = false; } // one-shot
 
-            // Body rotation: NOT driven by us. The game's own LookAtHandler handles
-            // the head; the body turns through locomotion (inputDir direction carried
-            // by the controller's own FixedUpdate). When the kobold idles, its body
-            // keeps whatever bearing it had — that matches real players. Rigidbody
-            // MoveRotation here caused the left-direction drift.
-            //
-            // Head + camera: eyeRot drives absolute world yaw/pitch for the look.
+            // The Game Drives The Body: the CharacterControllerAnimator contains a
+            // LookAtHandler that turns the head AND the hip toward `eyeRot`. The only
+            // way to stop the two systems fighting is to feed the animator the yaw we
+            // actually want the body to face, and write NO rotation to the rigidbody
+            // ourselves. Walking: eyeRot = movement heading (so the animator pivots the
+            // body into the walk direction). Idle: eyeRot = body's current yaw (so the
+            // hips stop chasing and the body just stays put).
             if (_charAnimator != null)
-                _charAnimator.SetEyeRot(new Vector2(_yawDeg, -_pitchDeg));
+            {
+                bool walking = worldDir.sqrMagnitude > 0.0004f;
+                float eyeYaw = walking ? Mathf.Atan2(worldDir.x, worldDir.z) * 57.29578f : BodyYaw();
+                _charAnimator.SetEyeRot(new Vector2(eyeYaw, -_pitchDeg));
+            }
             if (_cam != null)
                 _cam.transform.rotation = Quaternion.Euler(_pitchDeg, _yawDeg, 0f);
 
@@ -433,7 +421,6 @@ namespace KKLLMNPC
             else _lastStim = -1f;
         }
 
-
         // Idle behavior while in a station: wandering gaze + reaction to arousal.
         private float _gazeTimer;
 
@@ -445,12 +432,16 @@ namespace KKLLMNPC
 
         private float _lastMoan;
 
-
         // Heuristic camera-clip detector: the first-person camera sits ahead of the
         // head at _cfgCamForward; if a short forward ray from just behind the camera
         // hits geometry *closer than the camera*, the lens is inside something and
         // the image is mostly face/wall. When detected, ease crouch up (so the head
         // rises with the body as it drops) until it clears or maxes out.
+        // Camera-clip detector: if a short forward ray from behind the camera hits
+        // geometry *closer than the camera offset*, the lens is buried in the face/wall
+        // and the first-person image is useless — ease crouch up so the body drops and
+        // the head+camera clear the surface. Only acts when the model hasn't explicitly
+        // set a crouch level recently.
         private void CheckCameraClip()
         {
             if (!IsAlive(_head) || !IsAlive(_cam)) { _clipSince = -99f; return; }

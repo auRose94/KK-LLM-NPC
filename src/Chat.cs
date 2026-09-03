@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// Real chat via Photon RaiseEvent + local bubble + ambient voice; hears the player.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -45,6 +25,8 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // Photon events: hear what players type into the chat window
         // ------------------------------------------------------------------
+        // Listen for the game's real chat events (Photon CustomChatEvent) — capture player
+        // speech so the LLM hears it and can respond. Filters our own echoes.
         public void OnEvent(ExitGames.Client.Photon.EventData ev)
         {
             try
@@ -88,13 +70,13 @@ namespace KKLLMNPC
             return raw;
         }
 
-
         // What the player should call it in chat / what's in perception as "me".
+        // The kobold's chosen identity — the body prefab name + instance suffix (e.g.
+        // 'AbsolB2'), so multiple NPCs stay distinguishable in chat and logs.
         private string MyName()
         {
             return string.IsNullOrEmpty(_npcName) ? (_kobold != null ? CleanName(_kobold.name) : "NPC") : _npcName;
         }
-
 
         // Chat the player typed within the last ~30s — null otherwise, and only once
         // per distinct message so we don't keep responding to the same line.
@@ -108,7 +90,9 @@ namespace KKLLMNPC
             return _playerChat;
         }
 
-
+        // Speech to the world, three ways at once: floating Chatter bubble above the
+        // body, the game's real chat window (same Photon event the ChatPanel raises),
+        // and a local echo so the player sees their own window too.
         private object ToolSay(JsonObj p)
         {
             string text = p.S("text", "");

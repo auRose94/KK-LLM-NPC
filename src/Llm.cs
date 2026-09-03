@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// Decision loop: payload, JSON-schema act response, tool-call extraction (incl. salvage), plan chaining.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -58,7 +38,6 @@ namespace KKLLMNPC
             t.Start();
         }
 
-
         // Ask the model for a short unprompted reaction to its current perception,
         // then say it out loud. No act schema — pure voice.
         private void CreativeCommentaryWorker(string percep)
@@ -83,7 +62,7 @@ namespace KKLLMNPC
                 var req = (HttpWebRequest)WebRequest.Create(Val(_cfgEndpoint));
                 req.Method = "POST"; req.ContentType = "application/json";
                 if (!string.IsNullOrEmpty(Val(_cfgApiKey))) req.Headers["Authorization"] = "Bearer " + Val(_cfgApiKey);
-                req.Timeout = 15000; req.ReadWriteTimeout = 15000;
+                req.Timeout = 120000; req.ReadWriteTimeout = 120000;
                 byte[] bytes = Encoding.UTF8.GetBytes(body); req.ContentLength = bytes.Length;
                 using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
                 using (var resp = req.GetResponse())
@@ -115,7 +94,6 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("commentary: " + e.Message); }
         }
 
-
         // Ask the world-model a question ("what is that?", "is the bed taken?") with
         // the NPC's current perception as context. Async: answer lands in '_answered'
         // and gets read into perception next tick, and optionally said aloud by the model.
@@ -125,7 +103,9 @@ namespace KKLLMNPC
 
         private volatile bool _answerBusy;
 
-
+        // `ask` tool: send the current question to a worker thread with the perception as
+        // context, without blocking the action loop. Answer appears next tick as 'answered'
+        // and is auto-remembered as a fact.
         private object ToolAsk(JsonObj p)
         {
             string q = p.S("q", "");
@@ -140,7 +120,6 @@ namespace KKLLMNPC
             }
             return new { ok = true, asking = _pendingQuestion, note = "answer delivered next turn as 'answered'" };
         }
-
 
         private void AnswerQuestionWorker()
         {
@@ -167,7 +146,7 @@ namespace KKLLMNPC
                 var req = (HttpWebRequest)WebRequest.Create(Val(_cfgEndpoint));
                 req.Method = "POST"; req.ContentType = "application/json";
                 if (!string.IsNullOrEmpty(Val(_cfgApiKey))) req.Headers["Authorization"] = "Bearer " + Val(_cfgApiKey);
-                req.Timeout = 30000; req.ReadWriteTimeout = 30000;
+                req.Timeout = 120000; req.ReadWriteTimeout = 120000;
                 byte[] bytes = Encoding.UTF8.GetBytes(body); req.ContentLength = bytes.Length;
                 using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
                 using (var resp = req.GetResponse())
@@ -196,10 +175,13 @@ namespace KKLLMNPC
             finally { _answerBusy = false; }
         }
 
-
         // ------------------------------------------------------------------
         // LLM loop: perception -> endpoint -> tool calls -> execute
         // ------------------------------------------------------------------
+        // Perception -> LLM -> tool calls -> execute. The heart. Runs on its own
+        // thread; main-thread Unity access is marshalled through RunOnMainThread. Catches
+        // everything, self-heals, and only talks to the model when in a playable scene
+        // with a body.
         private void LLMLoop()
         {
             // Give the game a moment to load before looking for a body.
@@ -235,11 +217,13 @@ namespace KKLLMNPC
                     object perception = RunOnMainThread(() => BuildPerception(false), 15000);
                     string userJson = Json.Write(perception);
 
-                    // Attach a first-person frame when it actually helps: on schedule,
-                    // right after a bump/block, or after a big turn — not every tick.
+                    // Attach a first-person frame on schedule, on bump, or after turns —
+                    // and ALWAYS if the caption pass is disabled (the action model is then
+                    // the only eyes).
                     _tick++;
                     bool imageDue = _cfgSendImage.Value && (
-                        _tick % Math.Max(1, _cfgImageEvery.Value) == 0
+                        !_cfgVision.Value
+                        || _tick % Math.Max(1, _cfgImageEvery.Value) == 0
                         || (_cfgImageOnBump.Value && _needImageAfterBump)
                         || (_cfgImageOnTurn.Value && Time.unscaledTime - _lastBigTurnTime < 0.5f));
                     string imageB64 = null;
@@ -251,7 +235,8 @@ namespace KKLLMNPC
                         _needImageAfterBump = false;
                     }
 
-                    MaybeStartVisionPass();
+                    // Caption pass only runs if explicitly enabled.
+                    if (_cfgVision.Value) MaybeStartVisionPass();
                     MaybeCreativeCommentary(userJson);
 
                     string reply = QueryLLM(userJson, imageB64);
@@ -272,7 +257,9 @@ namespace KKLLMNPC
             Logger.LogWarning("KKLLMNPC: LLMLoop exited (running=false).");
         }
 
-
+        // POST the perception+memory to the model. Sends response_format: json_schema
+        // (not tools/tool_choice — many chat templates 400 on tool forcing). Model replies
+        // with the act-args object as its content.
         private string QueryLLM(string perceptionJson, string imageB64)
         {
             try
@@ -335,7 +322,7 @@ namespace KKLLMNPC
                 req.ContentType = "application/json";
                 if (!string.IsNullOrEmpty(_cfgApiKey.Value))
                     req.Headers["Authorization"] = "Bearer " + _cfgApiKey.Value;
-                req.Timeout = 30000; req.ReadWriteTimeout = 30000;
+                req.Timeout = 120000; req.ReadWriteTimeout = 120000;
                 byte[] bytes = Encoding.UTF8.GetBytes(body);
                 req.ContentLength = bytes.Length;
                 using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
@@ -361,7 +348,6 @@ namespace KKLLMNPC
                 return null;
             }
         }
-
 
         private void ExecuteToolCalls(string responseJson)
         {
@@ -397,6 +383,11 @@ namespace KKLLMNPC
 
             _lastThought = args.S("thought", _lastThought);
             PushThought(_lastThought);
+            // Track the self-assessment too, so progress notes become visible history.
+            string progress = args.S("progress", "");
+            string why = args.S("why", "");
+            if (progress.Length > 0 || why.Length > 0)
+                PushHistory("eval", progress + (why.Length > 0 ? " (" + why + ")" : ""));
 
             Logger.LogInfo($"act: thought=\"{_lastThought}\"");
 
@@ -418,8 +409,9 @@ namespace KKLLMNPC
             }
         }
 
-
         // One action step: optional say, then the action itself.
+        // One action in a plan: say first (so speech lands on time), then the movement/
+        // interaction itself. outcome is summarized into history so the model sees its effects.
         private void ExecuteStep(JsonObj args)
         {
             string action = args.S("action", "none");
@@ -448,8 +440,9 @@ namespace KKLLMNPC
             else PushHistory(action, say.Length > 0 ? "said" : null);
         }
 
-
         // Short result digest for the history buffer ("used Bed", "blocked", "ok").
+        // Compact the tool result into a few words for the history log
+        // ('walk -> blocked', 'interact -> used BedStation').
         private string SummarizeResult(string action, object result)
         {
             try
@@ -478,8 +471,10 @@ namespace KKLLMNPC
             catch (Exception) { return null; }
         }
 
-
         // Finds the `act` function arguments regardless of how the model formatted them.
+        // Find the act args across any reply shape: real tool_calls, JSON in content,
+        // {"name":...,"arguments":{...}}, {"walk":{...}}, markdown-fenced, or truncated. Salvage
+        // whatever fields we can when a reasoning model runs out of tokens mid-JSON.
         private JsonObj ExtractActArgs(Dictionary<string, object> msg, string content)
         {
             // 1) Proper tool_calls array.
@@ -526,7 +521,6 @@ namespace KKLLMNPC
             return null;
         }
 
-
         private JsonObj UnwrapArgs(string name, string argStr)
         {
             if (string.IsNullOrEmpty(argStr)) return TrySalvageTruncated(argStr) ?? new JsonObj("{}");
@@ -547,7 +541,6 @@ namespace KKLLMNPC
             return new JsonObj(parsed);
         }
 
-
         // Given partial JSON like {"action":"wal...   or   {"action":"walk","say":"hi
         // extract whatever action/say we can with regex so the NPC still acts.
         private JsonObj TrySalvageTruncated(string s)
@@ -559,7 +552,7 @@ namespace KKLLMNPC
             d["action"] = ma.Groups[1].Value;
             var ms = System.Text.RegularExpressions.Regex.Match(s, "\"say\"\\s*:\\s*\"([^\"]*)");
             if (ms.Success) d["say"] = ms.Groups[1].Value;
-            foreach (var num in new[] { "speed","turn_deg","yaw_deg","pitch_deg","x","y","z" })
+            foreach (var num in new[] { "speed","strafe","turn_deg","yaw_deg","pitch_deg","x","y","z" })
             {
                 var mn = System.Text.RegularExpressions.Regex.Match(s, "\"" + num + "\"\\s*:\\s*(-?[0-9.]+)");
                 if (mn.Success) d[num] = double.Parse(mn.Groups[1].Value, CultureInfo.InvariantCulture);
@@ -567,7 +560,6 @@ namespace KKLLMNPC
             Logger.LogWarning("salvaged truncated act args: action=" + d["action"]);
             return new JsonObj(d);
         }
-
 
         private static Dictionary<string, object> TryParseObj(string s)
         {
@@ -587,14 +579,14 @@ namespace KKLLMNPC
             catch (Exception) { return null; }
         }
 
-
         // Adapter so say can be called with a raw string.
         private class TextArgs : JsonObj
         {
             public TextArgs(string text) : base(new Dictionary<string, object> { ["text"] = text }) { }
         }
 
-
+        // Dispatch the LLM's chosen tool. Always returns a result object — never throws —
+        // so a bad tool call is just a 'fail:' line in history, not a crash.
         private object RunTool(string name, JsonObj p)
         {
             try
@@ -628,7 +620,6 @@ namespace KKLLMNPC
             catch (Exception e) { return new { ok = false, reason = e.Message }; }
         }
 
-
         // One mega-tool. Forcing tool_choice = act means the model can never
         // "just reply with text" — every tick yields a structured action.
         // Raw JSON schema for the act-args object — sent as response_format so any
@@ -636,12 +627,21 @@ namespace KKLLMNPC
         private Dictionary<string, object> ActSchema()
         {
             var stepProps = ActionParamProps();
-            stepProps["thought"] = Str("thought", "your goal (multi-step plan summary), <20 words");
+            stepProps["thought"] = Str("thought", "current goal summary, <15 words");
             stepProps["wait"]    = Num("wait", "seconds to pause after THIS action before the next plan step, 0..3");
             var planItems = new Dictionary<string, object> { ["type"] = "object", ["properties"] = stepProps, ["required"] = new object[] { "action" }, ["additionalProperties"] = false };
 
-            var props = ActionParamProps();
-            props["thought"] = Str("thought", "your goal (multi-step plan summary), <20 words");
+            // Root response shape: reasoning fields FIRST so the model works out loud
+            // before naming an action, then the action, then the optional plan.
+            var props = new Dictionary<string, object>
+            {
+                ["progress"] = Str("progress", "one word: what happened with your previous goal (done|blocked|ongoing|changed)"),
+                ["why"]      = Str("why", "one short sentence justifying this action, referencing what you see"),
+                ["thought"]  = Str("thought", "restate your current goal in <15 words"),
+                ["action"]   = ActionParamProps()["action"],
+            };
+            foreach (var kv in ActionParamProps())
+                if (kv.Key != "action") props[kv.Key] = kv.Value;
             props["wait"]    = Num("wait", "seconds to pause after THIS action before the next plan step, 0..3");
             props["plan"]    = new Dictionary<string, object> { ["type"] = new object[] { "array", "null" }, ["description"] = "optional follow-up actions, in order", ["items"] = planItems, ["maxItems"] = 8 };
 
@@ -649,11 +649,10 @@ namespace KKLLMNPC
             {
                 ["type"] = "object",
                 ["properties"] = props,
-                ["required"] = new object[] { "action" },
+                ["required"] = new object[] { "progress", "why", "thought", "action" },
                 ["additionalProperties"] = false,
             };
         }
-
 
         private Dictionary<string, object> ActionParamProps()
         {
@@ -669,6 +668,7 @@ namespace KKLLMNPC
                 ["q"]        = Str("q", "ask: a question about the world ('what is this place?','who is that?') — answered from your current view + perception"),
                 ["crouch"]   = Num("crouch", "0..1 how much to crouch (0=stand, 1=full crouch) — also the state for the 'crouch' action"),
                 ["speed"]    = Num("speed", "walk forward -1..1"),
+                ["strafe"]   = Num("strafe", "walk sideways: +1=right, -1=left, -1..1 (for tight maneuvers, doorways, squeezing past furniture)"),
                 ["duration"] = Num("duration", "walk: seconds to keep going, 0.1..8 (default 2, then auto-stop)"),
                 ["turn_deg"] = Num("turn_deg", "walk/look deg turn (+right/-left); nearby.dir tells you which way"),
                 ["yaw_deg"]  = Num("yaw_deg", "look abs yaw"),
@@ -679,7 +679,6 @@ namespace KKLLMNPC
                 ["sweep"]  = Num("sweep", "look_around: degrees to sweep around (default 120)"),
             };
         }
-
 
         private Dictionary<string, object> Num(string n, string d) { return new Dictionary<string, object> { ["type"] = new object[] { "number", "null" }, ["description"] = d }; }
 

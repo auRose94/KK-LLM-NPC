@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// Possession, teardown, camera, ownership; reagent/egg/penetration listeners and equipment awareness.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -73,7 +53,6 @@ namespace KKLLMNPC
             catch (Exception) { }
         }
 
-
         private void NotifyDickTick(KKPenetratorListener listener, string hole, float dist)
         {
             try
@@ -97,7 +76,6 @@ namespace KKLLMNPC
             catch (Exception) { }
         }
 
-
         private string DickInInfo()
         {
             lock (_dickIn)
@@ -113,11 +91,11 @@ namespace KKLLMNPC
             }
         }
 
-
         // Same but for when THIS kobold's own dick is inside someone/something.
         private readonly Dictionary<object, PenState> _dickIn = new Dictionary<object, PenState>();
 
-
+        // Pick (or keep) a kobold the AI can drive. Skips already-LLM-claimed and player
+        // bodies, prefers the nearest free AI kobold, falls back to map-wide if none in range.
         private bool EnsureBody()
         {
             if (_kobold != null && IsAlive(_kobold)) return true;
@@ -128,42 +106,63 @@ namespace KKLLMNPC
                 if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
                     playerPos = pp.kobold.transform.position;
 
+                // Debug: count kobolds by control type so we can tell "none on map" from
+                // "exists but not AI-controlled" from "all claimed".
+                int total = 0, ai = 0, claimed = 0, playerControlled = 0;
                 Kobold best = null; float bestD = float.MaxValue;
                 foreach (var k in FindObjectsOfType<Kobold>())
                 {
                     if (k == null) continue;
+                    total++;
+                    int id = k.GetInstanceID();
+                    if (LLMNPCPlugin.IsClaimedByAnyLLM(id)) { claimed++; continue; }
                     var desc = k.GetComponent<CharacterDescriptor>();
                     if (desc == null) continue;
-                    if (desc.GetPlayerControlled() != CharacterDescriptor.ControlType.AIPlayer) continue; // only unoccupied
+                    var ct = desc.GetPlayerControlled();
+                    if (ct == CharacterDescriptor.ControlType.AIPlayer) ai++;
+                    else playerControlled++;
+                    if (ct != CharacterDescriptor.ControlType.AIPlayer) continue;
                     float d = Vector3.Distance(k.transform.position, playerPos);
                     if (d < bestD) { bestD = d; best = k; }
                 }
-                // Fall back to *any* AI kobold on the map if none is within range —
-                // better to possess far away than to stay inert.
-                if (best == null) { Logger.LogInfo("KKLLMNPC: no AI kobold found on map."); return false; }
+                if (best == null)
+                {
+                    Logger.LogInfo($"KKLLMNPC{InstanceSuffix}: no AI kobold found (total={total} ai={ai} claimed={claimed} player={playerControlled}).");
+                    return false;
+                }
                 if (bestD > _cfgAutoFindRange.Value)
-                    Logger.LogInfo($"KKLLMNPC: nearest AI kobold is {F(bestD)}m (AutoFindRange={_cfgAutoFindRange.Value}m) — possessing anyway.");
+                    Logger.LogInfo($"KKLLMNPC{InstanceSuffix}: nearest AI kobold is {F(bestD)}m (AutoFindRange={_cfgAutoFindRange.Value}m) — possessing anyway.");
                 Possess(best);
                 return true;
             }
             catch (Exception e) { Logger.LogError("EnsureBody: " + e); return false; }
         }
 
-
+        // Take control of a wild kobold: claim ownership across instances, suppress its
+        // wander/look AI, steal its PhotonView so our inputDir writes stick (controller only
+        // drives when photonView.IsMine), attach senses, and wire belly/penetration listeners.
         private void Possess(Kobold target)
         {
             if (target == null) return;
             TeardownBody();
             if (!IsAlive(target)) return; // died between selection and possess
             _kobold = target;
+            _currentKoboldId = target.GetInstanceID();
+            // Register so any other LLM instance won't grab this body.
+            lock (LLMNPCPlugin.ClaimedKobolds) { LLMNPCPlugin.ClaimedKobolds.Add(_currentKoboldId); }
             _npcName = PickName(target);   // choose a name for this body
             Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'");
             _yawDeg = target.transform.eulerAngles.y; // start from current facing
             _controller = target.GetComponent<KoboldCharacterController>();
             _descriptor = target.GetComponent<CharacterDescriptor>();
-            _user       = target.GetComponentInChildren<User>(true);
             _grabber    = target.GetComponentInChildren<Grabber>(true);
             _charAnimator = target.GetComponentInChildren<CharacterControllerAnimator>(true);
+            // Kill any in-flight rotation coroutines started before we took the body — they
+            // write rigidbody.rotation outside our control and fight with the steering.
+            if (_charAnimator != null)
+            {
+                try { _charAnimator.StopAllCoroutines(); } catch (Exception) { }
+            }
 
             // Deterministic ownership: transfer to us *and* request (covers both
             // Takeover and Request Photon transfer modes). Re-assert until IsMine.
@@ -172,10 +171,12 @@ namespace KKLLMNPC
             try { if (_photonView != null && !_photonView.IsMine) _photonView.RequestOwnership(); } catch (Exception) { }
 
             if (_descriptor != null) _descriptor.SetPlayerControlled(CharacterDescriptor.ControlType.NetworkedPlayer);
+            // Remove the built-in AI entirely — disabling leaves them free to re-activate
+            // (station exit, ragdoll recover, scene refresh) and fight our input stream.
             var ai = target.GetComponentInChildren<KoboldAIPossession>(true);
-            if (ai != null) ai.enabled = false;
+            if (ai != null) { try { UnityEngine.Object.Destroy(ai); } catch (Exception) { } }
             var seeker = target.GetComponentInChildren<KoboldSeeker>(true);
-            if (seeker != null) seeker.enabled = false;
+            if (seeker != null) { try { UnityEngine.Object.Destroy(seeker); } catch (Exception) { } }
             // Stop the game's LookAtHandler from driving the head/body — we manage it,
             // otherwise it fights our rigidbody steering and produces the sideways drift.
             if (_charAnimator != null) { try { _charAnimator.SetLookEnabled(false); } catch (Exception) { } }
@@ -205,12 +206,10 @@ namespace KKLLMNPC
             });
         }
 
-
         // ------------------------------------------------------------------
         // reagent awareness
         // ------------------------------------------------------------------
         private ScriptableReagent _eggReagent; // resolved lazily
-
 
         // How much egg reagent the kobold is carrying (needs a laying station).
         // Game rule: OvipositionSpot.CanUse = belly egg volume > 5 AND energy > 1.
@@ -226,13 +225,14 @@ namespace KKLLMNPC
             catch (Exception) { return 0f; }
         }
 
-
         private bool IsReadyToLayEgg(Kobold k)
         {
             try { return GetEggVolume(k) > 5f && k.GetEnergy() > 1f; } catch (Exception) { return false; }
         }
 
-
+        // bellyContainer.OnChange fires on every fluid event (drink/spray/flood/metabolism).
+        // The FIRST call after possession is just a snapshot of existing contents — treated
+        // as baseline, never reported as a 'drank X' event.
         private void SubscribeBelly(Kobold target)
         {
             UnsubscribeBelly();
@@ -249,17 +249,17 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("subscribe belly: " + e.Message); }
         }
 
-
         private void UnsubscribeBelly()
         {
             try { if (_bellySubscribed != null) { _bellySubscribed.OnChange -= OnBellyReagentsChanged; _bellySubscribed = null; } }
             catch (Exception) { }
         }
 
-
         // Fired by the game when the kobold's belly container changes. We translate
         // the inject type + reagent mix into a natural-language event the LLM sees:
         //   drank/metabolized/sprayed/flooded/vacuumed "Water" (5ml) ...
+        // Translate belly OnChange into natural language and queue for next perception.
+        // Dedupes identical mixes so unchanged contents don't re-report.
         private void OnBellyReagentsChanged(ReagentContents contents, GenericReagentContainer.InjectType injectType)
         {
             try
@@ -304,7 +304,6 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("reagent event: " + e.Message); }
         }
 
-
         // Enumerate a ReagentContents ("Water x5ml" or "Water+Cum x3ml") — falls back
         // to "something" if the database lookup misses.
         private string DescribeContents(ReagentContents contents)
@@ -330,7 +329,6 @@ namespace KKLLMNPC
             catch (Exception) { return null; }
         }
 
-
         // Drain queued reagent events as a list of strings, clearing them.
         private List<object> DrainReagentEvents()
         {
@@ -342,7 +340,6 @@ namespace KKLLMNPC
             }
         }
 
-
         // True when the possessed kobold is inside an animation station (bed, mount, etc.).
         // The game tracks this on CharacterControllerAnimator; used to tell the model
         // it's stuck and to gate movement (you can't walk out of a station).
@@ -352,7 +349,8 @@ namespace KKLLMNPC
             catch (Exception) { return false; }
         }
 
-
+        // Release all hooks on the current body: camera, belly reagent subscriptions,
+        // penetrable/penetrator listeners, ownership claim — restore native AI control.
         private void TeardownBody()
         {
             if (_cam != null) { try { Destroy(_cam.gameObject); } catch (Exception) { } _cam = null; }
@@ -364,13 +362,16 @@ namespace KKLLMNPC
             {
                 try { _descriptor.SetPlayerControlled(CharacterDescriptor.ControlType.AIPlayer); } catch (Exception) { }
             }
-            _kobold = null; _controller = null; _descriptor = null; _user = null; _grabber = null;
+            _kobold = null; _controller = null; _descriptor = null; _grabber = null;
             _charAnimator = null; _head = null; _photonView = null;
             _navTarget = null; _navTargetName = null;
+            if (_currentKoboldId >= 0) { lock (LLMNPCPlugin.ClaimedKobolds) { LLMNPCPlugin.ClaimedKobolds.Remove(_currentKoboldId); } _currentKoboldId = -1; }
             StopMove();
         }
 
-
+        // First-person eye camera: sits slightly in FRONT of the head to avoid face
+        // clipping, disabled during gameplay, renders on demand. Near clip + forward offset
+        // are config-tuned per kobold body model (some snouts are longer).
         private void SetupCamera()
         {
             if (_head == null) return;
@@ -390,7 +391,6 @@ namespace KKLLMNPC
             _rt.Create();
             _cam.targetTexture = _rt;
         }
-
 
         // ------------------------------------------------------------------
         // body awareness: what equipment does the possessed kobold have
@@ -418,7 +418,6 @@ namespace KKLLMNPC
             catch (Exception) { return new { with = "unknown", penis = false, penetrables = 0 }; }
         }
 
-
         // ------------------------------------------------------------------
         // penetration awareness
         // ------------------------------------------------------------------
@@ -427,7 +426,6 @@ namespace KKLLMNPC
 
         private readonly List<KKPenetratorListener> _penListeners
             = new List<KKPenetratorListener>();
-
 
         // The penetrator-side mirror: when THIS kobold's dick is inside something.
         private class KKPenetratorListener : PenetrationTech.PenetratorListener
@@ -465,7 +463,9 @@ namespace KKLLMNPC
             }
         }
 
-
+        // Both directions: listen to every Penetrable on the body (someone entering us)
+        // AND every Penetrator (our dick inside something). Subscriptions are torn down on
+        // teardown / body-swap.
         private void SyncPenetrationSubscriptions(Kobold target)
         {
             UnsubscribePenetrables();
@@ -497,7 +497,6 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("subscribe penetrables: " + e.Message); }
         }
 
-
         private void UnsubscribePenetrables()
         {
             try
@@ -511,7 +510,6 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
         }
-
 
         // Fires per-frame while a penetrator is inside (and on exit with depth 0).
         private void OnPenetrationTick(PenetrationTech.Penetrable penetrable,
@@ -554,7 +552,6 @@ namespace KKLLMNPC
             catch (Exception) { }
         }
 
-
         // Rough hole classification from the penetrable's transform name/location.
         private string ClassifyPenetrable(PenetrationTech.Penetrable pen)
         {
@@ -569,7 +566,6 @@ namespace KKLLMNPC
             }
             catch (Exception) { return "hole"; }
         }
-
 
         private string PenetrationInfo()
         {
@@ -589,7 +585,6 @@ namespace KKLLMNPC
             }
         }
 
-
         // True if any penetrator was inside within the last ~3 seconds.
         private bool IsPenetrated()
         {
@@ -602,7 +597,6 @@ namespace KKLLMNPC
             }
         }
 
-
         // Same for the kobold's own dick being inside something.
         private bool IsDickInside()
         {
@@ -614,7 +608,6 @@ namespace KKLLMNPC
                 return false;
             }
         }
-
 
         // The transform of whoever is currently penetrating us / we're inside —
         // most recently active one wins. Used to look at your partner during sex.

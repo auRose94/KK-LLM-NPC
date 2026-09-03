@@ -1,24 +1,5 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
+// Plugin entry: config, lifecycle, main-thread marshalling, scene gating, hot-reload.
 //
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -39,9 +20,30 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.0.0")]
+    // Instance ID is baked in per build copy (KKLLMNPC1..4.dll) so multiple instances
+    // can run side by side, each possessing its own kobold.
+    [BepInPlugin("com.kk.llmnpc" + LLMNPCPlugin.InstanceSuffix, "KKLLMNPC" + LLMNPCPlugin.InstanceSuffix, "1.0.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
+        internal const string InstanceSuffix =
+#if KK_INSTANCE_2
+            "2";
+#elif KK_INSTANCE_3
+            "3";
+#elif KK_INSTANCE_4
+            "4";
+#else
+            "";
+#endif
+
+        // Shared across all loaded copies: kobolds currently driven by an LLM, so
+        // instances don't double-possess the same body.
+        internal static readonly HashSet<int> ClaimedKobolds = new HashSet<int>();
+        private int _currentKoboldId = -1;
+        internal static bool IsClaimedByAnyLLM(int koboldInstanceId)
+        {
+            lock (ClaimedKobolds) { return ClaimedKobolds.Contains(koboldInstanceId); }
+        }
         // ---- config ----
         private ConfigEntry<string> _cfgEndpoint;
 
@@ -102,14 +104,12 @@ namespace KKLLMNPC
 
         private string _lastSceneName;
 
-
         // ---- runtime state (main thread) ----
         private SynchronizationContext _mainContext;
 
         private Thread _llmThread;
 
         private volatile bool _running;
-
 
         // The possessed body + its drivable parts.
         private Kobold _kobold;
@@ -119,8 +119,6 @@ namespace KKLLMNPC
         private CharacterDescriptor _descriptor;
 
         private CharacterControllerAnimator _charAnimator;
-
-        private User _user;
 
         private Grabber _grabber;
 
@@ -136,12 +134,10 @@ namespace KKLLMNPC
 
         private float _lastRelaunchTry;
 
-
         // Current go_to destination (drives our own movement toward it).
         private Vector3? _navTarget;
 
         private string _navTargetName;
-
 
         // Short-term memory so the NPC doesn't forget what it was doing each tick.
         // Hot-reload support.
@@ -153,7 +149,6 @@ namespace KKLLMNPC
 
         private volatile bool _dllChangedQueued;
 
-
         private string _lastThought = "just woke up";
 
         private string _lastAction = "none";
@@ -161,7 +156,6 @@ namespace KKLLMNPC
         private int _tick;
 
         private string _blockedInfo;
-
 
         // Ambient creative voice: every N ticks the model is invited to comment on
         // what it sees/feels — its own words, not canned barks.
@@ -173,10 +167,8 @@ namespace KKLLMNPC
 
         private float? _ledgeDrop;   // measured drop height ahead (m), if any, for perception
 
-
         // The name this kobold calls itself, chosen once per body on possess.
         private string _npcName;
-
 
         // What the player actually said in chat recently (fed to the LLM so it can respond).
         private volatile bool _chatCallbackRegistered;
@@ -184,7 +176,6 @@ namespace KKLLMNPC
         private string _playerChat;
 
         private float _playerChatTime;
-
 
         // Reagent events since last perception (drank water, metabolized, sprayed...).
         private readonly Queue<string> _reagentEvents = new Queue<string>();
@@ -194,7 +185,6 @@ namespace KKLLMNPC
         private bool _bellySnapshotPending; // skip the initial OnChange burst on possess
 
         private string _lastBellySummary = "";  // used to suppress "same contents" repeats
-
 
         // Short rolling history of the last few decisions so the model can see what
         // it just did and what came of it (e.g. "walk -> blocked", "interact -> used Bed").
@@ -209,13 +199,11 @@ namespace KKLLMNPC
 
         private const int ThoughtHistoryLen = 6;
 
-
         // Long-term facts the model can append to ("bed is upstairs", "player is
         // friendly...") and read back every turn. Cap keeps the prompt bounded.
         private readonly List<string> _facts = new List<string>();
 
         private const int FactCap = 24;
-
 
         private void PushHistory(string action, string summary)
         {
@@ -223,7 +211,6 @@ namespace KKLLMNPC
             _history.AddLast(action + (string.IsNullOrEmpty(summary) ? "" : "->" + summary));
             while (_history.Count > HistoryLen) _history.RemoveFirst();
         }
-
 
         private string HistoryJson()
         {
@@ -240,7 +227,6 @@ namespace KKLLMNPC
             return parts.ToString();
         }
 
-
         private void PushThought(string t)
         {
             if (string.IsNullOrEmpty(t)) return;
@@ -248,7 +234,6 @@ namespace KKLLMNPC
                 _thoughtHistory.AddLast(t);
             while (_thoughtHistory.Count > ThoughtHistoryLen) _thoughtHistory.RemoveFirst();
         }
-
 
         private string ThoughtHistoryJson()
         {
@@ -265,7 +250,6 @@ namespace KKLLMNPC
             return sb.ToString();
         }
 
-
         private string FactsJson()
         {
             if (_facts.Count == 0) return "[]";
@@ -281,7 +265,6 @@ namespace KKLLMNPC
             return sb.ToString();
         }
 
-
         private void RememberFact(string fact)
         {
             if (string.IsNullOrWhiteSpace(fact)) return;
@@ -293,10 +276,13 @@ namespace KKLLMNPC
             while (_facts.Count > FactCap) _facts.RemoveAt(0); // drop oldest when full
         }
 
-
+        // Capture the main SynchronizationContext, bind config, start the LLM thread,
+        // wire hot-reload watchers, and log the chosen instance suffix. Everything must be
+        // exception-safe — at Awake time the chainloader is fragile.
         private void Awake()
         {
             _mainContext = SynchronizationContext.Current;
+            try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
 
             _cfgEndpoint     = Config.Bind("LLM", "Endpoint", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions URL");
             _cfgModel        = Config.Bind("LLM", "Model", "local-model", "Model name to request");
@@ -309,15 +295,18 @@ namespace KKLLMNPC
                 "When you arrive in a new body, introduce yourself briefly via 'say' (your name + a hello). " +
                 "Every turn, pick a goal. Priorities: (1) if the player talked to you ('heard'), respond with 'say'; (2) if 'needs.eggs' says ready_to_lay, find a 'nest' station and use it; (3) when 'stim' is up, find a partner station or another kobold and play with it; (4) player nearby → walk over, say hi, play with them; (5) otherwise explore new rooms/landmarks. " +
                 "Resting on a bed only when you're too tired to keep going (energy below ~0.2) — never just to top off. " +
-                "Then pick ONE action toward it. 'vis_go' is the vision pass's bearing advice (it can see the image) — usually follow it unless your memory says otherwise. " +
-                "nearby 'i' field categories: bed / toilet / bath / nest / play / seat / door / bodyswap / machine (':busy' = taken). " +
+                "EVERY call: first fill 'progress' (one word: done | blocked | ongoing | changed — how did your last goal go), then 'why' (one sentence justifying THIS action with what you actually see — don't plan hypothetically), then 'thought' (restate your current goal in <15 words). " +
+                "These self-evaluations are REQUIRED. A 'blocked' progress means try something different, don't repeat. " +
+                "Then pick ONE action toward it. When 'image' is attached, that's what you're actually seeing right now — you have first-person vision, treat it as your own eyes. " +
+                "nearby 'i' field categories: bed / toilet / bath / nest / play / seat / door / bodyswap / machine (':busy' = taken). 'dir' is a word (front-left etc.); 'dir_deg' is the *signed degrees* to turn — feed it straight into walk(turn_deg=dir_deg) or use it to decide whether to go_to(name). " +
+                "Don't compute directions from coordinates — the 'dir'/'dir_deg' fields already did it. To reach a named station, call go_to(name) — it resolves. " +
                 "needs.eggs: egg amount in your belly and whether you're ready_to_lay; to lay, find a 'nest' station and use it — the egg comes out there. " +
                 "To use one: get within ~2m, turn to face it, THEN interact — interact uses the closest thing in front of you. " +
                 "'body' tells you your equipment. Some stations only fit some bodies — if interact says cannot_use on a 'play'/'bed'/'breeding' station, try another; on two-sided stations the first user picks the role. " +
                 "When 'penetrated' or 'penetrating' is set, you're mid-play with someone — enjoy it and respond via 'say'+body language; guide them if you want more. " +
                 "ask(q='...') to ponder the world — your question+perception go to your inner world-model, answer appears next turn as 'answered'. " +
-                "Tools: walk(duration,turn_deg,run), walk_ray(ray/ray_deg), go_to(name like 'bed'/'toilet'/'nest'/'player' or x,z), look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z), interact, grab(multi), drop, say, remember(mem=fact), status, none. " +
-                 "Rays: k=kobold p=player u=usable w=wall barrier=low sill/window n=nothing; rows p=d/l/u. " +
+                "Tools: walk(duration,turn_deg,run,strafe) [strafe=+right/-left for tight squeezes, doorways, backing up], walk_ray(ray/ray_deg), go_to(name like 'bed'/'toilet'/'nest'/'player' or x,z), look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z), interact, grab(multi), drop, say, remember(mem=fact), status, none. " +
+                 "Rays: k=kobold p=player u=usable w=wall barrier=low sill/window n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees). Big tall w = wall; small h = furniture; k/p = living. " +
                  "ground: ahead=clear/step(auto)/sill(climbable)/wall; drop=distance to ledge. walls=blocked sides within arm reach. " +
                  "clearance=8-direction wall distances (blocked/close/near/open) — steer toward open. look_around scans the view and lists what's in each sector. " +
                  "history=recent actions+outcomes; memory=recent goals; facts=what you've learned. " +
@@ -329,13 +318,13 @@ namespace KKLLMNPC
             _cfgImageEvery   = Config.Bind("LLM", "ImageEveryNTicks", 6, "Baseline: attach an image every N ticks even without a trigger");
             _cfgImageOnBump  = Config.Bind("LLM", "ImageOnBump", true, "Attach a fresh image right after blocked/bump so the model sees what stopped it");
             _cfgImageOnTurn  = Config.Bind("LLM", "ImageOnTurn", true, "Attach an image after large turns (>=30 deg) so it sees the new view");
-            _cfgMaxTokens    = Config.Bind("LLM", "MaxTokens", 640, "Max response tokens (reasoning models burn tokens on thought before the action — keep this high enough to fit both)");
+            _cfgMaxTokens    = Config.Bind("LLM", "MaxTokens", 1024, "Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON)");
             _cfgTemperature  = Config.Bind("LLM", "Temperature", 0.3f, "Sampling temperature (lower = faster, more deterministic)");
             _cfgStepDelay    = Config.Bind("LLM", "PlanStepDelay", 0.35f, "Seconds between each action in a chained plan");
             _cfgMaxPlan      = Config.Bind("LLM", "PlanMaxSteps", 8, "Max actions the model may queue in one response (hard cap)");
             _cfgCommentEvery = Config.Bind("LLM", "CommentEveryNTicks", 5, "Every N ticks, invite a free 'comment' — the model voices its own take on surroundings (0 = off)");
             _cfgCommentTemp  = Config.Bind("LLM", "CommentTemp", 0.9f, "Sampling temperature for free commentary");
-            _cfgVision       = Config.Bind("Vision", "Enabled", true, "Background vision pass: caption the first-person view on another thread and feed it into the next perception");
+            _cfgVision       = Config.Bind("Vision", "Enabled", false, "Background vision CAPTION pass. When false the action model sees the first-person image directly instead of a caption (default: off — direct image is more useful than a lossy caption). Turn on only if your action model can't read images.");
             _cfgVisionEvery  = Config.Bind("Vision", "EveryNTicks", 3, "Run the vision pass every N action ticks (lower = more aware, slower)");
             _cfgVisionPrompt = Config.Bind("Vision", "Prompt",
                 "You are the SPATIAL reasoner for a kobold NPC. Produce a compact SCENE REPORT: (a) landmarks/stations/people in view with a rough bearing, (b) which directions are OPEN to walk (-90 left .. +90 right), (c) any hazard or drop. " +
@@ -343,7 +332,7 @@ namespace KKLLMNPC
                 "Example: 'play station left, bathroom ahead, friend right | open ahead and left | go:-45:play station'." ,
                 "Scene-report + navigation instruction for the vision pass");
 
-            _cfgVisModel     = Config.Bind("VisionModel", "Model", "", "Vision-capable model name for the scene-caption pass (e.g. llava / qwen2-vl). Blank = use LLM.Model (which must then be a vision model)");
+            _cfgVisModel     = Config.Bind("VisionModel", "Model", "", "Vision model for the scene-caption pass (only used if [Vision] Enabled=true; off by default). Blank = use LLM.Model");
             _cfgVisEndpoint  = Config.Bind("VisionModel", "Endpoint", "", "Chat-completions URL for the vision model. Blank = use LLM.Endpoint");
             _cfgVisApiKey    = Config.Bind("VisionModel", "ApiKey", "", "Bearer token for the vision endpoint. Blank = use LLM.ApiKey");
             _cfgVisMaxTokens = Config.Bind("VisionModel", "MaxTokens", 80, "Caption token cap (short = fast)");
@@ -370,7 +359,6 @@ namespace KKLLMNPC
                 Logger.LogError("KKLLMNPC: failed to start LLM thread: " + e);
             }
         }
-
 
         private void StartWatchers()
         {
@@ -404,14 +392,12 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("dll watcher: " + e.Message); }
         }
 
-
         private void StopWatchers()
         {
             try { if (_cfgWatcher != null) { _cfgWatcher.EnableRaisingEvents = false; _cfgWatcher.Dispose(); } } catch (Exception) { }
             try { if (_dllWatcher != null) { _dllWatcher.EnableRaisingEvents = false; _dllWatcher.Dispose(); } } catch (Exception) { }
             _cfgWatcher = null; _dllWatcher = null;
         }
-
 
         private void OnDestroy()
         {
@@ -423,14 +409,12 @@ namespace KKLLMNPC
             try { _llmThread?.Join(1500); } catch (Exception) { }
         }
 
-
         // Reading helpers: blank/whitespace config values fall back to the entry's
         // own default so a user can set a prompt to "" and get the built-in text.
         private static string Val(ConfigEntry<string> e)
         {
             return string.IsNullOrWhiteSpace(e.Value) ? (string)e.DefaultValue : e.Value;
         }
-
 
         // ------------------------------------------------------------------
         // main-thread marshalling (same pattern as UnityMCP)
@@ -444,7 +428,8 @@ namespace KKLLMNPC
 
         private int _mainThreadId = -1;
 
-
+        // Main thread work: capture the sync context once, register chat listener once
+        // Photon is ready, restart watchdog if the LLM thread died, drain hot-reload queues.
         private void Update()
         {
             // Register the Photon chat listener once Photon is up, on the main thread.
@@ -503,13 +488,11 @@ namespace KKLLMNPC
             }
         }
 
-
         private System.Collections.IEnumerator RestartAfterSecond()
         {
             for (int i = 0; i < 5; i++) yield return new WaitForSecondsRealtime(0.4f);
             RestartPlugin();
         }
-
 
         // Called when a new DLL is dropped in. A BepInEx plugin assembly can't be
         // unloaded from the default context, so we *gracefully reset* ourselves:
@@ -517,6 +500,10 @@ namespace KKLLMNPC
         // load (or if the chainloader re-creates us) the new code takes over fully;
         // in-session this at least stops the old loop cleanly and reloads config so
         // behavior changes apply immediately.
+        // Called when the DLL on disk changed (build.sh re-copied). Gracefully stops the
+        // LLM thread, releases the body, resets state, reloads config, relaunches. The live
+        // IL stays the old one until BepInEx reloads the plugin — in-session this means at
+        // least fresh config applies.
         private void RestartPlugin()
         {
             // Only restart when actually in a playable scene and the LLM loop is
@@ -554,8 +541,10 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogError("KKLLMNPC: restart failed: " + e); }
         }
 
-
-        private object RunOnMainThread(Func<object> fn, int timeoutMs = 15000)
+        // Execute fn on the game's main thread, blocking the caller. If no main context
+        // is captured yet, refuses with InvalidOperationException (never touch Unity API
+        // off-main-thread — that's a native crash).
+        private object RunOnMainThread(Func<object> fn, int timeoutMs = 120000)
         {
             if (!_mainReady || _mainContext == null)
             {
@@ -590,12 +579,13 @@ namespace KKLLMNPC
             try { fn(); } catch (Exception e) { Logger.LogError(e); }
         }
 
-
         // ------------------------------------------------------------------
         // body acquisition / teardown
         // ------------------------------------------------------------------
         // Runs on the main thread. True once a scene other than the configured
         // blocked ones (menu/loading) is active AND the local player exists.
+        // GameManager.InLevel() + BlockedScenes + player present — the loop idles until
+        // we're actually in the world.
         private bool IsPlayableScene()
         {
             try
@@ -623,7 +613,6 @@ namespace KKLLMNPC
             catch (Exception) { return false; }
         }
 
-
         private void MarkScene(string key)
         {
             if (key == _lastSceneName) return;
@@ -631,14 +620,12 @@ namespace KKLLMNPC
             Logger.LogInfo("KKLLMNPC: idle (" + key + ").");
         }
 
-
         // ------------------------------------------------------------------
         // helpers
         // ------------------------------------------------------------------
         // Unity overloads == on Object to fake-null destroyed objects; `is null`
         // bypasses that. This catches both real-null and destroyed.
         private static bool IsAlive(UnityEngine.Object o) => o != null;
-
 
         // Mathf.MoveTowardsAngle doesn't exist in this Unity build's Mathf shim — hand-roll.
         private static float MoveAngleTowards(float current, float target, float maxDelta)
@@ -648,7 +635,6 @@ namespace KKLLMNPC
             return Mathf.Repeat(current + Mathf.Sign(d) * maxDelta, 360f);
         }
 
-
         // RenderTexture.IsCreated() is not available in this Unity build — use
         // width/height as a proxy for a successfully- Create()d texture.
         private static bool RtCreated(RenderTexture rt)
@@ -656,7 +642,6 @@ namespace KKLLMNPC
             try { return rt != null && rt.width > 0 && rt.height > 0; }
             catch (Exception) { return false; }
         }
-
 
         private string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
     }

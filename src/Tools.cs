@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// act tool implementations (walk, look, go_to, interact, say, memory, crouch, ...).
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -57,14 +37,14 @@ namespace KKLLMNPC
             lock (_stateLock) { _yawDeg = yaw; }
             // Actually start walking there (bounded burst) so move_to isn't a no-op.
             float dur = Mathf.Clamp(dist / 2f, 0.3f, 8f);
-            SetMove(1f, false, 0f, dur, p.B("run", false));
+            SetMove(1f, 0f, false, 0f, dur, p.B("run", false));
             return new { ok = true, dist = F(dist), walked_for = F(dur) };
         }
-
 
         private object ToolWalk(JsonObj p)
         {
             float speed = p.F("speed", 1f);
+            float strafe = p.F("strafe", 0f);         // NEW: right=+/left=-, -1..1
             bool jump = p.B("jump", false);
             float turn = p.F("turn_deg", 0f);
             // Default a 2s burst so a forgotten duration can't make it walk forever.
@@ -72,16 +52,17 @@ namespace KKLLMNPC
             bool run = p.B("run", false); // default: walk
             if (_photonView != null && !_photonView.IsMine && PhotonNetwork.InRoom)
                 Logger.LogWarning($"walk: not Photon owner (owner={_photonView.Owner?.NickName ?? "?"}) — movement won't apply");
-            SetMove(speed, jump, 0f, dur, run);
+            SetMove(speed, strafe, jump, 0f, dur, run);
             if (Mathf.Abs(turn) > 0.001f)
                 lock (_stateLock) { _yawOffsetDeg += turn; }
             return new { ok = true, speed, jump, turn_deg = turn, duration = dur, run };
         }
 
-
         // Steer+walk toward one of the raycast fan directions the model can see.
         // The rays share the vision camera's yaw basis, so a ray index (or signed
         // degrees left/right of center) maps directly onto a camera-relative heading.
+        // Camera-relative steering: pick one of the raycast fan rays by index (left→right
+        // -1=center) or signed degrees left/right of camera center, and walk there.
         private object ToolWalkRay(JsonObj p)
         {
             float speed = p.F("speed", 1f);
@@ -107,10 +88,9 @@ namespace KKLLMNPC
                 _yawDeg = Mathf.Repeat(_yawDeg + deltaDeg, 360f);
                 yawOut = _yawDeg;
             }
-            SetMove(speed, jump, 0f, dur, run);
+            SetMove(speed, p.F("strafe", 0f), jump, 0f, dur, run);
             return new { ok = true, yaw = F(yawOut), dur = F(dur), run };
         }
-
 
         private object ToolLookAround(JsonObj p)
         {
@@ -151,7 +131,6 @@ namespace KKLLMNPC
             return new { ok = true, turning_to_sweep = sweep, scan = seen };
         }
 
-
         private object ToolCrouch(JsonObj p)
         {
             float amount = Mathf.Clamp01(p.F("crouch", 1f));
@@ -159,10 +138,11 @@ namespace KKLLMNPC
             return new { ok = true, crouch = amount, note = amount >= 0.05f ? "crouching" : "standing" };
         }
 
-
         // Path the body toward a world position or a named place/usable. The game's
         // NavMesh API isn't accessible from this Unity build, so this drives our own
         // movement: face the target + walk with obstacle auto-steer (from FixedUpdate).
+        // Autonomous approach: face a named place / world position and walk there with
+        // obstacle auto-steer (no real NavMesh access available; steering is local).
         private object ToolGoTo(JsonObj p)
         {
             if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
@@ -184,10 +164,9 @@ namespace KKLLMNPC
             float yaw = Mathf.Atan2(to.x, to.z) * 57.29578f;
             lock (_stateLock) { _yawDeg = yaw; }
             _navTarget = new Vector3(target.x, 0, target.z);
-            SetMove(1f, false, 0f, Mathf.Clamp(dist / 2f, 0.3f, 12f), run);
+            SetMove(1f, 0f, false, 0f, Mathf.Clamp(dist / 2f, 0.3f, 12f), run);
             return new { ok = true, to = _navTargetName ?? "position", dist = F(dist), note = "walking with obstacle steering; re-issue go_to to update heading" };
         }
-
 
         // Resolve a human-ish name ("bed", "toilet", "player", "door") to a world
         // position from what we can currently find around the map body.
@@ -219,8 +198,9 @@ namespace KKLLMNPC
             return best != null ? best.transform.position : (Vector3?)null;
         }
 
-
         // Store a fact in long-term memory ("bed upstairs", "player is friendly").
+        // Deliberately store a fact (long-term memory, 24-item ring) the model reads
+        // every tick.
         private object ToolRemember(JsonObj p)
         {
             string fact = p.S("mem", "");
@@ -229,16 +209,16 @@ namespace KKLLMNPC
             return new { ok = true, remembered = fact.Trim(), facts = _facts.Count };
         }
 
-
         private object ToolStop()
         {
             StopMove();
             return new { ok = true };
         }
 
-
         // Get out of any animation station (bed/sex/mount) the kobold is locked in.
         // Identical to a player pressing Jump/Cancel: raises StopAnimationRPC.
+        // Get off a station: the same RPC the real player sends on Jump/Cancel while
+        // in one — PhotonView.RPC("StopAnimationRPC", RpcTarget.All).
         private object ToolExitStation()
         {
             if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
@@ -251,7 +231,6 @@ namespace KKLLMNPC
             StopMove(); // also release local input (controller ignores it while animating)
             return new { ok = sent, was_in_station = inStation, note = "exits any animation station — same as pressing jump" };
         }
-
 
         private object ToolLook(JsonObj p)
         {
@@ -266,22 +245,13 @@ namespace KKLLMNPC
                 _yawDeg = Mathf.Repeat(_yawDeg + dYaw, 360f);
                 _pitchDeg = Mathf.Clamp(_pitchDeg + dPitch, -89f, 89f);
             }
-            // Turn the whole body when looking around — so the body follows its gaze
-            // like a real player would, instead of the head drifting off sideways.
-            RunOnMainThreadAsync(() =>
-            {
-                try
-                {
-                    if (_controller != null && _controller.body != null)
-                        _controller.body.MoveRotation(Quaternion.Euler(0, _yawDeg, 0));
-                }
-                catch (Exception) { }
-            });
+            // Turn the whole body when looking around — the animator handles body yaw
+            // via facingRot since inputWalking is false; we just feed it the target.
+            // No rigidbody writes from us.
             if (Mathf.Abs(dYaw) >= 30f || Mathf.Abs((!float.IsNaN(yaw) ? yaw : _yawDeg) - _yawDeg) >= 30f)
                 _lastBigTurnTime = Time.unscaledTime; // trigger a fresh image next tick
             return new { ok = true, yaw = F(_yawDeg), pitch = F(_pitchDeg) };
         }
-
 
         private object ToolJump()
         {
@@ -294,12 +264,13 @@ namespace KKLLMNPC
             return new { ok = true };
         }
 
-
         // Interact with a usable machine/object. The game's User component only
         // populates closestUsable for the *local player's* tagged body, so calling
         // User.Use() on our possessed body no-ops. We instead find the nearest
         // GenericUsable ourselves, turn to face it, then drive LocalUse directly
         // (the same thing the player's Use() calls once one is in range).
+        // Look for a GenericUsable in front (eye-ray first, then a 2.6m bubble), TURN to
+        // face it, then LocalUse() it — that's what drives stations/machines.
         private object ToolInteract()
         {
             if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
@@ -316,7 +287,6 @@ namespace KKLLMNPC
                 float yaw = Mathf.Atan2(flat.x, flat.z) * 57.29578f;
                 float pitch = Mathf.Clamp(Mathf.Atan2(-to.y, Mathf.Max(0.2f, flat.magnitude)) * 57.29578f, -60f, 60f);
                 lock (_stateLock) { _yawDeg = Mathf.Repeat(yaw, 360f); _pitchDeg = pitch; }
-                try { _controller.body?.MoveRotation(Quaternion.Euler(0, _yawDeg, 0)); } catch (Exception) { }
                 _lastBigTurnTime = Time.unscaledTime; // make next tick attach a fresh image
 
                 if (!target.CanUse(_kobold)) return new { ok = false, reason = "cannot_use", name = CleanName(target.name), hint = "maybe busy/occupied or wrong state", dist = F(dist) };
@@ -325,7 +295,6 @@ namespace KKLLMNPC
                 return (object)new { ok = true, used = CleanName(target.name), type = ClassifyUsable(CleanName(target.name)), dist = F(dist) };
             });
         }
-
 
         // Nearest GenericUsable the kobold can actually use. Prefers what's roughly
         // in front of it, then falls back to a close 360° bubble (machines need to be
@@ -367,9 +336,7 @@ namespace KKLLMNPC
             return best;
         }
 
-
         private const float InteractRange = 2.6f;
-
 
         private object ToolGrab(JsonObj p)
         {
@@ -382,7 +349,6 @@ namespace KKLLMNPC
             return new { ok = done };
         }
 
-
         private object ToolDrop()
         {
             if (_grabber == null) return new { ok = false, reason = "no_grabber" };
@@ -392,7 +358,6 @@ namespace KKLLMNPC
             });
             return new { ok = done };
         }
-
 
         private object ToolStatus()
         {

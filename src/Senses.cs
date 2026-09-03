@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// Perception: ray fan, clearance sectors, ground/ledge probes, nearby objects, identity.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -69,16 +49,18 @@ namespace KKLLMNPC
             catch (Exception) { return new { }; }
         }
 
-
         // ------------------------------------------------------------------
         // senses
         // ------------------------------------------------------------------
+        // The JSON sent to the LLM every tick. Everything the model can act on:
+        // identity, body state, vision caption, rays, clearance, nearby, needs, history.
+        // Wrapped in per-body try/catch — a perception failure returns {ok:false} rather
+        // than breaking the loop.
         private object BuildPerception(bool includeImage)
         {
             try { return BuildPerceptionSafe(includeImage); }
             catch (Exception e) { return new { ok = false, reason = "perception_error", msg = e.Message }; }
         }
-
 
         private object BuildPerceptionSafe(bool includeImage)
         {
@@ -108,27 +90,43 @@ namespace KKLLMNPC
                     if (Physics.Raycast(origin, dir, out hit, range, ~0, QueryTriggerInteraction.Ignore) && !IsOwnCollider(hit.collider))
                     {
                         string name = "", kind = "w";
+                        Vector3 size = Vector3.zero;
+                        Vector3 wpos = hit.point;
+                        float facingDeg = 0f;
                         try
                         {
                             if (hit.collider != null)
                             {
+                                // Physical footprint of the thing the ray hit — the model
+                                // can tell a wall from a chair from a kobold by dimensions,
+                                // and plan around corners, not just names.
+                                var rend = hit.collider.GetComponentInChildren<Renderer>();
+                                if (rend != null) { size = rend.bounds.size; wpos = rend.bounds.center; }
+                                facingDeg = hit.collider.transform.eulerAngles.y;
+
                                 var kb = hit.collider.GetComponentInParent<Kobold>();
                                 var usable = hit.collider.GetComponentInParent<GenericUsable>();
                                 if (kb != null) { kind = IsPlayerKobold(kb) ? "p" : "k"; name = kb.name; }
                                 else if (usable != null) { kind = "u"; name = usable.name; }
                                 else
                                 {
-                                    // Thin sill/window/ledge: low collision height means
-                                    // you can see over it and probably climb it — "barrier".
                                     float topH = ProbeSurfaceTop(hit.point);
                                     if (topH < 1.35f) kind = "barrier";
                                 }
                             }
                         }
                         catch (Exception) { }
+                        // Compact: only named things get the extra fields (world-position,
+                        // bounding-box size, which way it's facing). Anonymous world geometry
+                        // stays terse to keep the prompt small.
                         r = name.Length == 0
                             ? (object)new { p = rowNames[rI], a = F(hAngle), d = F(hit.distance), k = kind }
-                            : new { p = rowNames[rI], a = F(hAngle), d = F(hit.distance), k = kind, n = name };
+                            : new {
+                                p = rowNames[rI], a = F(hAngle), d = F(hit.distance), k = kind, n = name,
+                                w = F(size.x), l = F(size.z), h = F(size.y),
+                                x = F(wpos.x), y = F(wpos.y), z = F(wpos.z),
+                                f = F(facingDeg),
+                            };
                     }
                     else r = new { p = rowNames[rI], a = F(hAngle), k = "n" };
                     rays.Add(r);
@@ -170,7 +168,6 @@ namespace KKLLMNPC
             };
         }
 
-
         // The body's actual world yaw right now (rigidbody first, transform fallback).
         private float BodyYaw()
         {
@@ -182,7 +179,6 @@ namespace KKLLMNPC
             catch (Exception) { }
             return _yawDeg;
         }
-
 
         // True when k is the local human player's body (not an AI/wild kobold).
         private static bool IsPlayerKobold(Kobold k)
@@ -196,9 +192,10 @@ namespace KKLLMNPC
             catch (Exception) { return false; }
         }
 
-
         // What's underfoot / ahead at floor level: ground distance, whether we're
         // supported, and if a ledge or a low step is in front.
+        // Vertical/forward probing that teaches apart step vs. sill vs. wall and detects
+        // ledges with drop height, so the model can decide 'hop down' vs 'turn'.
         private object ProbeGround(Vector3 pos)
         {
             try
@@ -240,7 +237,6 @@ namespace KKLLMNPC
             catch (Exception) { return new { dist = "0", supported = true, ahead = "clear", ledge = false }; }
         }
 
-
         // Short 4-way rays around the body (front/back/left/right at chest height)
         // recording which directions have a wall within arm's reach. Result goes
         // into the next perception as `walls`.
@@ -264,18 +260,18 @@ namespace KKLLMNPC
             catch (Exception) { }
         }
 
-
         private bool CastBlocked(Vector3 origin, Vector3 dir, float range)
         {
             RaycastHit h;
             return Physics.Raycast(origin, dir, out h, range, ~0, QueryTriggerInteraction.Ignore) && !IsOwnCollider(h.collider);
         }
 
-
         // How tall is the obstacle at the hit point? Stack CheckSphere upward from
         // the hit; the first free height is the obstacle's top. <~1.3m => sill/
         // ledge/window (barrier), >= => real wall. Works for glass since it reads
         // collision geometry, not opacity.
+        // When a ray hits a solid, measure how tall it actually is by stacking sphere
+        // checks upward; under ~1.35m it's a 'sill/window/barrier' — visible and climable.
         private float ProbeSurfaceTop(Vector3 hitPoint)
         {
             try
@@ -294,15 +290,16 @@ namespace KKLLMNPC
             catch (Exception) { return 2.5f; }
         }
 
-
         // Convert a world offset into a compass bearing the model can act on directly,
         // relative to where the kobold is facing: "ahead", "right", "behind-left"…
+        // Compass bearing relative to the current facing (ahead/front-right/right/...) —
+        // the model reads these as words instead of doing vector trig.
         private string RelBearing(Vector3 to)
         {
             to.y = 0;
             if (to.sqrMagnitude < 0.0001f) return "here";
-            float ang = Mathf.Atan2(to.x, to.z) * 57.29578f;   // absolute yaw of target
-            float rel = Mathf.DeltaAngle(_yawDeg, ang);        // signed relative to facing
+            float ang = Mathf.Atan2(to.x, to.z) * 57.29578f;
+            float rel = Mathf.DeltaAngle(_yawDeg, ang);
             float a = Mathf.Abs(rel);
             if (a < 22.5f) return "ahead";
             if (a < 67.5f) return rel > 0 ? "front-right" : "front-left";
@@ -311,6 +308,15 @@ namespace KKLLMNPC
             return "behind";
         }
 
+        // Numeric relative bearing, in degrees: +right/-left of current facing.
+        // The model feeds this into turn_deg directly: walk(turn_deg:dir_deg).
+        private float RelBearingDeg(Vector3 to)
+        {
+            to.y = 0;
+            if (to.sqrMagnitude < 0.0001f) return 0f;
+            float ang = Mathf.Atan2(to.x, to.z) * 57.29578f;
+            return Mathf.DeltaAngle(_yawDeg, ang);
+        }
 
         private float _lastGreetTime = -99f;
 
@@ -319,7 +325,6 @@ namespace KKLLMNPC
         private float _lastStimLevel = -1f;   // for stim trend calc
 
         private float _lastAmbientTime = -99f; // when we last said something unprompted
-
 
         // Direction of stimulation as a short suffix: "↑"/"↓"/"" so the model sees it changing.
         private string StimTrend(float stim)
@@ -333,7 +338,6 @@ namespace KKLLMNPC
             return t;
         }
 
-
         // Turn "BedStation(2) (Clone)" into "BedStation".
         internal static string CleanName(string n)
         {
@@ -345,8 +349,9 @@ namespace KKLLMNPC
             return n;
         }
 
-
         // Human-readable category so the model can act on needs, not object noise.
+        // Turn a usable's Unity object name into the semantic bucket the model plans on:
+        // bed/toilet/bath/nest/play/seat/door/bodyswap/machine/food.
         private static string ClassifyUsable(string name)
         {
             if (string.IsNullOrEmpty(name)) return "usable";
@@ -365,7 +370,9 @@ namespace KKLLMNPC
             return "usable";
         }
 
-
+        // OverlapSphere within 14m, deduped by root, tagged: k=kobold p=player u=usable,
+        // with name, distance, relative bearing, and the usable category (bed/toilet/play/nest).
+        // Also detects the human player for hello-greetings.
         private List<object> DescribeNearby()
         {
             var list = new List<object>();
@@ -389,6 +396,17 @@ namespace KKLLMNPC
                     if (k != null && IsPlayerKobold(k)) { label = "player"; sawPlayer = true; }
                     string hrel = d.y > 0.5f ? "above" : d.y < -0.5f ? "below" : "level";
 
+                    // Bounds + world position + facing so the model can plan around it
+                    // (a chair you can slide past vs. a cabinet you route around).
+                    Vector3 bsize = Vector3.zero;
+                    Vector3 bpos = c.transform.position;
+                    float bfacing = 0f;
+                    try {
+                        var rend = c.GetComponentInChildren<Renderer>();
+                        if (rend != null) { bsize = rend.bounds.size; bpos = rend.bounds.center; }
+                        bfacing = c.transform.eulerAngles.y;
+                    } catch (Exception) { }
+
                     // For usables: strip Unity's "(Clone)", report whether it's
                     // useable right now (bed free? station occupied?), and a guess
                     // at what it is so the model can plan toward needs.
@@ -399,17 +417,21 @@ namespace KKLLMNPC
                         string kind = ClassifyUsable(nm);
                         bool canUse = true;
                         try { canUse = u.CanUse(_kobold); } catch (Exception) { }
-                    info = kind + (canUse ? "" : ":busy");
-                    // Landmark memory: remember where things are once seen.
-                    if (canUse) RememberFact(kind + " is " + RelBearing(d) + " here");
-                }
+                        info = kind + (canUse ? "" : ":busy");
+                        // Landmark memory: remember where things are once seen.
+                        if (canUse) RememberFact(kind + " is " + RelBearing(d) + " here");
+                    }
                     list.Add(new {
                         k = label,
                         n = nm,
                         d = F(d.magnitude),
-                        dir = RelBearing(d),      // ahead/front-right/right/behind... relative to facing
-                        h = hrel,                 // above/level/below
-                        i = info,                 // e.g. "bed", "toilet", "sex:busy" for usables
+                        dir = RelBearing(d),
+                        dir_deg = F(RelBearingDeg(d)),
+                        h = hrel,
+                        i = info,
+                        w = F(bsize.x), l = F(bsize.z), ht = F(bsize.y),
+                        x = F(bpos.x), y = F(bpos.y), z = F(bpos.z),
+                        f = F(bfacing),
                     });
                     if (list.Count >= 8) break;
                 }
@@ -434,13 +456,11 @@ namespace KKLLMNPC
             return list;
         }
 
-
         private string CaptureImageB64()
         {
             byte[] jpg = CaptureImageBytes();
             return jpg != null ? "data:image/jpeg;base64," + Convert.ToBase64String(jpg) : null;
         }
-
 
         private byte[] CaptureImageBytes()
         {

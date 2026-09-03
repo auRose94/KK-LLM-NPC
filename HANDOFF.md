@@ -1,8 +1,8 @@
 # KK-LLM-NPC handoff notes for another agent — 2026-09-03
 
-Session state after a long iteration. Read **README.md** for the project description,
-**SPLIT-PLAN.md** for the planned split. Everything below is what's actually in the
-codebase right now and what to watch out for on resume.
+Session state after a long iteration. Read **README.md** for the project description.
+**SPLIT-PLAN.md** documents the completed split into partial classes under `src/`.
+Everything below describes the current state and what to watch out for on resume.
 
 ## Build & deploy
 

@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// Hand-rolled JSON write/parse (no external deps), and JsonObj accessors for LLM arguments.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -47,6 +27,8 @@ namespace KKLLMNPC
     // ----------------------------------------------------------------------
     internal static class Json
     {
+        // Serialize anything we pass to/from the LLM: dictionaries, lists, anonymous
+        // types (via reflection on public properties), primitives. NaN/Infinity → null.
         public static string Write(object v)
         {
             var sb = new StringBuilder();
@@ -119,6 +101,8 @@ namespace KKLLMNPC
 
         // Minimal recursive-descent parser returning Dictionary/List/primitives.
         private const int MaxDepth = 64;
+        // Recover whatever the model sent. Tolerant of markdown fences, truncation,
+        // truncated strings, doubled-encoded JSON inside JSON. Returns null on garbage.
         public static object Parse(string text)
         {
             if (string.IsNullOrEmpty(text)) return null;
@@ -253,4 +237,3 @@ namespace KKLLMNPC
         }
     }
 }
-

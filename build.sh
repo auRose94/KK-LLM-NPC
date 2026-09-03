@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build KKLLMNPC*.dll against BepInEx + UnityEngine + Photon + Assembly-CSharp.
+# Source is split across src/*.cs (partial class LLMNPCPlugin).
 # Usage: ./build.sh          — builds instance 1 only
 #        ./build.sh 3        — builds instances 1,2,3 into plugins/
 set -euo pipefail
@@ -23,7 +24,6 @@ build() {
     -r:"$MGMT/UnityEngine.UIModule.dll" \
     -r:"$MGMT/UnityEngine.PhysicsModule.dll" \
     -r:"$MGMT/UnityEngine.AnimationModule.dll" \
-    -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
     -r:"$MGMT/UnityEngine.TextRenderingModule.dll" \
     -r:"$MGMT/UnityEngine.UnityWebRequestModule.dll" \
     -r:"$MGMT/UnityEngine.AudioModule.dll" \
@@ -35,6 +35,7 @@ build() {
     -r:"$MGMT/PhotonRealtime.dll" \
     -r:"$MGMT/Assembly-CSharp.dll" \
     -r:"$MGMT/Naelstrof.PenetrationTech.dll" \
+    -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
     -r:"$MGMT/KoboldKare.ISavable.dll"
   cp "$out" "$KDIR/BepInEx/plugins/$out"
   printf 'Built and deployed %s\n' "$KDIR/BepInEx/plugins/$out"

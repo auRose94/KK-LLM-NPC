@@ -1,24 +1,4 @@
-// KKLLMNPC — a BepInEx plugin for KoboldKare that lets an LLM embody and play
-// as an unoccupied Kobold NPC.
-//
-// The plugin runs inside the game process. It:
-//   1. Hijacks the nearest wild (AIPlayer) Kobold, takes Photon ownership and
-//      suppresses its built-in wander/look AI.
-//   2. Gives the LLM two senses:
-//        - a frustum fan of raycasts around the kobold's facing  (structure)
-//        - a first-person camera render read back as a base64 PNG (vision)
-//   3. Reports kobold stats/genes/energy + world position.
-//   4. Exposes tool commands (move/turn/jump/look/interact/grab/drop/eat...)
-//      by driving the same KoboldCharacterController/User/Grabber the local
-//      player uses, so movement & interaction behave exactly like a player.
-//   5. Talks to an OpenAI-compatible chat-completions endpoint with tool
-//      calling: it pushes perceptions and executes returned tool_calls in a
-//      loop on its own thread, so the LLM continuously plays the NPC.
-//
-// Build against BepInEx + UnityEngine + Photon + Assembly-CSharp (see build.sh).
-// Drop the DLL into <game>/BepInEx/plugins/ and configure the endpoint in
-// BepInEx/config/com.kk.llmnpc.cfg after first launch.
-
+// Background vision caption thread and frame dumps; vision steering hints fed to the action model.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -68,7 +48,8 @@ namespace KKLLMNPC
 
         private float _lastBigTurnTime = -99f;
 
-
+        // Launch the caption pass when due (every N ticks) and not currently running;
+        // wedge-reset if a hung HTTP call left visionBusy stuck past 2 minutes.
         private void MaybeStartVisionPass()
         {
             if (!_cfgVision.Value || !_mainReady) return;
@@ -86,7 +67,9 @@ namespace KKLLMNPC
             t.Start();
         }
 
-
+        // Background caption worker: render on main thread, caption on its own
+        // thread so the decision loop never blocks on vision encode. Stores scene and the
+        // last frame so the action model can reuse the image without re-rendering.
         private void VisionWorker()
         {
             try
@@ -161,8 +144,9 @@ namespace KKLLMNPC
             finally { _visionBusy = false; }
         }
 
-
         // Write the exact JPEG the VLM sees so you can inspect the NPC's view.
+        // Write the exact image the vision model saw to BepInEx/plugins/KKLLMNPC_frames/
+        // and keep only the last 40, so you can inspect what it's reacting to.
         private void DumpVisionFrame(byte[] jpg)
         {
             try
@@ -179,10 +163,12 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("vision dump: " + e.Message); }
         }
 
-
         // Send the JPEG to the vision model for a short scene caption. Uses the
         // [VisionModel] config when set; otherwise falls back to the main LLM
         // endpoint (which must then be a vision-capable model).
+        // Call a (possibly separate, vision-capable) model with the JPEG + the caption
+        // prompt + current goal + the previous caption (as 'Previously') — so it describes
+        // what's new instead of repeating it.
         private string CaptionImage(string imageB64)
         {
             try
@@ -227,7 +213,7 @@ namespace KKLLMNPC
                 req.ContentType = "application/json";
                 if (!string.IsNullOrEmpty(apiKey))
                     req.Headers["Authorization"] = "Bearer " + apiKey;
-                req.Timeout = 60000; req.ReadWriteTimeout = 60000; // vision encode is slow
+                req.Timeout = 120000; req.ReadWriteTimeout = 120000; // vision encode is slow
                 byte[] bytes = Encoding.UTF8.GetBytes(body);
                 req.ContentLength = bytes.Length;
                 using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
