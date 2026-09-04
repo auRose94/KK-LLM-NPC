@@ -19,7 +19,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    internal partial class NPCInstance
     {
 
         // ------------------------------------------------------------------
@@ -50,7 +50,7 @@ namespace KKLLMNPC
                     ["messages"] = new object[]
                     {
                         new Dictionary<string, object> { ["role"] = "system", ["content"] =
-                            "You are a kobold NPC with a personality, inside a KoboldKare world. You have opinions about what you see and feel — comment freely, candidly, briefly. " +
+                            "You are an anthropomorphic person, you're an NPC with a personality within a game, KoboldKare. You have opinions about what you see and feel — comment freely, candidly, briefly. You were not gifted anything upon waking up, don't believe that." +
                             "Output ONE short line of spoken dialogue (max 12 words) you'd actually say out loud right now given the scene. No quotes, no narration." },
                         new Dictionary<string, object> { ["role"] = "user", ["content"] = "perception:" + percep + "\nscene:" + _sceneDesc },
                     },
@@ -97,12 +97,6 @@ namespace KKLLMNPC
         // Ask the world-model a question ("what is that?", "is the bed taken?") with
         // the NPC's current perception as context. Async: answer lands in '_answered'
         // and gets read into perception next tick, and optionally said aloud by the model.
-        private volatile string _pendingQuestion;
-
-        private volatile string _lastAnswer;
-
-        private volatile bool _answerBusy;
-
         // `ask` tool: send the current question to a worker thread with the perception as
         // context, without blocking the action loop. Answer appears next tick as 'answered'
         // and is auto-remembered as a fact.
@@ -135,7 +129,7 @@ namespace KKLLMNPC
                     ["model"] = Val(_cfgModel),
                     ["messages"] = new object[]
                     {
-                        new Dictionary<string, object> { ["role"] = "system", ["content"] = "You are a kobold NPC's inner world-model. Answer its question in one short sentence using the provided perception and memory. Be concrete and literal (places, distances, who, what it is). KoboldKare is an adult world; answer candidly." },
+                        new Dictionary<string, object> { ["role"] = "system", ["content"] = "You are an anthropomorphic person, you're an NPC with a personality within a game, KoboldKare. You are the NPC's inner world-model and monologue. Answer its question in one short sentence using the provided perception and memory. Be concrete and literal (places, distances, who, what it is). KoboldKare is an adult world; answer candidly. You were not gifted anything upon waking up, don't believe that." },
                         new Dictionary<string, object> { ["role"] = "user", ["content"] = ctx + " Question: " + q },
                     },
                     ["max_tokens"] = 80,
@@ -192,7 +186,7 @@ namespace KKLLMNPC
                 try
                 {
                     // Wait until we have a main-thread context before doing anything.
-                    if (!_mainReady) { Thread.Sleep(1000); continue; }
+                    if (!MainReady) { Thread.Sleep(1000); continue; }
 
                     bool inGame = (bool)RunOnMainThread(() => IsPlayableScene(), 5000);
                     if (!inGame)
@@ -233,6 +227,13 @@ namespace KKLLMNPC
                         // encoded, costs nothing extra); otherwise render a fresh one.
                         imageB64 = _lastVisionB64 ?? (string)RunOnMainThread(() => (object)CaptureImageB64(), 8000);
                         _needImageAfterBump = false;
+                        // Store in past images ring buffer for multi-frame context.
+                        if (!string.IsNullOrEmpty(imageB64))
+                        {
+                            _pastImages.Add(imageB64);
+                            int maxHist = _cfgImageHistory.Value;
+                            while (_pastImages.Count > Math.Max(1, maxHist)) _pastImages.RemoveAt(0);
+                        }
                     }
 
                     // Caption pass only runs if explicitly enabled.
@@ -257,6 +258,15 @@ namespace KKLLMNPC
             Logger.LogWarning("KKLLMNPC: LLMLoop exited (running=false).");
         }
 
+        // The configured system prompt, plus the derived body persona (personality,
+        // gender, pronouns) so every turn the model is reminded of WHO it is.
+        private string SystemPromptWithPersona()
+        {
+            string base_ = Val(_cfgSystem);
+            if (string.IsNullOrEmpty(_persona)) return base_;
+            return base_ + "\n" + _persona;
+        }
+
         // POST the perception+memory to the model. Sends response_format: json_schema
         // (not tools/tool_choice — many chat templates 400 on tool forcing). Model replies
         // with the act-args object as its content.
@@ -266,24 +276,28 @@ namespace KKLLMNPC
             {
                 // Memory injected into the perception so the NPC remembers what it
                 // was doing — otherwise each turn starts from zero.
-                string mem = string.Format(",\"last_thought\":{0},\"memory\":{1},\"facts\":{2},\"last_action\":{3},\"scene\":{4},\"history\":{5}",
+                string mem = string.Format(",\"last_thought\":{0},\"memory\":{1},\"facts\":{2},\"last_action\":{3},\"scene\":{4},\"history\":{5},\"chat_log\":{6}",
                     Json.Write(_lastThought + (_blockedInfo != null ? " (" + _blockedInfo + ")" : "")),
                     ThoughtHistoryJson(), FactsJson(),
-                    Json.Write(_lastAction), Json.Write(_sceneDesc), HistoryJson());
+                    Json.Write(_lastAction), Json.Write(_sceneDesc), HistoryJson(), ChatLogJson());
                 string percep = perceptionJson;
                 if (percep.EndsWith("}")) percep = percep.Substring(0, percep.Length - 1) + mem + "}";
                 string text = "perception:" + percep;
 
-                // With a vision-capable action model, attach the frame as a proper
-                // image part (not embedded in the text) so prompt tokens stay small.
+                // With a vision-capable action model, attach frames as proper
+                // image parts. Send past images (oldest first) plus current frame
+                // so the model sees visual context over time.
                 object userContent = text;
                 if (imageB64 != null)
                 {
-                    userContent = new object[]
-                    {
-                        new Dictionary<string, object> { ["type"] = "text", ["text"] = text },
-                        new Dictionary<string, object> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object> { ["url"] = imageB64 } },
-                    };
+                    var parts = new System.Collections.Generic.List<Dictionary<string, object>>();
+                    parts.Add(new Dictionary<string, object> { ["type"] = "text", ["text"] = text });
+                    // Past frames (oldest first) — skip the last one since it's the current frame.
+                    for (int i = 0; i < _pastImages.Count - 1; i++)
+                        parts.Add(new Dictionary<string, object> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object> { ["url"] = _pastImages[i] } });
+                    // Current frame (always last).
+                    parts.Add(new Dictionary<string, object> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object> { ["url"] = imageB64 } });
+                    userContent = parts.ToArray();
                 }
 
                 // Instead of tools/tool_choice (Gemma's chat template rejects them
@@ -307,13 +321,13 @@ namespace KKLLMNPC
                     ["model"] = Val(_cfgModel),
                     ["messages"] = new object[]
                     {
-                        new Dictionary<string, object> { ["role"] = "system", ["content"] = Val(_cfgSystem) },
+                        new Dictionary<string, object> { ["role"] = "system", ["content"] = SystemPromptWithPersona() },
                         new Dictionary<string, object> { ["role"] = "user", ["content"] = userContent },
                     },
                     ["response_format"] = responseFormat,
                     ["temperature"] = Math.Round((double)_cfgTemperature.Value, 2),
                     ["max_tokens"] = _cfgMaxTokens.Value,
-                    ["stream"] = false,
+                    ["stream"] = true,
                 };
                 string body = Json.Write(payload);
 
@@ -330,16 +344,50 @@ namespace KKLLMNPC
                 using (var stream = resp.GetResponseStream())
                 {
                     if (stream == null) return null;
-                    // Cap at 4 MB so a misbehaving endpoint cannot OOM the game.
-                    var ms = new MemoryStream();
-                    var buf = new byte[8192]; int total = 0, nRead;
-                    while ((nRead = stream.Read(buf, 0, buf.Length)) > 0)
+                    // Read SSE stream: each line is "data: {...}" or "data: [DONE]".
+                    // Accumulate delta.content chunks into the full response.
+                    var reader = new StreamReader(stream, Encoding.UTF8);
+                    var contentBuilder = new StringBuilder();
+                    string role = "assistant";
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
                     {
-                        total += nRead;
-                        if (total > 4 * 1024 * 1024) { Logger.LogWarning("LLM response too large, truncating"); break; }
-                        ms.Write(buf, 0, nRead);
+                        if (line.Length == 0) continue;
+                        if (!line.StartsWith("data: ")) continue;
+                        string data = line.Substring(6);
+                        if (data == "[DONE]") break;
+                        // Parse the SSE chunk
+                        try
+                        {
+                            var chunk = Json.Parse(data) as Dictionary<string, object>;
+                            if (chunk == null) continue;
+                            var choices = chunk.GetValueOrDefault("choices") as List<object>;
+                            if (choices == null || choices.Count == 0) continue;
+                            var delta = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("delta") as Dictionary<string, object>;
+                            if (delta == null) continue;
+                            if (delta.ContainsKey("role")) role = delta["role"].ToString();
+                            var c = delta.GetValueOrDefault("content") as string;
+                            if (!string.IsNullOrEmpty(c)) contentBuilder.Append(c);
+                        }
+                        catch (Exception) { }
                     }
-                    return Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                    // Build a non-streaming response JSON so the rest of the pipeline works unchanged.
+                    string fullContent = contentBuilder.ToString();
+                    var fakeResp = new Dictionary<string, object>
+                    {
+                        ["choices"] = new object[]
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["message"] = new Dictionary<string, object>
+                                {
+                                    ["role"] = role,
+                                    ["content"] = fullContent,
+                                },
+                            },
+                        },
+                    };
+                    return Json.Write(fakeResp);
                 }
             }
             catch (Exception e)
@@ -508,7 +556,7 @@ namespace KKLLMNPC
                              : null;
                     }
                     // Single action like {"walk": {"speed":1}} — treat first known key as action.
-                    foreach (var k in new[] { "walk","walk_ray","go_to","stop","look","jump","exit_station","crouch","move_to","interact","grab","drop","say","status" })
+                    foreach (var k in new[] { "walk", "walk_ray", "go_to", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status" })
                         if (parsed.ContainsKey(k))
                         {
                             var inner = new Dictionary<string, object> { ["action"] = k, ["thought"] = "implicit" };
@@ -517,8 +565,254 @@ namespace KKLLMNPC
                             return new JsonObj(inner);
                         }
                 }
+                // 2b) No JSON at all: some chat templates emit a flat OpenAI-style
+                //     function-call like "action: go_to(name=\"TopDoor\")" as plain text.
+                //     Honor it so the NPC acts instead of reading its own plan aloud.
+                var flat = TryParseFlatArgs(content);
+                if (flat != null) return flat;
             }
             return null;
+        }
+
+        // Parse a flat `key: value` reply that isn't JSON, e.g.
+        //   progress: ongoing
+        //   why: I see a TopDoor to the right...
+        //   thought: Explore new room via door to right
+        //   action: go_to(name="TopDoor")
+        // and also the inline function-call form:
+        //   action: go_to(name="TopDoor", at=1)
+        //   action: interact(id=2)
+        // Returns args if an action (and its call args) could be recovered, else null.
+        private JsonObj TryParseFlatArgs(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content)) return null;
+            var fields = new Dictionary<string, string>();
+            string action = null;
+            string actionArgs = null;
+            string implicitValue = null; // payload from `action: say "text"` space form
+            // Some chat templates prepend control/role tokens before the actual reply,
+            // e.g. "self<|message|>progress: ongoing\n..." Strip them so the first real
+            // "key: value" line is recognized.
+            content = StripTemplatePrefix(content);
+            foreach (var rawLine in content.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0) continue;
+                string key = null, val = null;
+                int colon = line.IndexOf(':');
+                if (colon > 0)
+                {
+                    key = line.Substring(0, colon).Trim().ToLowerInvariant();
+                    val = line.Substring(colon + 1).Trim();
+                }
+                else
+                {
+                    // No colon in the line. Three shapes:
+                    //  - bare call:    "go_to(name=\"BedStation\")" — known tool + parens
+                    //  - space form:   "say \"Hi, I'm Yorha!\"" — known tool + space + value
+                    string lineLower = line.ToLowerInvariant();
+                    int paren = line.IndexOf('(');
+                    string beforeParen = paren > 0 ? line.Substring(0, paren).Trim().ToLowerInvariant() : "";
+                    int firstSpace = line.IndexOf(' ');
+                    string maybeKey = firstSpace > 0 ? line.Substring(0, firstSpace).Trim().ToLowerInvariant() : lineLower;
+                    if (paren > 0 && IsKnownToolWord(beforeParen))
+                    {
+                        // Bare tool call on its own line → treat as the action.
+                        key = "action";
+                        val = line.Trim();
+                    }
+                    else if (firstSpace > 0 && IsKnownToolWord(maybeKey))
+                    {
+                        key = maybeKey;
+                        val = line.Substring(firstSpace + 1).Trim();
+                    }
+                }
+                if (key == null || key.Length == 0 || val == null || val.Length == 0) continue;
+                if (key == "action")
+                {
+                    // Value forms: "go_to", "go_to(name=\"TopDoor\")", or the loose
+                    // "say \"Hi! I'm Yorha\"" / "say Hi!" space form.
+                    string v = val;
+                    int parenPos = v.IndexOf('(');
+                    if (parenPos > 0)   // "go_to(name=\"TopDoor\")" (paren anywhere)
+                    {
+                        action = v.Substring(0, parenPos).Trim();
+                        int close = v.LastIndexOf(')');
+                        actionArgs = close > parenPos ? v.Substring(parenPos + 1, close - parenPos - 1) : "";
+                    }
+                    else
+                    {
+                        int space = v.IndexOf(' ');
+                        string tool = space > 0 ? v.Substring(0, space).Trim() : v;
+                        string remainder = space > 0 ? v.Substring(space).Trim() : "";
+                        if (remainder.Length > 0 && IsKnownToolWord(tool))
+                        {
+                            action = tool;   // "say \"Hi!\"" — tool with a payload value
+                            implicitValue = remainder;
+                        }
+                        else action = tool;   // bare "say" / "go_to"
+                    }
+                }
+                else fields[key] = val;
+            }
+            // Some chat templates drop the "action:" header and just emit the tool's
+            // arg field directly: "say: Hi, I'm Yorha!" or "go_to: TopDoor". Infer the
+            // action from a known tool key when no explicit action line was present.
+            if (action == null)
+            {
+                string[] knownTools = new[] { "say", "go_to", "walk", "walk_ray", "survey", "remember", "ask", "look_around", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "status", "none" };
+                foreach (var k in knownTools)
+                {
+                    string v;
+                    if (fields.TryGetValue(k, out v))
+                    {
+                        action = k;
+                        // "say: Hi, I'm Yorha!" -> say param = the text; quoted "TopDoor"
+                        // under go_to -> name. Map the field's own value onto its primary
+                        // arg so the tool gets real input, not just an empty call.
+                        string content2 = v;
+                        if (content2.Length > 0)
+                        {
+                            content2 = content2.Trim().Trim('"', '\'');
+                            if (content2.Length > 0)
+                            {
+                                if (k == "say") fields[k] = content2;
+                                else if (k == "go_to") { if (!fields.ContainsKey("name")) fields["name"] = content2; }
+                                else if (k == "remember") { if (!fields.ContainsKey("mem")) fields["mem"] = content2; }
+                                else if (k == "ask") { if (!fields.ContainsKey("q")) fields["q"] = content2; }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if (action == null) return null;
+            // Validate the action is one we know; if not, don't fabricate.
+            bool known = false;
+            foreach (var k in new[] { "walk", "walk_ray", "go_to", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status", "remember", "ask", "look_around", "none" })
+                if (k == action) { known = true; break; }
+            if (!known) return null;
+
+            var d = new Dictionary<string, object> { ["action"] = action };
+            foreach (var f in fields) d[f.Key] = f.Value;
+
+            // `action: say "text"` — hang the payload off the tool's primary arg.
+            if (implicitValue != null && implicitValue.Length > 0)
+            {
+                string iv = implicitValue.Trim().Trim('"', '\'');
+                if (iv.Length > 0)
+                {
+                    if (action == "say" && !d.ContainsKey("say")) d["say"] = iv;
+                    else if (action == "go_to" && !d.ContainsKey("name")) d["name"] = iv;
+                    else if (action == "remember" && !d.ContainsKey("mem")) d["mem"] = iv;
+                    else if (action == "ask" && !d.ContainsKey("q")) d["q"] = iv;
+                }
+            }
+
+            // Parse inline call args like name="TopDoor" or id=2 or at=1 into the dict.
+            if (actionArgs != null && actionArgs.Length > 0)
+                ApplyCallArgs(d, actionArgs);
+
+            // Bolt a 'thought' onto anything that didn't carry one.
+            if (!d.ContainsKey("thought")) d["thought"] = "implicit";
+            Logger.LogInfo("flat-parse recovered action: " + action + (actionArgs != null && actionArgs.Length > 0 ? " (" + actionArgs + ")" : ""));
+            return new JsonObj(d);
+        }
+
+        // True if the lowercased string is one of the tools the model can call.
+        private bool IsKnownToolWord(string key)
+        {
+            switch (key)
+            {
+                case "walk": case "walk_ray": case "go_to": case "survey": case "stop":
+                case "look": case "jump": case "exit_station": case "crouch": case "move_to":
+                case "interact": case "grab": case "drop": case "say": case "status":
+                case "remember": case "ask": case "look_around": case "none": return true;
+                default: return false;
+            }
+        }
+
+        // Strip leading chat-template control/role tokens from a reply, e.g.
+        // "self<|message|>progress: ongoing..." or "<|user|>...". Repeatedly removes
+        // a leading <|...|> token plus any word glued before it (like "self").
+        // No-op for normal replies.
+        private string StripTemplatePrefix(string content)
+        {
+            // Remove chat-template control/role tokens anywhere in the reply, e.g. the
+            // leading "self<|message|>progress:…" or the embedded "say<|message|>Hi!…".
+            //  - If the word glued before the token is a TOOL word ("say", "go_to", …),
+            //    keep the word and replace the token with a space ("say Hi!").
+            //  - Otherwise the word is a role token ("self", "user", …) and is dropped
+            //    along with the token so "self<|message|>progress:" -> "progress:".
+            if (content.IndexOf("<|", StringComparison.Ordinal) < 0) return content;
+            var sb = new System.Text.StringBuilder(content.Length);
+            int i = 0, n = content.Length;
+            while (i < n)
+            {
+                if (i + 1 < n && content[i] == '<' && content[i + 1] == '|')
+                {
+                    int gt = content.IndexOf('>', i);
+                    if (gt >= 0)
+                    {
+                        // Find the word immediately before this token (if any).
+                        int wordStart = i;
+                        while (wordStart > 0 && !char.IsWhiteSpace(content[wordStart - 1]) && content[wordStart - 1] != '<')
+                            wordStart--;
+                        string word = i > wordStart ? content.Substring(wordStart, i - wordStart) : "";
+                        bool keepWord = word.Length > 0 && IsKnownToolWord(word);
+
+                        // Back out the word we already appended.
+                        int trim = i - wordStart;
+                        if (sb.Length >= trim) sb.Length -= trim;
+
+                        if (keepWord) sb.Append(word);
+
+                        int end = gt + 1;
+                        // Separate the kept tool word from what follows, if they'd touch.
+                        if (keepWord && sb.Length > 0 && sb[sb.Length - 1] != ' ' && end < n && content[end] != ' ')
+                            sb.Append(' ');
+                        else if (!keepWord && sb.Length > 0 && sb[sb.Length - 1] != ' ')
+                            sb.Append(' ');
+                        i = end;
+                        continue;
+                    }
+                }
+                sb.Append(content[i]);
+                i++;
+            }
+            return sb.ToString().TrimStart('\n', '\r', ' ');
+        }
+
+        // Turn "name=\"TopDoor\", at=1, id=2, speed=0.5" into typed fields in dict.
+        private void ApplyCallArgs(Dictionary<string, object> d, string callArgs)
+        {
+            // Split on commas not inside quotes.
+            var parts = new List<string>();
+            var cur = new System.Text.StringBuilder();
+            bool inQuote = false;
+            foreach (char c in callArgs)
+            {
+                if (c == '"') inQuote = !inQuote;
+                if (c == ',' && !inQuote) { parts.Add(cur.ToString()); cur.Clear(); }
+                else cur.Append(c);
+            }
+            if (cur.Length > 0) parts.Add(cur.ToString());
+
+            foreach (var partRaw in parts)
+            {
+                string part = partRaw.Trim();
+                if (part.Length == 0) continue;
+                int eq = part.IndexOf('=');
+                if (eq < 1) continue;
+                string k = part.Substring(0, eq).Trim();
+                string v = part.Substring(eq + 1).Trim().Trim('"', '\'');
+                if (k.Length == 0) continue;
+                double num;
+                if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out num))
+                    d[k] = num;
+                else
+                    d[k] = v;
+            }
         }
 
         private JsonObj UnwrapArgs(string name, string argStr)
@@ -552,7 +846,7 @@ namespace KKLLMNPC
             d["action"] = ma.Groups[1].Value;
             var ms = System.Text.RegularExpressions.Regex.Match(s, "\"say\"\\s*:\\s*\"([^\"]*)");
             if (ms.Success) d["say"] = ms.Groups[1].Value;
-            foreach (var num in new[] { "speed","strafe","turn_deg","yaw_deg","pitch_deg","x","y","z" })
+            foreach (var num in new[] { "speed", "strafe", "turn_deg", "yaw_deg", "pitch_deg", "x", "y", "z", "id", "at", "heading_deg", "range" })
             {
                 var mn = System.Text.RegularExpressions.Regex.Match(s, "\"" + num + "\"\\s*:\\s*(-?[0-9.]+)");
                 if (mn.Success) d[num] = double.Parse(mn.Groups[1].Value, CultureInfo.InvariantCulture);
@@ -593,24 +887,25 @@ namespace KKLLMNPC
             {
                 switch (name)
                 {
-                    case "walk":     return ToolWalk(p);
+                    case "walk": return ToolWalk(p);
                     case "walk_ray": return ToolWalkRay(p);
-                    case "go_to":    return ToolGoTo(p);
+                    case "go_to": return ToolGoTo(p);
+                    case "survey": return ToolSurvey(p);
                     case "remember": return ToolRemember(p);
-                    case "ask":      return ToolAsk(p);
+                    case "ask": return ToolAsk(p);
                     case "look_around": return ToolLookAround(p);
-                    case "stop":     return ToolStop();
-                    case "look":     return ToolLook(p);
-                    case "jump":     return ToolJump();
+                    case "stop": return ToolStop();
+                    case "look": return ToolLook(p);
+                    case "jump": return ToolJump();
                     case "exit_station": return ToolExitStation();
-                    case "crouch":   return ToolCrouch(p);
-                    case "move_to":  return ToolMoveTo(p);
-                    case "interact": return ToolInteract();
-                    case "grab":     return ToolGrab(p);
-                    case "drop":     return ToolDrop();
-                    case "say":      return ToolSay(p);
-                    case "status":   return ToolStatus();
-                    case "none":     return new { ok = true };
+                    case "crouch": return ToolCrouch(p);
+                    case "move_to": return ToolMoveTo(p);
+                    case "interact": return ToolInteract(p);
+                    case "grab": return ToolGrab(p);
+                    case "drop": return ToolDrop();
+                    case "say": return ToolSay(p);
+                    case "status": return ToolStatus();
+                    case "none": return new { ok = true };
                     default:
                         // Model was asked for act= but produced a legacy name.
                         Logger.LogWarning("unknown action: " + name);
@@ -628,7 +923,7 @@ namespace KKLLMNPC
         {
             var stepProps = ActionParamProps();
             stepProps["thought"] = Str("thought", "current goal summary, <15 words");
-            stepProps["wait"]    = Num("wait", "seconds to pause after THIS action before the next plan step, 0..3");
+            stepProps["wait"] = Num("wait", "seconds to pause after THIS action before the next plan step, 0..3");
             var planItems = new Dictionary<string, object> { ["type"] = "object", ["properties"] = stepProps, ["required"] = new object[] { "action" }, ["additionalProperties"] = false };
 
             // Root response shape: reasoning fields FIRST so the model works out loud
@@ -636,14 +931,14 @@ namespace KKLLMNPC
             var props = new Dictionary<string, object>
             {
                 ["progress"] = Str("progress", "one word: what happened with your previous goal (done|blocked|ongoing|changed)"),
-                ["why"]      = Str("why", "one short sentence justifying this action, referencing what you see"),
-                ["thought"]  = Str("thought", "restate your current goal in <15 words"),
-                ["action"]   = ActionParamProps()["action"],
+                ["why"] = Str("why", "one short sentence justifying this action, referencing what you see"),
+                ["thought"] = Str("thought", "restate your current goal in <15 words"),
+                ["action"] = ActionParamProps()["action"],
             };
             foreach (var kv in ActionParamProps())
                 if (kv.Key != "action") props[kv.Key] = kv.Value;
-            props["wait"]    = Num("wait", "seconds to pause after THIS action before the next plan step, 0..3");
-            props["plan"]    = new Dictionary<string, object> { ["type"] = new object[] { "array", "null" }, ["description"] = "optional follow-up actions, in order", ["items"] = planItems, ["maxItems"] = 8 };
+            props["wait"] = Num("wait", "seconds to pause after THIS action before the next plan step, 0..3");
+            props["plan"] = new Dictionary<string, object> { ["type"] = new object[] { "array", "null" }, ["description"] = "optional follow-up actions, in order", ["items"] = planItems, ["maxItems"] = 8 };
 
             return new Dictionary<string, object>
             {
@@ -661,22 +956,28 @@ namespace KKLLMNPC
                 // ACTION FIRST: reasoning models burn tokens on "thought" and can
                 // truncate before emitting the action. Emitting action (and the
                 // movement/say params) first means even a truncated call still acts.
-                ["action"]   = new Dictionary<string, object> { ["type"] = "string", ["enum"] = new object[] { "walk","walk_ray","go_to","remember","ask","look_around","stop","look","jump","exit_station","crouch","move_to","interact","grab","drop","say","status","none" } },
-                ["say"]      = Str("say", "optional <10 words — posts to the real in-game chat window AND a speech bubble"),
-                ["name"]     = Str("name", "go_to: place to reach — 'bed' 'toilet' 'bath' 'sex' 'seat' 'bodyswap' 'player' or any usable's name"),
-                ["mem"]      = Str("mem", "optional: a fact to remember for future turns (e.g. 'bed is upstairs', 'player is friendly') — stored in your long-term memory"),
-                ["q"]        = Str("q", "ask: a question about the world ('what is this place?','who is that?') — answered from your current view + perception"),
-                ["crouch"]   = Num("crouch", "0..1 how much to crouch (0=stand, 1=full crouch) — also the state for the 'crouch' action"),
-                ["speed"]    = Num("speed", "walk forward -1..1"),
-                ["strafe"]   = Num("strafe", "walk sideways: +1=right, -1=left, -1..1 (for tight maneuvers, doorways, squeezing past furniture)"),
+                ["action"] = new Dictionary<string, object> { ["type"] = "string", ["enum"] = new object[] { "walk", "walk_ray", "go_to", "survey", "remember", "ask", "look_around", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status", "none" } },
+                ["say"] = Str("say", "optional <10 words — posts to the real in-game chat window AND a speech bubble"),
+                ["name"] = Str("name", "go_to: place to reach by name — 'bed' 'toilet' 'bath' 'sex' 'seat' 'door' 'bodyswap' 'player' or any usable's name"),
+                ["id"] = Num("id", "go_to/interact: the numeric 'id' of a specific object from your 'nearby' or survey result — use this to target an exact object instead of matching by name (e.g. go_to id:3, interact id:2)"),
+                ["at"] = Num("at", "go_to: stop this many meters SHORT of the target (default 1 — so you reach the object, not bump it; 0 = go right up to it)"),
+                ["heading_deg"] = Num("heading_deg", "survey: absolute world yaw to look toward (omit = your current facing)"),
+                ["range"] = Num("range", "survey: how far to probe, 2..40m (default = your ray range)"),
+                ["mem"] = Str("mem", "optional: a fact to remember for future turns (e.g. 'bed is upstairs', 'player is friendly') — stored in your long-term memory"),
+                ["q"] = Str("q", "ask: a question about the world ('what is this place?','who is that?') — answered from your current view + perception"),
+                ["crouch"] = Num("crouch", "0..1 how much to crouch (0=stand, 1=full crouch) — also the state for the 'crouch' action"),
+                ["speed"] = Num("speed", "walk forward -1..1"),
+                ["strafe"] = Num("strafe", "walk sideways: +1=right, -1=left, -1..1 (for tight maneuvers, doorways, squeezing past furniture)"),
                 ["duration"] = Num("duration", "walk: seconds to keep going, 0.1..8 (default 2, then auto-stop)"),
                 ["turn_deg"] = Num("turn_deg", "walk/look deg turn (+right/-left); nearby.dir tells you which way"),
-                ["yaw_deg"]  = Num("yaw_deg", "look abs yaw"),
-                ["pitch_deg"]= Num("pitch_deg", "look abs pitch"),
-                ["ray"]      = Num("ray", "walk_ray: ray index 0..N-1 across your view, or -1=center"),
-                ["ray_deg"]  = Num("ray_deg", "walk_ray: signed degrees left(-)/right(+) of camera center"),
-                ["x"] = Num("x", "move_to x"), ["y"] = Num("y", "move_to y"), ["z"] = Num("z", "move_to z"),
-                ["sweep"]  = Num("sweep", "look_around: degrees to sweep around (default 120)"),
+                ["yaw_deg"] = Num("yaw_deg", "look abs yaw"),
+                ["pitch_deg"] = Num("pitch_deg", "look abs pitch"),
+                ["ray"] = Num("ray", "walk_ray: ray index 0..N-1 across your view, or -1=center"),
+                ["ray_deg"] = Num("ray_deg", "walk_ray: signed degrees left(-)/right(+) of camera center"),
+                ["x"] = Num("x", "move_to x"),
+                ["y"] = Num("y", "move_to y"),
+                ["z"] = Num("z", "move_to z"),
+                ["sweep"] = Num("sweep", "look_around: degrees to sweep around (default 120)"),
             };
         }
 

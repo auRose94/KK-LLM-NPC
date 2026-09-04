@@ -19,40 +19,14 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    internal partial class NPCInstance
     {
-
-        // Background vision pipeline.
-        private string _sceneDesc = "unknown";
-
-        private string _lastVisionCaption = "";   // previous caption — sent as context to vision model
-
-        private volatile string _lastVisionB64;
-
-        // Steering hint from the vision model (goal-driven "where should I go next").
-        private class VisionSteer { public float deg; public string reason; }
-
-        private volatile VisionSteer _visionSteer;
-
-        private volatile bool _visionBusy;
-
-        private float _visionStartTime;
-
-        private int _lastVisionTick = -999;
-
-        private bool _visionModelLoggedOnce;
-
-        private int _visionShot; // last written debug frame index
-
-        private volatile bool _needImageAfterBump;
-
-        private float _lastBigTurnTime = -99f;
 
         // Launch the caption pass when due (every N ticks) and not currently running;
         // wedge-reset if a hung HTTP call left visionBusy stuck past 2 minutes.
         private void MaybeStartVisionPass()
         {
-            if (!_cfgVision.Value || !_mainReady) return;
+            if (!_cfgVision.Value || !MainReady) return;
             if (_visionBusy)
             {
                 // Reset a wedged vision flag (hung HTTP, etc.) after 2 minutes.
@@ -151,7 +125,7 @@ namespace KKLLMNPC
         {
             try
             {
-                string dir = Path.Combine(Path.GetDirectoryName(Config.ConfigFilePath), "..", "plugins", "KKLLMNPC_frames");
+                string dir = Path.Combine(Path.GetDirectoryName(Plugin.Config.ConfigFilePath), "..", "plugins", "KKLLMNPC_frames");
                 dir = Path.GetFullPath(dir);
                 Directory.CreateDirectory(dir);
                 int idx = ++_visionShot;

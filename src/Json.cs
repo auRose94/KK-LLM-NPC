@@ -218,6 +218,18 @@ namespace KKLLMNPC
             if (!_d.TryGetValue(k, out var v) || v == null) return def;
             return v.ToString();
         }
+        public bool Has(string k)
+        {
+            return _d.ContainsKey(k) && _d[k] != null;
+        }
+        public double DB(string k, double def = 0)
+        {
+            if (!_d.TryGetValue(k, out var v) || v == null) return def;
+            if (v is double dd) return dd;
+            if (v is long l) return l;
+            if (v is int i) return i;
+            double r; return double.TryParse(v.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out r) ? r : def;
+        }
         public List<JsonObj> A(string k)
         {
             var outp = new List<JsonObj>();

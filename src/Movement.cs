@@ -19,14 +19,8 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    internal partial class NPCInstance
     {
-        private float _lastBumpTime = -99f;   // Time.unscaledTime of last wall-contact
-
-        private string _bumpInfo;             // human-readable "hit wall to the left"
-
-        private const float WalkProbeRange = 1.4f; // how far ahead we validate walking
-
         // True if the collider belongs to our own kobold (its body/limbs) — ignore it.
         private bool IsOwnCollider(Collider c)
         {
@@ -54,32 +48,31 @@ namespace KKLLMNPC
             return 0f; // boxed in
         }
 
-        // LLM-facing continuous movement command, written by LLM thread,
-        // consumed in FixedUpdate on the main thread. Plain fields + Interlocked.
-        private float _moveLocalZ;      // forward speed
-        private float _moveLocalX;      // strafe (right=+, left=-)
-
-        private bool  _moveJump;
-
-        private bool  _moveRun;         // false => controller.inputWalking (slow); true => full speed
-
-        private float _moveUntilTime;   // unscaled time when the current walk burst ends
-
-        private float _crouch = 0f;     // 0..1 — applied every FixedUpdate
-
-        private float _manualCrouchSet = -99f; // last time the model chose crouch
-
-        private float _clipSince = -99f;       // when camera first appeared clipped
-
-        private float _lastClipFix;            // cooldown on auto-crouch adjustments
-
-        private float _yawOffsetDeg;    // pending yaw to apply relative to current facing
-
-        private float _pitchDeg;        // absolute pitch for the eye/camera
-
-        private float _yawDeg;          // absolute yaw (derived from body + offset)
-
-        private readonly object _stateLock = new object();
+        // If the object a forward ray hit is a door/gate (a GenericUsable classified as
+        // 'door'), open it via LocalUse so the body can walk through — unless we just did
+        // so for this same door (avoids toggle-fluttering open↔closed every physics frame).
+        private bool MaybeOpenDoorAhead(RaycastHit hit)
+        {
+            try
+            {
+                var u = hit.collider.GetComponentInParent<GenericUsable>();
+                if (u == null) return false;
+                int inst = u.GetInstanceID();
+                if (inst == _lastDoorTried && Time.unscaledTime - _lastDoorTryTime < 1.5f) return false;
+                string n = CleanName(u.name);
+                string cls = ClassifyUsable(n);
+                if (cls != "door") return false;
+                if (u.CanUse(_kobold))
+                {
+                    u.LocalUse(_kobold);
+                    _lastDoorTried = inst;
+                    _lastDoorTryTime = Time.unscaledTime;
+                    return true;
+                }
+                return false;
+            }
+            catch (Exception) { return false; }
+        }
 
         // ------------------------------------------------------------------
         // movement plumbing: LLM thread sets fields; FixedUpdate applies them
@@ -90,8 +83,8 @@ namespace KKLLMNPC
         {
             lock (_stateLock)
             {
-                _moveLocalZ = Mathf.Clamp(forwardSpeed, -8f, 8f);
-                _moveLocalX = Mathf.Clamp(strafeSpeed, -8f, 8f);
+                _moveTargetZ = Mathf.Clamp(forwardSpeed, -8f, 8f);
+                _moveTargetX = Mathf.Clamp(strafeSpeed, -8f, 8f);
                 _moveJump = jump;
                 _moveRun = run;
                 _yawOffsetDeg = turnDeg;
@@ -136,9 +129,6 @@ namespace KKLLMNPC
             });
         }
 
-        // direction of stimulation, reused by ambient.
-        private float _ambientStimPrev = -1f;
-
         // True if the kobold was addressed by its name in the chat text.
         private bool AddressedToMe(string chat)
         {
@@ -152,7 +142,7 @@ namespace KKLLMNPC
         // so the body doesn't coast on a stale direction between think ticks.
         private void StopMove()
         {
-            lock (_stateLock) { _moveLocalZ = 0f; _moveJump = false; _moveUntilTime = 0f; _crouch = 0f; }
+            lock (_stateLock) { _moveTargetZ = 0f; _moveTargetX = 0f; _moveJump = false; _moveUntilTime = 0f; _crouch = 0f; }
             // Also zero the controller immediately — otherwise it keeps the last
             // inputDir applied and drifts until the next physics write.
             if (_controller != null)
@@ -161,22 +151,8 @@ namespace KKLLMNPC
             }
         }
 
-        private void FixedUpdate()
-        {
-            try { FixedUpdateSafe(); }
-            catch (Exception e)
-            {
-                // A destroyed/invalid body must never take down the physics loop.
-                if (Time.frameCount % 120 == 0) Logger.LogWarning("FixedUpdate: " + e.Message);
-            }
-        }
-
-        // The only Unity-physics touchpoint for motion. Reads queued movement intent
-        // written by the LLM thread, expends burst timers, probes walls/ledges ahead,
-        // keeps yaw in sync (only when there's actual intent), then writes inputDir +
-        // inputJump + inputWalking + SetInputCrouched on the game's own controller.
-        // Idle → rigidbody velocity is damped (prevents the 'magnetized drift' bug).
-        private void FixedUpdateSafe()
+        // FixedUpdateSafe is called from the plugin's FixedUpdate for each instance.
+        internal void FixedUpdateSafe()
         {
             if (_controller == null || _kobold == null) return;
             if (!IsPlayableScene() || !IsAlive(_kobold) || !IsAlive(_controller)) { RunOnMainThreadAsync(TeardownBody); return; }
@@ -187,16 +163,35 @@ namespace KKLLMNPC
                 && Time.unscaledTime - _lastOwnershipTry > 3f)
             {
                 _lastOwnershipTry = Time.unscaledTime;
-                Logger.LogWarning($"KKLLMNPC: not owner of '{_kobold.name}' (owner={_photonView.Owner?.NickName ?? "?"}) — re-asserting");
+                try
+                {
+                    string safeNick = _photonView.Owner?.NickName ?? "?";
+                    safeNick = new string(safeNick.Where(c => c >= 32 && c < 127).ToArray());
+                    Logger.LogWarning($"KKLLMNPC: not owner of '{_npcName ?? "?"}' (owner={safeNick}) — re-asserting");
+                }
+                catch (Exception) { Logger.LogWarning("KKLLMNPC: not owner — re-asserting"); }
                 try { _photonView.TransferOwnership(PhotonNetwork.LocalPlayer); } catch (Exception) { }
                 try { if (!_photonView.IsMine) _photonView.RequestOwnership(); } catch (Exception) { }
             }
 
-            float fwd, strafe, turn, crouch; bool jump; float until;
-            lock (_stateLock) { fwd = _moveLocalZ; strafe = _moveLocalX; turn = _yawOffsetDeg; jump = _moveJump; crouch = _crouch; _yawOffsetDeg = 0f; until = _moveUntilTime; }
+            float dt = Time.fixedDeltaTime;
+            float turnRate = _cfgTurnRate != null ? _cfgTurnRate.Value : 180f;
+            float accel = _cfgAccel != null ? _cfgAccel.Value : 4f;
+            float decel = _cfgDecel != null ? _cfgDecel.Value : 6f;
+            float brakeDist = _cfgBrakeDist != null ? _cfgBrakeDist.Value : 2f;
 
-            // If a go_to target is active, steer toward it (a bounded "approach"
-            // behavior); clear it once we're close or the walk burst expired.
+            // Acceleration / deceleration: lerp current speed toward target.
+            lock (_stateLock)
+            {
+                _moveLocalZ = Mathf.MoveTowards(_moveLocalZ, _moveTargetZ, (_moveTargetZ != 0f ? accel : decel) * dt);
+                _moveLocalX = Mathf.MoveTowards(_moveLocalX, _moveTargetX, (_moveTargetX != 0f ? accel : decel) * dt);
+            }
+            float fwd = _moveLocalZ;
+            float strafe = _moveLocalX;
+            float turn; bool jump; float crouch; float until;
+            lock (_stateLock) { turn = _yawOffsetDeg; jump = _moveJump; crouch = _crouch; _yawOffsetDeg = 0f; until = _moveUntilTime; }
+
+            // If a go_to target is active, steer toward it; clear it once we're close.
             if (_navTarget.HasValue)
             {
                 Vector3 toT = _navTarget.Value - _kobold.transform.position;
@@ -210,17 +205,20 @@ namespace KKLLMNPC
                 }
                 else
                 {
-                    // Keep heading fresh so the obstacle-steer fans around the target.
+                    // Smooth turning toward nav target instead of snapping.
                     float yaw = Mathf.Atan2(toT.x, toT.z) * 57.29578f;
-                    _yawDeg = Mathf.Repeat(yaw, 360f);
+                    _yawDeg = MoveAngleTowards(_yawDeg, yaw, turnRate * dt);
+                    // Arrival braking: slow down as we approach.
+                    float speedScale = Mathf.Clamp01(dist / brakeDist);
+                    lock (_stateLock) { _moveTargetZ = Mathf.Max(_moveTargetZ, speedScale); }
+                    fwd = Mathf.Max(fwd, speedScale);
                 }
             }
 
-            // Burst timed out — stop before applying any more drive.
+            // Burst timed out — decelerate to zero.
             if (until > 0f && Time.unscaledTime >= until)
             {
-                lock (_stateLock) { _moveLocalZ = 0f; _moveLocalX = 0f; _moveUntilTime = 0f; }
-                fwd = 0f; strafe = 0f;
+                lock (_stateLock) { _moveTargetZ = 0f; _moveTargetX = 0f; _moveUntilTime = 0f; }
             }
 
             // When there's no active walk command, zero the drive every frame so no
@@ -244,10 +242,9 @@ namespace KKLLMNPC
                 }
             }
 
-            // Turning rotates the rigidbody (whole body) via physics, not the
-            // transform — so animations and colliders follow and nothing clips.
+            // Turning: smooth interpolation instead of instant snap.
             if (Mathf.Abs(turn) > 0.001f)
-                _yawDeg = Mathf.Repeat(_yawDeg + turn, 360f);
+                _yawDeg = MoveAngleTowards(_yawDeg, Mathf.Repeat(_yawDeg + turn, 360f), turnRate * dt);
 
             // WALK VALIDATION: raycast where we're about to go. If blocked ahead,
             // don't walk into it — stop forward drive and auto-steer to a clear
@@ -282,17 +279,27 @@ namespace KKLLMNPC
                 if (Physics.Raycast(eye, dir, out hit, WalkProbeRange, ~0, QueryTriggerInteraction.Ignore)
                     && !IsOwnCollider(hit.collider))
                 {
-                    // Surface in front — try to find a clear heading by fan-steering.
-                    float steer = FindClearHeading(eye, hit.normal);
-                    if (steer != 0f)
+                    // If it's a door/gate in the way, open it instead of walking around
+                    // (a spatial reaction the model doesn't have to micromanage). Guard
+                    // against toggling open/closed every frame with a per-door cooldown.
+                    if (MaybeOpenDoorAhead(hit))
                     {
-                        _yawDeg = Mathf.Repeat(_yawDeg + steer, 360f);
-                        _blockedInfo = "blocked; steered " + (steer > 0 ? "right" : "left");
+                        _blockedInfo = "opening door ahead";
                     }
                     else
                     {
-                        fwdOut = 0f;
-                        _blockedInfo = "blocked, no clear way (dist " + F(hit.distance) + ")";
+                        // Surface in front — try to find a clear heading by fan-steering.
+                        float steer = FindClearHeading(eye, hit.normal);
+                        if (steer != 0f)
+                        {
+                            _yawDeg = MoveAngleTowards(_yawDeg, Mathf.Repeat(_yawDeg + steer, 360f), turnRate * dt);
+                            _blockedInfo = "blocked; steered " + (steer > 0 ? "right" : "left");
+                        }
+                        else
+                        {
+                            fwdOut = 0f;
+                            _blockedInfo = "blocked, no clear way (dist " + F(hit.distance) + ")";
+                        }
                     }
                 }
                 // LEDGE GUARD: only hard-stop on a *big* drop. Small drops (<=1.6m)
@@ -349,6 +356,8 @@ namespace KKLLMNPC
             }
             if (_cam != null)
                 _cam.transform.rotation = Quaternion.Euler(_pitchDeg, _yawDeg, 0f);
+            if (_camR != null)
+                _camR.transform.rotation = Quaternion.Euler(_pitchDeg, _yawDeg, 0f);
 
             // CAMERA-CLIP detection + auto-crouch fix. If the head/camera is buried
             // in geometry (rays from the head hit something nearer than the camera
@@ -420,17 +429,6 @@ namespace KKLLMNPC
             }
             else _lastStim = -1f;
         }
-
-        // Idle behavior while in a station: wandering gaze + reaction to arousal.
-        private float _gazeTimer;
-
-        private float _gazeYaw;
-
-        private float _gazePitch;
-
-        private float _lastStim = -1f;
-
-        private float _lastMoan;
 
         // Heuristic camera-clip detector: the first-person camera sits ahead of the
         // head at _cfgCamForward; if a short forward ray from just behind the camera

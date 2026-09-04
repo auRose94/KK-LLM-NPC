@@ -19,46 +19,9 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    internal partial class NPCInstance
     {
-
-        // ------------------------------------------------------------------
-        // Photon events: hear what players type into the chat window
-        // ------------------------------------------------------------------
-        // Listen for the game's real chat events (Photon CustomChatEvent) — capture player
-        // speech so the LLM hears it and can respond. Filters our own echoes.
-        public void OnEvent(ExitGames.Client.Photon.EventData ev)
-        {
-            try
-            {
-                if (ev.Code != NetworkManager.CustomChatEvent) return;
-                var msg = ev.CustomData as string;
-                if (string.IsNullOrEmpty(msg)) return;
-
-                string senderName = null;
-                try
-                {
-                    var sender = PhotonNetwork.CurrentRoom?.GetPlayer(ev.Sender);
-                    if (sender != null) senderName = sender.NickName;
-                }
-                catch (Exception) { }
-
-                // Ignore our own speech: our chat text is prefixed "MyName: ".
-                string myPrefix = MyName() + ":";
-                if (msg.StartsWith(myPrefix, StringComparison.OrdinalIgnoreCase))
-                    return;
-
-                // The local player is who we care about — but capture anyone.
-                bool isLocal = false;
-                try { var lp = PhotonNetwork.LocalPlayer; isLocal = lp != null && lp.ActorNumber == ev.Sender; } catch (Exception) { }
-
-                string heard = (isLocal ? "player" : (senderName ?? "someone")) + ": " + msg;
-                _playerChat = heard;
-                _playerChatTime = Time.unscaledTime;
-                Logger.LogInfo("heard chat: " + heard);
-            }
-            catch (Exception e) { Logger.LogWarning("onEvent: " + e.Message); }
-        }
+        // OnEvent is handled by the plugin and distributed to instances via HandleChat.
 
         // Pick an identity for the body: species hint from its name (e.g. "AbsolB"
         // → base name), plus a short suffix derived from its equipment so it's stable
@@ -80,14 +43,95 @@ namespace KKLLMNPC
 
         // Chat the player typed within the last ~30s — null otherwise, and only once
         // per distinct message so we don't keep responding to the same line.
-        private string _lastDeliveredChat;
-
         private string RecentPlayerChat()
         {
             if (_playerChat == null || Time.unscaledTime - _playerChatTime > 30f) return null;
             if (_playerChat == _lastDeliveredChat) return null;
             _lastDeliveredChat = _playerChat;
             return _playerChat;
+        }
+
+        // True when a chat message is a cheat/system command (starts with '/') rather
+        // than something the NPC should treat as real conversation. The NPC shouldn't
+        // recognize these as speech at all.
+        private static bool IsCheatCommand(string body)
+        {
+            if (body == null) return true;
+            string b = body.Trim().Trim('"', '\'');
+            return b.Length > 0 && b[0] == '/';
+        }
+
+        // The full conversation as far as the game's chat panel has accumulated it
+        // (player lines + our own ToolSay lines), trimmed to the last ChatLogLines
+        // conversation lines. Strip HTML color tags and drop non-speech notices.
+        // Returns a JSON array (or "[]" if empty / disabled).
+        private string ChatLogJson()
+        {
+            try
+            {
+                if (_cfgChatLogLines == null || _cfgChatLogLines.Value <= 0) return "[]";
+                string output;
+                try { output = CheatsProcessor.GetOutput(); }
+                catch (Exception) { return "[]"; }
+                if (string.IsNullOrEmpty(output)) return "[]";
+
+                var lines = new System.Collections.Generic.List<string>();
+                string myName = MyName();
+                foreach (var raw in output.Split('\n'))
+                {
+                    string l = raw.Trim();
+                    if (l.Length == 0) continue;
+                    // Keep only human-readable speech lines: "<speaker>: <text>". Strip
+                    // BBCode-ish color tags like "<color=yellow>…</color>".
+                    int colon = l.IndexOf(':');
+                    if (colon <= 0 || colon > 32) continue;
+                    string speaker = l.Substring(0, colon).Trim();
+                    string body = l.Substring(colon + 1).Trim();
+                    if (speaker.Length == 0 || body.Length == 0) continue;
+                    if (speaker.StartsWith("<color", StringComparison.Ordinal) ||
+                        speaker.StartsWith("<", StringComparison.Ordinal)) continue;
+                    // Drop cheat/system commands so the NPC never has to interpret them.
+                    if (IsCheatCommand(body)) continue;
+                    // Skip own messages — the model already knows what it said.
+                    if (string.Equals(speaker, myName, StringComparison.OrdinalIgnoreCase)) continue;
+                    string clean = StripChatMarkup(l);
+                    lines.Add(clean);
+                }
+
+                int keep = _cfgChatLogLines.Value;
+                int start = lines.Count - keep;
+                if (start < 0) start = 0;
+
+                var sb = new StringBuilder("[");
+                bool first = true;
+                for (int i = start; i < lines.Count; i++)
+                {
+                    if (!first) sb.Append(',');
+                    first = false;
+                    sb.Append(Json.Write(lines[i]));
+                }
+                sb.Append(']');
+                return sb.ToString();
+            }
+            catch (Exception) { return "[]"; }
+        }
+
+        private static string StripChatMarkup(string s)
+        {
+            // Remove <color=…>…</color> pairs and stray "<…>" tags.
+            var sb = new StringBuilder(s.Length);
+            int i = 0, n = s.Length;
+            while (i < n)
+            {
+                if (s[i] == '<')
+                {
+                    int gt = s.IndexOf('>', i);
+                    if (gt >= 0) { i = gt + 1; continue; }
+                }
+                sb.Append(s[i]);
+                i++;
+            }
+            return sb.ToString();
         }
 
         // Speech to the world, three ways at once: floating Chatter bubble above the

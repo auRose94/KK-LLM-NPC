@@ -19,7 +19,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    internal partial class NPCInstance
     {
 
         // Compress the level row of the ray fan into per-direction clearance so the
@@ -140,9 +140,12 @@ namespace KKLLMNPC
             return new {
                 ok = true,
                 me = MyName(),
+                gender = InferGender(),
+                pronouns = InferPronouns(),
                 body = DescribeEquipment(),
                 pos = new { x = F(pos.x), y = F(pos.y), z = F(pos.z) },
                 yaw = F(_yawDeg),
+                radar = BuildRadarMap(rays),
                 blocked = _blockedInfo,
                 walls = _bumpInfo,
                 ground = ground,
@@ -159,6 +162,7 @@ namespace KKLLMNPC
                 in_station = IsInAnimationStation(),
                 penetrated = IsPenetrated() ? PenetrationInfo() : null,
                 penetrating = IsDickInside() ? DickInInfo() : null,
+                partners = PartnersList(),
                 heard = RecentPlayerChat(),
                 asked = _pendingQuestion,
                 answered = _answerBusy ? null : _lastAnswer,
@@ -178,6 +182,63 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
             return _yawDeg;
+        }
+
+        // ASCII radar: top-down grid from level-row rays.  Center = '@' (self).
+        // w=wall W=wall U=usable K=kobold P=player B=barrier .=open.
+        // Row 0 = farthest forward (in front of the kobold).
+        private string BuildRadarMap(List<object> rays)
+        {
+            const int S = 5;              // half-grid: 11x11 cells
+            const float scale = 2f;       // meters per cell
+            char[,] grid = new char[S * 2 + 1, S * 2 + 1];
+            for (int r = 0; r <= S * 2; r++)
+                for (int c = 0; c <= S * 2; c++)
+                    grid[r, c] = '.';
+            grid[S, S] = '@';
+
+            float yaw = _yawDeg;
+            foreach (var obj in rays)
+            {
+                if (!(obj is Dictionary<string, object> ray)) continue;
+                string p = ""; string k = "n";
+                float a = 0, d = 999;
+                if (ray.ContainsKey("p")) p = ray["p"].ToString();
+                if (ray.ContainsKey("k")) k = ray["k"].ToString();
+                if (ray.ContainsKey("a")) { try { a = Convert.ToSingle(ray["a"]); } catch { } }
+                if (ray.ContainsKey("d")) { try { d = Convert.ToSingle(ray["d"]); } catch { } }
+                if (p != "l" || k == "n") continue;
+
+                float worldAngle = yaw + a;
+                float rad = worldAngle * (float)(Math.PI / 180.0);
+                float gx = -Mathf.Sin(rad) * d / scale;
+                float gz = Mathf.Cos(rad) * d / scale;
+                int col = Mathf.RoundToInt(gx) + S;
+                int row = S - Mathf.RoundToInt(gz);
+                if (row < 0 || row > S * 2 || col < 0 || col > S * 2) continue;
+                if (row == S && col == S) continue;
+
+                char ch;
+                switch (k)
+                {
+                    case "w": ch = 'W'; break;
+                    case "u": ch = 'U'; break;
+                    case "k": ch = 'K'; break;
+                    case "p": ch = 'P'; break;
+                    case "barrier": ch = 'B'; break;
+                    default: ch = '?'; break;
+                }
+                grid[row, col] = ch;
+            }
+
+            var sb = new System.Text.StringBuilder();
+            for (int r = 0; r <= S * 2; r++)
+            {
+                for (int c = 0; c <= S * 2; c++)
+                    sb.Append(grid[r, c]);
+                if (r < S * 2) sb.AppendLine();
+            }
+            return sb.ToString();
         }
 
         // True when k is the local human player's body (not an AI/wild kobold).
@@ -318,14 +379,6 @@ namespace KKLLMNPC
             return Mathf.DeltaAngle(_yawDeg, ang);
         }
 
-        private float _lastGreetTime = -99f;
-
-        private float _playerSeenTime = -99f;
-
-        private float _lastStimLevel = -1f;   // for stim trend calc
-
-        private float _lastAmbientTime = -99f; // when we last said something unprompted
-
         // Direction of stimulation as a short suffix: "↑"/"↓"/"" so the model sees it changing.
         private string StimTrend(float stim)
         {
@@ -381,13 +434,14 @@ namespace KKLLMNPC
             try
             {
                 var seen = new HashSet<int>();
-                foreach (var c in Physics.OverlapSphere(_kobold.transform.position, 14f, ~0, QueryTriggerInteraction.Collide))
+                var nearbyRadius = 14f;
+                foreach (var c in Physics.OverlapSphere(_kobold.transform.position, nearbyRadius, ~0, QueryTriggerInteraction.Collide))
                 {
                     if (c == null) continue;
                     GenericUsable u = c.GetComponentInParent<GenericUsable>();
                     Kobold k = c.GetComponentInParent<Kobold>();
                     if (k != null && k == _kobold) continue;
-                if (u == null && k == null) continue;
+                    if (u == null && k == null) continue;
                     var rootComp = (Component)k ?? u;
                     if (!seen.Add(rootComp.transform.root.GetInstanceID() * 31 + rootComp.GetInstanceID())) continue;
                     Vector3 d = c.transform.position - _kobold.transform.position;
@@ -421,7 +475,13 @@ namespace KKLLMNPC
                         // Landmark memory: remember where things are once seen.
                         if (canUse) RememberFact(kind + " is " + RelBearing(d) + " here");
                     }
+                    // Stable addressable id so the model can target this exact object:
+                    // go_to id:N / interact id:N. Door/usable/kobold all get one.
+                    int tid = rootComp.transform.root != null
+                        ? TargetIdFor(rootComp.transform.root, nm)
+                        : TargetIdFor(rootComp.transform, nm);
                     list.Add(new {
+                        id = tid,
                         k = label,
                         n = nm,
                         d = F(d.magnitude),
@@ -459,6 +519,8 @@ namespace KKLLMNPC
         private string CaptureImageB64()
         {
             byte[] jpg = CaptureImageBytes();
+            if (jpg != null && _cfgVisionDebug != null && _cfgVisionDebug.Value)
+                DumpVisionFrame(jpg);
             return jpg != null ? "data:image/jpeg;base64," + Convert.ToBase64String(jpg) : null;
         }
 
@@ -467,21 +529,53 @@ namespace KKLLMNPC
             if (_cam == null || !RtCreated(_rt)) return null;
             try
             {
-                _cam.Render();
-                var prev = RenderTexture.active;
-                RenderTexture.active = _rt;
-                Texture2D tex = null;
+                Texture2D texL = null, texR = null;
                 try
                 {
-                    tex = new Texture2D(_rt.width, _rt.height, TextureFormat.RGB24, false);
-                    tex.ReadPixels(new Rect(0, 0, _rt.width, _rt.height), 0, 0, false);
-                    tex.Apply();
-                    return UnityEngine.ImageConversion.EncodeToJPG(tex, 60);
+                    // Left eye.
+                    _cam.Render();
+                    var prev = RenderTexture.active;
+                    RenderTexture.active = _rt;
+                    texL = new Texture2D(_rt.width, _rt.height, TextureFormat.RGB24, false);
+                    texL.ReadPixels(new Rect(0, 0, _rt.width, _rt.height), 0, 0, false);
+                    texL.Apply();
+                    RenderTexture.active = prev;
+
+                    // Right eye (stereo mode).
+                    if (_camR != null && RtCreated(_rtR))
+                    {
+                        _camR.Render();
+                        prev = RenderTexture.active;
+                        RenderTexture.active = _rtR;
+                        texR = new Texture2D(_rtR.width, _rtR.height, TextureFormat.RGB24, false);
+                        texR.ReadPixels(new Rect(0, 0, _rtR.width, _rtR.height), 0, 0, false);
+                        texR.Apply();
+                        RenderTexture.active = prev;
+
+                        // Stitch side-by-side: left half = left eye, right half = right eye.
+                        int w = texL.width, h = texL.height;
+                        var stereo = new Texture2D(w * 2, h, TextureFormat.RGB24, false);
+                        var pxL = texL.GetPixels32();
+                        var pxR = texR.GetPixels32();
+                        var pxOut = new Color32[pxL.Length * 2];
+                        for (int y = 0; y < h; y++)
+                        {
+                            Array.Copy(pxL, y * w, pxOut, y * w * 2, w);
+                            Array.Copy(pxR, y * w, pxOut, y * w * 2 + w, w);
+                        }
+                        stereo.SetPixels32(pxOut);
+                        stereo.Apply();
+                        byte[] stereoJpg = UnityEngine.ImageConversion.EncodeToJPG(stereo, _cfgImageQuality.Value);
+                        Destroy(stereo);
+                        return stereoJpg;
+                    }
+
+                    return UnityEngine.ImageConversion.EncodeToJPG(texL, _cfgImageQuality.Value);
                 }
                 finally
                 {
-                    RenderTexture.active = prev;
-                    if (tex != null) Destroy(tex);
+                    if (texL != null) Destroy(texL);
+                    if (texR != null) Destroy(texR);
                 }
             }
             catch (Exception e) { Logger.LogWarning("screenshot: " + e.Message); return null; }

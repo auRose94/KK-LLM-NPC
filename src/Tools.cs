@@ -19,7 +19,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    internal partial class NPCInstance
     {
 
         // ------------------------------------------------------------------
@@ -32,10 +32,9 @@ namespace KKLLMNPC
             Vector3 target = new Vector3(x, y, z);
             Vector3 toT = target - _kobold.transform.position;
             float dist = toT.magnitude;
-            toT.y = 0;
-            float yaw = Mathf.Atan2(toT.x, toT.z) * 57.29578f;
-            lock (_stateLock) { _yawDeg = yaw; }
-            // Actually start walking there (bounded burst) so move_to isn't a no-op.
+            // Set nav target — FixedUpdateSafe handles smooth turning and arrival braking.
+            _navTarget = target;
+            _navTargetName = null;
             float dur = Mathf.Clamp(dist / 2f, 0.3f, 8f);
             SetMove(1f, 0f, false, 0f, dur, p.B("run", false));
             return new { ok = true, dist = F(dist), walked_for = F(dur) };
@@ -51,7 +50,15 @@ namespace KKLLMNPC
             float dur = Mathf.Clamp(p.F("duration", 2f), 0.1f, 8f);
             bool run = p.B("run", false); // default: walk
             if (_photonView != null && !_photonView.IsMine && PhotonNetwork.InRoom)
-                Logger.LogWarning($"walk: not Photon owner (owner={_photonView.Owner?.NickName ?? "?"}) — movement won't apply");
+            {
+                try
+                {
+                    string safeNick = _photonView.Owner?.NickName ?? "?";
+                    safeNick = new string(safeNick.Where(c => c >= 32 && c < 127).ToArray());
+                    Logger.LogWarning($"walk: not Photon owner (owner={safeNick}) — movement won't apply");
+                }
+                catch (Exception) { Logger.LogWarning("walk: not Photon owner — movement won't apply"); }
+            }
             SetMove(speed, strafe, jump, 0f, dur, run);
             if (Mathf.Abs(turn) > 0.001f)
                 lock (_stateLock) { _yawOffsetDeg += turn; }
@@ -85,7 +92,7 @@ namespace KKLLMNPC
                     deltaDeg = Mathf.Lerp(-fov * 0.5f, fov * 0.5f, t);
                 }
                 // Rays inherit camera pitch+yaw; we steer the whole body to that yaw.
-                _yawDeg = Mathf.Repeat(_yawDeg + deltaDeg, 360f);
+                _yawDeg = Mathf.Repeat(_yawDeg + deltaDeg, 360f); // immediate for scan — no smooth needed
                 yawOut = _yawDeg;
             }
             SetMove(speed, p.F("strafe", 0f), jump, 0f, dur, run);
@@ -131,6 +138,51 @@ namespace KKLLMNPC
             return new { ok = true, turning_to_sweep = sweep, scan = seen };
         }
 
+        // Dynamically inspect a direction the model cares about and get back what's
+        // there, with stable ids it can feed straight into go_to/interact. Unlike the
+        // static 'nearby' (14m, capped), this probes whichever heading you ask for at
+        // full ray range, so the model can react to *what it's looking at* in that turn.
+        private object ToolSurvey(JsonObj p)
+        {
+            if (!IsAlive(_kobold) || !IsAlive(_head)) return new { ok = false, reason = "no_body" };
+            float heading = p.F("heading_deg", float.NaN);   // absolute yaw, else current facing
+            float pitch = p.F("pitch_deg", float.NaN);
+            float range = Mathf.Clamp(p.F("range", _cfgRayRange.Value), 2f, 40f);
+            var seen = (Dictionary<string, object>)RunOnMainThread(() =>
+            {
+                var res = new Dictionary<string, object>();
+                float yaw = float.IsNaN(heading) ? _yawDeg : heading;
+                float pit = float.IsNaN(pitch) ? _pitchDeg : pitch;
+                var dir = Quaternion.Euler(pit, yaw, 0) * Vector3.forward;
+                // A pair of parallel rays a little apart so wide objects aren't missed
+                // and we can estimate distance + width.
+                for (float off = -0.35f; off <= 0.35f; off += 0.35f)
+                {
+                    var o2 = Quaternion.Euler(0, yaw, 0) * new Vector3(off, 0, 0);
+                    RaycastHit hit;
+                    var org = _head.position + o2;
+                    if (!Physics.Raycast(org, dir, out hit, range, ~0, QueryTriggerInteraction.Ignore) || IsOwnCollider(hit.collider)) continue;
+                    string what = "wall:" + hit.collider.gameObject.name;
+                    int tid = -1;
+                    string cat = "geometry";
+                    try
+                    {
+                        var kb = hit.collider.GetComponentInParent<Kobold>();
+                        var us = hit.collider.GetComponentInParent<GenericUsable>();
+                        Transform root = hit.collider.transform.root != null ? hit.collider.transform.root : hit.collider.transform;
+                        if (kb != null) { what = (IsPlayerKobold(kb) ? "player:" : "kobold:") + kb.name; cat = "kobold"; tid = TargetIdFor(root, kb.name); }
+                        else if (us != null) { string cn = CleanName(us.name); what = "usable:" + cn; cat = ClassifyUsable(cn); tid = TargetIdFor(root, cn); }
+                    }
+                    catch (Exception) { }
+                    string key = res.ContainsKey("hit") ? "hit2" : "hit";
+                    res[key] = new { n = what, d = F(hit.distance), cat, id = tid };
+                }
+                if (res.Count == 0) res["clear"] = "nothing within " + F(range) + "m";
+                return res;
+            });
+            return new { ok = true, asked_yaw = float.IsNaN(heading) ? F(_yawDeg) : F(heading), range = F(range), result = seen };
+        }
+
         private object ToolCrouch(JsonObj p)
         {
             float amount = Mathf.Clamp01(p.F("crouch", 1f));
@@ -138,34 +190,60 @@ namespace KKLLMNPC
             return new { ok = true, crouch = amount, note = amount >= 0.05f ? "crouching" : "standing" };
         }
 
-        // Path the body toward a world position or a named place/usable. The game's
-        // NavMesh API isn't accessible from this Unity build, so this drives our own
-        // movement: face the target + walk with obstacle auto-steer (from FixedUpdate).
-        // Autonomous approach: face a named place / world position and walk there with
-        // obstacle auto-steer (no real NavMesh access available; steering is local).
+        // Path the body toward a world position or a named/identified place/usable. The
+        // game's NavMesh API isn't accessible from this Unity build, so this drives our
+        // own movement: face the target + walk with obstacle auto-steer (from FixedUpdate).
+        // Accepts id: (from 'nearby') or name: or raw x,z. 'at' stops the approach that
+        // many meters short (defaults: named/usable targets stop ~1m short so the model
+        // reaches the object instead of bumping it; raw coords go all the way).
         private object ToolGoTo(JsonObj p)
         {
             if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
 
             string name = p.S("name", "");
+            bool hasId = p.Has("id");
             Vector3 target;
-            if (!string.IsNullOrEmpty(name))
+            bool namedTarget = true;
+            if (hasId)
+            {
+                Transform tf = null;
+                try
+                {
+                    double idv = p.DB("id", -1);
+                    int id = (int)idv;
+                    tf = (Transform)RunOnMainThread(() => FindTargetById(id), 8000);
+                }
+                catch (Exception) { }
+                if (tf == null) return new { ok = false, reason = "unknown_target", id = p.S("id"), note = "that id wasn't nearby; re-read 'nearby' for current ids" };
+                target = tf.position;
+                name = CleanName(tf.name);
+                _navTargetName = name;
+            }
+            else if (!string.IsNullOrEmpty(name))
             {
                 var hit = FindPlaceByName(name);
                 if (!hit.HasValue) return new { ok = false, reason = "unknown_place", tried = name };
                 target = hit.Value;
                 _navTargetName = name;
             }
-            else { target = new Vector3(p.F("x"), 0, p.F("z")); _navTargetName = null; }
+            else { target = new Vector3(p.F("x"), 0, p.F("z")); _navTargetName = null; namedTarget = false; }
 
-            bool run = p.B("run", false);
+            // Stop short so we arrive AT the target rather than plowing through it.
+            float at = p.F("at", namedTarget ? 1f : 0f);
+            at = Mathf.Clamp(at, 0f, 8f);
             Vector3 to = target - _kobold.transform.position; to.y = 0;
-            float dist = to.magnitude;
+            float fullDist = to.magnitude;
+            float stopAt = Mathf.Max(0f, fullDist - at);
             float yaw = Mathf.Atan2(to.x, to.z) * 57.29578f;
             lock (_stateLock) { _yawDeg = yaw; }
-            _navTarget = new Vector3(target.x, 0, target.z);
-            SetMove(1f, 0f, false, 0f, Mathf.Clamp(dist / 2f, 0.3f, 12f), run);
-            return new { ok = true, to = _navTargetName ?? "position", dist = F(dist), note = "walking with obstacle steering; re-issue go_to to update heading" };
+            if (fullDist > at + 0.1f)
+            {
+                var arrive = _kobold.transform.position + to.normalized * stopAt;
+                _navTarget = new Vector3(arrive.x, 0, arrive.z);
+                SetMove(1f, 0f, false, 0f, Mathf.Clamp(stopAt / 2f, 0.3f, 12f), p.B("run", false));
+            }
+            else { _navTarget = null; StopMove(); _blockedInfo = "already at " + name; }
+            return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "walking with obstacle steering; re-issue go_to to update heading" };
         }
 
         // Resolve a human-ish name ("bed", "toilet", "player", "door") to a world
@@ -240,9 +318,9 @@ namespace KKLLMNPC
             float dPitch = p.F("dpitch_deg", 0f);
             lock (_stateLock)
             {
-                if (!float.IsNaN(yaw)) _yawDeg = Mathf.Repeat(yaw, 360f);
+                if (!float.IsNaN(yaw)) _yawDeg = MoveAngleTowards(_yawDeg, Mathf.Repeat(yaw, 360f), 360f);
                 if (!float.IsNaN(pitch)) _pitchDeg = Mathf.Clamp(pitch, -89f, 89f);
-                _yawDeg = Mathf.Repeat(_yawDeg + dYaw, 360f);
+                if (dYaw != 0f) _yawDeg = MoveAngleTowards(_yawDeg, Mathf.Repeat(_yawDeg + dYaw, 360f), 360f);
                 _pitchDeg = Mathf.Clamp(_pitchDeg + dPitch, -89f, 89f);
             }
             // Turn the whole body when looking around — the animator handles body yaw
@@ -271,13 +349,30 @@ namespace KKLLMNPC
         // (the same thing the player's Use() calls once one is in range).
         // Look for a GenericUsable in front (eye-ray first, then a 2.6m bubble), TURN to
         // face it, then LocalUse() it — that's what drives stations/machines.
-        private object ToolInteract()
+        private object ToolInteract(JsonObj p)
         {
             if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
             return RunOnMainThread(() =>
             {
-                var target = FindBestUsable(out float dist);
-                if (target == null) return new { ok = false, reason = "nothing_usable_nearby" };
+                GenericUsable target;
+                float dist;
+                // Optional id: act on a *specific* nearby object (from the 'nearby'
+                // list) rather than whatever happens to be in front. This is the
+                // addressable-interact win — the model picks the exact bed/station.
+                if (p != null && p.Has("id"))
+                {
+                    double idv = -1; try { idv = p.DB("id", -1); } catch (Exception) { }
+                    Transform tf = FindTargetById((int)idv);
+                    if (tf == null) return new { ok = false, reason = "unknown_target", id = p.S("id"), note = "that id wasn't nearby; re-read 'nearby' for current ids" };
+                    target = tf.GetComponentInParent<GenericUsable>();
+                    dist = Vector3.Distance(tf.position, _kobold.transform.position);
+                    if (target == null) return new { ok = false, reason = "target_not_usable", name = CleanName(tf.name) };
+                }
+                else
+                {
+                    target = FindBestUsable(out dist);
+                    if (target == null) return new { ok = false, reason = "nothing_usable_nearby" };
+                }
 
                 // Face it first (yaw + slight pitch down toward the object) and turn
                 // the *camera* — the model's vision follows this, so it will see the
@@ -335,8 +430,6 @@ namespace KKLLMNPC
             }
             return best;
         }
-
-        private const float InteractRange = 2.6f;
 
         private object ToolGrab(JsonObj p)
         {

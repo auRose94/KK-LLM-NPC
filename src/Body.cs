@@ -19,14 +19,8 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    internal partial class NPCInstance
     {
-
-        // Penetration awareness: per-penetrator depth over time — the model can tell
-        // how deep it is, whether it's thrusting, and roughly which hole.
-        private class PenState { public string name; public float depth; public float lastT; public float vel; public string hole; public Transform src; }
-
-        private readonly Dictionary<object, PenState> _pen = new Dictionary<object, PenState>();
 
         // Fires when this kobold's penetrator enters something (and each tick).
         private void NotifyDickIn(KKPenetratorListener listener, string hole, bool entered)
@@ -85,14 +79,13 @@ namespace KKLLMNPC
                 foreach (var kv in _dickIn)
                 {
                     var st = kv.Value;
-                    parts.Add(st.name + " depth=" + F(st.depth) + "m thrust=" + F(st.vel));
+                    int pid = PartnerId(st.src);
+                    parts.Add(st.name + " depth=" + F(st.depth) + "m thrust=" + F(st.vel)
+                              + (pid > 0 ? " (with id=" + pid + ")" : " (non-kobold)"));
                 }
                 return _dickIn.Count + " inside (" + string.Join("; ", parts.ToArray()) + ")";
             }
         }
-
-        // Same but for when THIS kobold's own dick is inside someone/something.
-        private readonly Dictionary<object, PenState> _dickIn = new Dictionary<object, PenState>();
 
         // Pick (or keep) a kobold the AI can drive. Skips already-LLM-claimed and player
         // bodies, prefers the nearest free AI kobold, falls back to map-wide if none in range.
@@ -110,7 +103,7 @@ namespace KKLLMNPC
                 // "exists but not AI-controlled" from "all claimed".
                 int total = 0, ai = 0, claimed = 0, playerControlled = 0;
                 Kobold best = null; float bestD = float.MaxValue;
-                foreach (var k in FindObjectsOfType<Kobold>())
+                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
                 {
                     if (k == null) continue;
                     total++;
@@ -127,11 +120,11 @@ namespace KKLLMNPC
                 }
                 if (best == null)
                 {
-                    Logger.LogInfo($"KKLLMNPC{InstanceSuffix}: no AI kobold found (total={total} ai={ai} claimed={claimed} player={playerControlled}).");
+                    Logger.LogInfo($"KKLLMNPC: no AI kobold found (total={total} ai={ai} claimed={claimed} player={playerControlled}).");
                     return false;
                 }
                 if (bestD > _cfgAutoFindRange.Value)
-                    Logger.LogInfo($"KKLLMNPC{InstanceSuffix}: nearest AI kobold is {F(bestD)}m (AutoFindRange={_cfgAutoFindRange.Value}m) — possessing anyway.");
+                    Logger.LogInfo($"KKLLMNPC: nearest AI kobold is {F(bestD)}m (AutoFindRange={_cfgAutoFindRange.Value}m) — possessing anyway.");
                 Possess(best);
                 return true;
             }
@@ -146,16 +139,22 @@ namespace KKLLMNPC
             if (target == null) return;
             TeardownBody();
             if (!IsAlive(target)) return; // died between selection and possess
+            int id = target.GetInstanceID();
+            // Atomic claim: reject if another instance grabbed it first.
+            lock (LLMNPCPlugin.ClaimedKobolds)
+            {
+                if (LLMNPCPlugin.ClaimedKobolds.Contains(id)) return;
+                LLMNPCPlugin.ClaimedKobolds.Add(id);
+            }
             _kobold = target;
-            _currentKoboldId = target.GetInstanceID();
-            // Register so any other LLM instance won't grab this body.
-            lock (LLMNPCPlugin.ClaimedKobolds) { LLMNPCPlugin.ClaimedKobolds.Add(_currentKoboldId); }
+            _currentKoboldId = id;
             _npcName = PickName(target);   // choose a name for this body
-            Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'");
+            _persona = BuildPersona();     // personality + gender + pronouns from the body
+            Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'" + (_persona != null ? " — " + _persona : ""));
             _yawDeg = target.transform.eulerAngles.y; // start from current facing
             _controller = target.GetComponent<KoboldCharacterController>();
             _descriptor = target.GetComponent<CharacterDescriptor>();
-            _grabber    = target.GetComponentInChildren<Grabber>(true);
+            _grabber = target.GetComponentInChildren<Grabber>(true);
             _charAnimator = target.GetComponentInChildren<CharacterControllerAnimator>(true);
             // Kill any in-flight rotation coroutines started before we took the body — they
             // write rigidbody.rotation outside our control and fight with the steering.
@@ -209,8 +208,6 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // reagent awareness
         // ------------------------------------------------------------------
-        private ScriptableReagent _eggReagent; // resolved lazily
-
         // How much egg reagent the kobold is carrying (needs a laying station).
         // Game rule: OvipositionSpot.CanUse = belly egg volume > 5 AND energy > 1.
         private float GetEggVolume(Kobold k)
@@ -282,10 +279,10 @@ namespace KKLLMNPC
                 switch (injectType)
                 {
                     case GenericReagentContainer.InjectType.Metabolize: how = "metabolized"; break;
-                    case GenericReagentContainer.InjectType.Spray:      how = "sprayed"; break;
-                    case GenericReagentContainer.InjectType.Flood:      how = "filled up with"; break;
-                    case GenericReagentContainer.InjectType.Vacuum:     how = "pumped out"; break;
-                    default:                                            how = "drank"; break; // Inject = consume
+                    case GenericReagentContainer.InjectType.Spray: how = "sprayed"; break;
+                    case GenericReagentContainer.InjectType.Flood: how = "filled up with"; break;
+                    case GenericReagentContainer.InjectType.Vacuum: how = "pumped out"; break;
+                    default: how = "drank"; break; // Inject = consume
                 }
                 string ev = how + " " + what;
 
@@ -355,6 +352,8 @@ namespace KKLLMNPC
         {
             if (_cam != null) { try { Destroy(_cam.gameObject); } catch (Exception) { } _cam = null; }
             if (_rt != null) { try { _rt.Release(); Destroy(_rt); } catch (Exception) { } _rt = null; }
+            if (_camR != null) { try { Destroy(_camR.gameObject); } catch (Exception) { } _camR = null; }
+            if (_rtR != null) { try { _rtR.Release(); Destroy(_rtR); } catch (Exception) { } _rtR = null; }
             UnsubscribeBelly();
             UnsubscribePenetrables();
             if (_charAnimator != null) { try { _charAnimator.SetLookEnabled(true); } catch (Exception) { } }
@@ -375,21 +374,45 @@ namespace KKLLMNPC
         private void SetupCamera()
         {
             if (_head == null) return;
-            var go = new GameObject("LLMNPC_Cam");
+            float halfIPD = (_cfgStereo != null && _cfgStereo.Value) ? _cfgStereoIPD.Value * 0.5f : 0f;
+
+            // Left eye camera (center when stereo is off).
+            var go = new GameObject("LLMNPC_Cam_L");
             go.transform.SetParent(_head, false);
-            // In FRONT of the muzzle so we don't see the inside of the head/eyes/teeth,
-            // with a near clip that starts past them.
-            go.transform.localPosition = new Vector3(0f, 0.06f, _cfgCamForward.Value);
+            go.transform.localPosition = new Vector3(-halfIPD, 0.06f, _cfgCamForward.Value);
             go.transform.localRotation = Quaternion.identity;
             _cam = go.AddComponent<Camera>();
             _cam.fieldOfView = 90f;
-            _cam.nearClipPlane = _cfgCamNearClip.Value; // clip past face geometry (~eyes & snout)
+            _cam.nearClipPlane = _cfgCamNearClip.Value;
             _cam.farClipPlane = 80f;
-            _cam.enabled = false; // we render on demand
+            _cam.enabled = false;
             if (RtCreated(_rt)) { try { _rt.Release(); Destroy(_rt); } catch (Exception) { } }
             _rt = new RenderTexture(_cfgImageSize.Value, _cfgImageSize.Value, 16, RenderTextureFormat.ARGB32);
             _rt.Create();
             _cam.targetTexture = _rt;
+
+            // Right eye camera (only when stereo is enabled).
+            if (halfIPD > 0f)
+            {
+                var goR = new GameObject("LLMNPC_Cam_R");
+                goR.transform.SetParent(_head, false);
+                goR.transform.localPosition = new Vector3(halfIPD, 0.06f, _cfgCamForward.Value);
+                goR.transform.localRotation = Quaternion.identity;
+                _camR = goR.AddComponent<Camera>();
+                _camR.fieldOfView = 90f;
+                _camR.nearClipPlane = _cfgCamNearClip.Value;
+                _camR.farClipPlane = 80f;
+                _camR.enabled = false;
+                if (RtCreated(_rtR)) { try { _rtR.Release(); Destroy(_rtR); } catch (Exception) { } }
+                _rtR = new RenderTexture(_cfgImageSize.Value, _cfgImageSize.Value, 16, RenderTextureFormat.ARGB32);
+                _rtR.Create();
+                _camR.targetTexture = _rtR;
+            }
+            else
+            {
+                if (_camR != null) { try { Destroy(_camR.gameObject); } catch (Exception) { } _camR = null; }
+                if (_rtR != null) { try { _rtR.Release(); Destroy(_rtR); } catch (Exception) { } _rtR = null; }
+            }
         }
 
         // ------------------------------------------------------------------
@@ -418,19 +441,126 @@ namespace KKLLMNPC
             catch (Exception) { return new { with = "unknown", penis = false, penetrables = 0 }; }
         }
 
-        // ------------------------------------------------------------------
-        // penetration awareness
-        // ------------------------------------------------------------------
-        private readonly List<PenetrationTech.Penetrable> _subscribedPenetrables
-            = new List<PenetrationTech.Penetrable>();
+        // Physical gender inferred from the body's genes (the game defines sex by
+        // equipment): a penis marks male, penetrables mark female, both/none = nonbinary.
+        private string InferGender()
+        {
+            bool penis = false, female = false;
+            try
+            {
+                var g = _kobold.GetGenes();
+                penis = _kobold.activeDicks != null && _kobold.activeDicks.Count >= 1;
+                female = _kobold.penetratables != null && _kobold.penetratables.Count >= 3;
+            }
+            catch (Exception) { }
+            if (penis && !female) return "male";
+            if (female && !penis) return "female";
+            return "nonbinary";
+        }
 
-        private readonly List<KKPenetratorListener> _penListeners
-            = new List<KKPenetratorListener>();
+        private string InferPronouns()
+        {
+            string g = InferGender();
+            if (g == "male") return "he/him";
+            if (g == "female") return "she/her";
+            return "they/them";
+        }
+
+        // The species-form of the body model, hinted by its name. Fallback "kobold".
+        private static string SpeciesForm(string name)
+        {
+            string n = name == null ? "" : name.ToLowerInvariant();
+            if (n.Length == 0) return "kobold";
+            if (n.Contains("absol") || n.Contains("sable") || n.Contains("expe") || n.Contains("expie") || n.Contains("night") || n.Contains("dark")) return "sleek cat-like";
+            if (n.Contains("drake") || n.Contains("spinel") || n.Contains("dragon") || n.Contains("sky") || n.Contains("wing") || n.Contains("wyrm") || n.Contains("wyvern") || n.Contains("draconic")) return "dragon-like";
+            if (n.Contains("fennec") || n.Contains("fox") || n.Contains("kitsune") || n.Contains("vul")) return "fox-like";
+            if (n.Contains("dog") || n.Contains("canine") || n.Contains("wolf") || n.Contains("husky") || n.Contains("pup") || n.Contains("doberman") || n.Contains("bark")) return "dog-like";
+            if (n.Contains("snake") || n.Contains("serpent") || n.Contains("viper")) return "snake-like";
+            if (n.Contains("lizar") || n.Contains("ander") || n.Contains("saur") || n.Contains("scal") || n.Contains("rept") || n.Contains("argonian") || n.Contains("gater") || n.Contains("claw") || n.Contains("croc")) return "lizard-like";
+            if (n.Contains("deer") || n.Contains("stag") || n.Contains("buck")) return "deer-like";
+            if (n.Contains("bunny") || n.Contains("rabbit") || n.Contains("hare")) return "rabbit-like";
+            if (n.Contains("utaur") || n.Contains("bull") || n.Contains("ox")) return "bull-like";
+            if (n.Contains("horse") || n.Contains("equine") || n.Contains("stallion") || n.Contains("mare")) return "horse-like";
+            if (n.Contains("cat") || n.Contains("kitten") || n.Contains("pussy") || n.Contains("tigre") || n.Contains("tiger") || n.Contains("yorha") || n.Contains("feline") || n.Contains("purr")) return "cat-like";
+            if (n.Contains("bear") || n.Contains("urs")) return "bear-like";
+            if (n.Contains("rat") || n.Contains("rodent") || n.Contains("vermin")) return "rat-like";
+            if (n.Contains("mouse") || n.Contains("mice")) return "mouse-like";
+            if (n.Contains("bat") || n.Contains("vampire")) return "bat-like";
+            if (n.Contains("possum")) return "possum-like";
+            if (n.Contains("shark") || n.Contains("fish") || n.Contains("fin")) return "shark-like";
+            if (n.Contains("bird") || n.Contains("avian") || n.Contains("wing")) return "bird-like";
+            if (n.Contains("pig") || n.Contains("swine") || n.Contains("hog")) return "pig-like";
+            if (n.Contains("cow") || n.Contains("cattle") || n.Contains("moo") || n.Contains("bovine")) return "cow-like";
+            if (n.Contains("sheep") || n.Contains("torial") || n.Contains("lamb") || n.Contains("ram")) return "sheep-like";
+            if (n.Contains("goat") || n.Contains("capra")) return "goat-like";
+            if (n.Contains("monkey") || n.Contains("ape") || n.Contains("primate")) return "monkey-like";
+            if (n.Contains("tiger") || n.Contains("lion") || n.Contains("panther")) return "big cat-like";
+            if (n.Contains("otter") || n.Contains("mustelid") || n.Contains("weasel")) return "otter-like";
+            if (n.Contains("seal") || n.Contains("walrus") || n.Contains("pinniped")) return "seal-like";
+            if (n.Contains("hena") || n.Contains("yeen") || n.Contains("hyena")) return "yeen-like";
+            if (n.Contains("kangaroo") || n.Contains("marsupial")) return "kangaroo-like";
+            if (n.Contains("hedgehog") || n.Contains("spiny")) return "hedgehog-like";
+            if (n.Contains("raccoon") || n.Contains("trash panda")) return "raccoon-like";
+            if (n.Contains("chicken") || n.Contains("rooster") || n.Contains("hen")) return "chicken-like";
+            if (n.Contains("duck") || n.Contains("drake") || n.Contains("mallard")) return "duck-like";
+            if (n.Contains("goose") || n.Contains("gander")) return "goose-like";
+            if (n.Contains("frog") || n.Contains("toad")) return "frog-like";
+            if (n.Contains("bee") || n.Contains("wasp") || n.Contains("hornet")) return "insect-like";
+            if (n.Contains("cyborg") || n.Contains("mecha") || n.Contains("robot") || n.Contains("android") || n.Contains("tasque") || n.Contains("proto")) return "robot-like";
+            if (n.Contains("alien") || n.Contains("extraterrestrial") || n.Contains("xeno")) return "alien-like";
+            if (n.Contains("demon") || n.Contains("imp") || n.Contains("hell")) return "demonic";
+            if (n.Contains("angel") || n.Contains("seraph") || n.Contains("celestial")) return "angelic";
+            if (n.Contains("vampire") || n.Contains("nosferatu")) return "vampiric";
+            if (n.Contains("werewolf") || n.Contains("lycanthrope")) return "werewolf-like";
+            if (n.Contains("human") || n.Contains("humanoid") || n.Contains("jenny")) return "human-like";
+            if (n.Contains("snorlax")) return "snorlax-like";
+            if (n.Contains("zoroark")) return "zoroark-like";
+            if (n.Contains("mewtwo")) return "mewtwo-like";
+            if (n.Contains("renamon")) return "renamon-like";
+            if (n.Contains("scp")) return "scp-like";
+            return "kobold";
+        }
+
+        // Two grounded personality traits picked deterministically from the body name,
+        // so each named body keeps a distinct, stable personality across sessions.
+        private static readonly string[][] _traits = new string[][]
+        {
+            new string[] { "playful", "mischievous"},
+            new string[] { "warm", "cheerful" },
+            new string[] { "calm", "thoughtful" },
+            new string[] { "prideful", "confident" },
+            new string[] { "curious", "energetic" },
+            new string[] { "loyal", "gentle" },
+            new string[] { "bold", "adventurous" },
+            new string[] { "snarky", "quick-witted" },
+        };
+
+        private string BuildPersona()
+        {
+            try
+            {
+                if (_kobold == null) return null;
+                string name = MyName();
+                string species = SpeciesForm(name);
+                string gender = InferGender();
+                string pronouns = InferPronouns();
+
+                // Deterministic trait pick from the body name hash so it's stable.
+                int h = 0;
+                foreach (char c in name) h = h * 31 + c;
+                if (h < 0) h = -h;
+                string[] tr = _traits[h % _traits.Length];
+
+                return "You identify as a " + species + " " + gender + " kobold (" + pronouns +
+                       "). Personality: " + tr[0] + ", " + tr[1] + ".";
+            }
+            catch (Exception) { return null; }
+        }
 
         // The penetrator-side mirror: when THIS kobold's dick is inside something.
         private class KKPenetratorListener : PenetrationTech.PenetratorListener
         {
-            public LLMNPCPlugin owner;
+            public NPCInstance owner;
             public PenetrationTech.Penetrator source;
             public Transform lastTarget; // the thing it's inside right now
 
@@ -439,7 +569,7 @@ namespace KKLLMNPC
                 try
                 {
                     return pen != null && pen.gameObject != null
-                        ? LLMNPCPlugin.CleanName(pen.gameObject.name) : "somewhere";
+                        ? CleanName(pen.gameObject.name) : "somewhere";
                 }
                 catch (Exception) { return "somewhere"; }
             }
@@ -567,6 +697,21 @@ namespace KKLLMNPC
             catch (Exception) { return "hole"; }
         }
 
+        // From a penetrator/penetrable transform, resolve the partner KOBOLD that owns it
+        // (walking up the hierarchy), and return its stable id so the model can both know
+        // WHO it's with and target them via `id=`. Returns -1 when no kobold owns it.
+        private int PartnerId(Transform src)
+        {
+            try
+            {
+                if (src == null) return -1;
+                var kb = src.GetComponentInParent<Kobold>();
+                if (kb == null) return -1;
+                return TargetIdFor(kb.transform.root, kb.name);
+            }
+            catch (Exception) { return -1; }
+        }
+
         private string PenetrationInfo()
         {
             lock (_pen)
@@ -577,7 +722,9 @@ namespace KKLLMNPC
                 foreach (var kv in _pen)
                 {
                     var st = kv.Value;
-                    parts.Add(st.name + " " + st.hole + " depth=" + F(st.depth) + "m thrust=" + F(st.vel));
+                    int pid = PartnerId(st.src);
+                    parts.Add(st.name + " " + st.hole + " depth=" + F(st.depth) + "m thrust=" + F(st.vel)
+                              + (pid > 0 ? " (with id=" + pid + ")" : " (non-kobold)"));
                     if (st.depth > anyDepth) anyDepth = st.depth;
                     anyVel += st.vel;
                 }
@@ -607,6 +754,63 @@ namespace KKLLMNPC
                 foreach (var kv in _dickIn) if (now - kv.Value.lastT < 3f) return true;
                 return false;
             }
+        }
+
+        // Everyone the NPC is currently engaged with, from both directions (things
+        // inside it AND the things its own dick is inside). Can be more than 2 in a
+        // group scene. Each entry: who (partner kobold name or the appendage/hole),
+        // id (stable target id if it's a kobold, for `interact id=`), role, and the
+        // hole/depth. Returns a list; empty when engaged with nobody.
+        private object PartnersList()
+        {
+            try
+            {
+                var list = new List<object>();
+                float now = Time.unscaledTime;
+                var seen = new HashSet<int>();
+                lock (_pen)
+                {
+                    foreach (var kv in _pen)
+                    {
+                        var st = kv.Value;
+                        if (now - st.lastT >= 3f) continue;
+                        int pid = PartnerId(st.src);
+                        int key = pid > 0 ? pid : (st.src != null ? st.src.GetInstanceID() : 0);
+                        if (!seen.Add(key)) continue;
+                        string who = PartnerName(st.src, st.name);
+                        list.Add(new { who, id = pid, role = "inside_me", hole = st.hole, depth = F(st.depth) });
+                    }
+                }
+                lock (_dickIn)
+                {
+                    foreach (var kv in _dickIn)
+                    {
+                        var st = kv.Value;
+                        if (now - st.lastT >= 3f) continue;
+                        int pid = PartnerId(st.src);
+                        int key = pid > 0 ? pid : (st.src != null ? st.src.GetInstanceID() : 0);
+                        if (!seen.Add(key)) continue;
+                        string who = PartnerName(st.src, st.name);
+                        list.Add(new { who, id = pid, role = "im_inside", hole = st.hole, depth = F(st.depth) });
+                    }
+                }
+                return list.Count == 0 ? null : (object)list;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // Name a penetration partner: the owning kobold's clean name if it's a kobold,
+        // else fall back to the appendage/hole name we already recorded.
+        private string PartnerName(Transform src, string fallback)
+        {
+            try
+            {
+                if (src == null) return fallback;
+                var kb = src.GetComponentInParent<Kobold>();
+                if (kb == null) return fallback;
+                return CleanName(kb.name);
+            }
+            catch (Exception) { return fallback; }
         }
 
         // The transform of whoever is currently penetrating us / we're inside —
