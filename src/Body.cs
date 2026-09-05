@@ -474,7 +474,7 @@ namespace KKLLMNPC
             if (n.Contains("absol") || n.Contains("sable") || n.Contains("expe") || n.Contains("expie") || n.Contains("night") || n.Contains("dark")) return "sleek cat-like";
             if (n.Contains("drake") || n.Contains("spinel") || n.Contains("dragon") || n.Contains("sky") || n.Contains("wing") || n.Contains("wyrm") || n.Contains("wyvern") || n.Contains("draconic")) return "dragon-like";
             if (n.Contains("fennec") || n.Contains("fox") || n.Contains("kitsune") || n.Contains("vul")) return "fox-like";
-            if (n.Contains("dog") || n.Contains("canine") || n.Contains("wolf") || n.Contains("husky") || n.Contains("pup") || n.Contains("doberman") || n.Contains("bark")) return "dog-like";
+            if (n.Contains("dog") || n.Contains("loona") || n.Contains("canine") || n.Contains("wolf") || n.Contains("husky") || n.Contains("pup") || n.Contains("doberman") || n.Contains("bark")) return "dog-like";
             if (n.Contains("snake") || n.Contains("serpent") || n.Contains("viper")) return "snake-like";
             if (n.Contains("lizar") || n.Contains("ander") || n.Contains("saur") || n.Contains("scal") || n.Contains("rept") || n.Contains("argonian") || n.Contains("gater") || n.Contains("claw") || n.Contains("croc")) return "lizard-like";
             if (n.Contains("deer") || n.Contains("stag") || n.Contains("buck")) return "deer-like";

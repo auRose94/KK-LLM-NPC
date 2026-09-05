@@ -288,6 +288,16 @@ namespace KKLLMNPC
                     }
                     else
                     {
+                        // WALL BRAKING: quadratic deceleration as we approach.
+                        // Full stop only when boxed in (no clear heading); otherwise
+                        // slow down smoothly so the body stops *before* touching.
+                        float wallBrakeDist = 3.0f;
+                        if (hit.distance < wallBrakeDist)
+                        {
+                            float t = hit.distance / wallBrakeDist;
+                            fwdOut = Mathf.Min(fwdOut, t * t);  // quadratic: aggressive near wall
+                        }
+
                         // Surface in front — try to find a clear heading by fan-steering.
                         float steer = FindClearHeading(eye, hit.normal);
                         if (steer != 0f)
@@ -297,6 +307,7 @@ namespace KKLLMNPC
                         }
                         else
                         {
+                            // Boxed in — full stop regardless of distance.
                             fwdOut = 0f;
                             _blockedInfo = "blocked, no clear way (dist " + F(hit.distance) + ")";
                         }

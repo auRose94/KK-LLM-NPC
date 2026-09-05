@@ -58,15 +58,53 @@ namespace KKLLMNPC
         // than breaking the loop.
         private object BuildPerception(bool includeImage)
         {
-            try { return BuildPerceptionSafe(includeImage); }
+            try
+            {
+                // Throttle full perception when idle to save work
+                bool active = Time.unscaledTime - _lastMoveTime < 2f
+                    || IsInAnimationStation()
+                    || IsPenetrated()
+                    || IsDickInside();
+                int throttleTicks = active ? 1 : 2;
+                bool useCache = _tick - _lastFullPerceptionTick < throttleTicks && _cachedPerception != null;
+                if (useCache) Logger.LogInfo($"perception cache hit (active={active}, throttle={throttleTicks})");
+                if (useCache)
+                {
+                    // Lightweight update: keep cached perception but refresh dynamic fields
+                    var cached = _cachedPerception as Dictionary<string, object>;
+                    if (cached != null)
+                    {
+                        cached["tick"] = _tick;
+                        cached["yaw"] = F(_yawDeg);
+                        // Update needs quickly without full raycast
+                        var needs = new { 
+                            energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
+                            horniness = F(_kobold.stimulation) + StimTrend(_kobold.stimulation)
+                                      + (_kobold.stimulation > 0.5f ? " very" : _kobold.stimulation > 0.25f ? "" : " low"),
+                            eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
+                            crouch = F(_crouch),
+                        };
+                        cached["needs"] = needs;
+                        return cached;
+                    }
+                }
+                var full = BuildPerceptionSafe(includeImage);
+                _lastFullPerceptionTick = _tick;
+                _cachedPerception = full is Dictionary<string, object> d ? d : null;
+                if (!useCache) Logger.LogInfo($"perception full build (active={active})");
+                return full;
+            }
             catch (Exception e) { return new { ok = false, reason = "perception_error", msg = e.Message }; }
         }
 
         private object BuildPerceptionSafe(bool includeImage)
         {
             if (!IsAlive(_kobold) || !IsAlive(_head)) return new { ok = false, reason = "no_body" };
+            // Build perception as dict for caching
+            var result = new Dictionary<string, object>();
 
             var rays = new List<object>();
+            result["rays"] = rays;
             int n = Mathf.Max(1, _cfgRayCount.Value);
             float range = _cfgRayRange.Value;
             Vector3 origin = _head.position + _head.forward * 0.1f;
@@ -137,39 +175,46 @@ namespace KKLLMNPC
             var ground = ProbeGround(pos);
             var clearance = FanClearance(originForFan: _head.position);
 
-            return new {
-                ok = true,
-                me = MyName(),
-                gender = InferGender(),
-                pronouns = InferPronouns(),
-                body = DescribeEquipment(),
-                pos = new { x = F(pos.x), y = F(pos.y), z = F(pos.z) },
-                yaw = F(_yawDeg),
-                radar = BuildRadarMap(rays),
-                blocked = _blockedInfo,
-                walls = _bumpInfo,
-                ground = ground,
-                clearance = clearance,
-                vis_go = _visionSteer != null ? _visionSteer.deg.ToString("0") + "deg (" + _visionSteer.reason + ")" : null,
-                needs = new {
-                    energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
-                    horniness = F(_kobold.stimulation) + StimTrend(_kobold.stimulation)
-                              + (_kobold.stimulation > 0.5f ? " very" : _kobold.stimulation > 0.25f ? "" : " low"),
-                    eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
-                    crouch = F(_crouch),
-                },
-                consumed = DrainReagentEvents(),
-                in_station = IsInAnimationStation(),
-                penetrated = IsPenetrated() ? PenetrationInfo() : null,
-                penetrating = IsDickInside() ? DickInInfo() : null,
-                partners = PartnersList(),
-                heard = RecentPlayerChat(),
-                asked = _pendingQuestion,
-                answered = _answerBusy ? null : _lastAnswer,
-                grabbed = _kobold.grabbed,
-                rays = rays,
-                nearby = DescribeNearby(),
+            result["ok"] = true;
+            result["me"] = MyName();
+            result["gender"] = InferGender();
+            result["pronouns"] = InferPronouns();
+            result["body"] = DescribeEquipment();
+            result["pos"] = new { x = F(pos.x), y = F(pos.y), z = F(pos.z) };
+            result["yaw"] = F(_yawDeg);
+            result["radar"] = BuildRadarMap(rays);
+            result["blocked"] = _blockedInfo;
+            result["walls"] = _bumpInfo;
+            result["ground"] = ground;
+            result["clearance"] = clearance;
+            result["vis_go"] = _visionSteer != null ? _visionSteer.deg.ToString("0") + "deg (" + _visionSteer.reason + ")" : null;
+            result["needs"] = new {
+                energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
+                horniness = F(_kobold.stimulation) + StimTrend(_kobold.stimulation)
+                          + (_kobold.stimulation > 0.5f ? " very" : _kobold.stimulation > 0.25f ? "" : " low"),
+                eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
+                crouch = F(_crouch),
             };
+            result["consumed"] = DrainReagentEvents();
+            result["in_station"] = IsInAnimationStation();
+            result["penetrated"] = IsPenetrated() ? PenetrationInfo() : null;
+            result["penetrating"] = IsDickInside() ? DickInInfo() : null;
+            result["partners"] = PartnersList();
+            result["heard"] = RecentPlayerChat();
+            result["asked"] = _pendingQuestion;
+            result["answered"] = _answerBusy ? null : _lastAnswer;
+            result["grabbed"] = _kobold.grabbed;
+            result["rays"] = rays;
+            var nearby = DescribeNearby();
+            result["nearby"] = nearby;
+            string areaTxt = SpatialLayout();
+            result["area"] = areaTxt;
+            // Visionless fallback: the caption pass never runs (Vision.Enabled=false),
+            // so give commentary / ask / scene memory a real description of the area.
+            if (!_cfgVision.Value || string.IsNullOrEmpty(_sceneDesc) || _sceneDesc == "unknown")
+                _sceneDesc = areaTxt;
+
+            return result;
         }
 
         // The body's actual world yaw right now (rigidbody first, transform fallback).
@@ -189,8 +234,8 @@ namespace KKLLMNPC
         // Row 0 = farthest forward (in front of the kobold).
         private string BuildRadarMap(List<object> rays)
         {
-            const int S = 5;              // half-grid: 11x11 cells
-            const float scale = 2f;       // meters per cell
+            const int S = 10;             // half-grid: 21x21 cells
+            const float scale = 1.2f;     // meters per cell
             char[,] grid = new char[S * 2 + 1, S * 2 + 1];
             for (int r = 0; r <= S * 2; r++)
                 for (int c = 0; c <= S * 2; c++)
@@ -211,7 +256,7 @@ namespace KKLLMNPC
 
                 float worldAngle = yaw + a;
                 float rad = worldAngle * (float)(Math.PI / 180.0);
-                float gx = -Mathf.Sin(rad) * d / scale;
+                float gx = Mathf.Sin(rad) * d / scale;   // +X = right in Unity
                 float gz = Mathf.Cos(rad) * d / scale;
                 int col = Mathf.RoundToInt(gx) + S;
                 int row = S - Mathf.RoundToInt(gz);
@@ -327,6 +372,122 @@ namespace KKLLMNPC
             return Physics.Raycast(origin, dir, out h, range, ~0, QueryTriggerInteraction.Ignore) && !IsOwnCollider(h.collider);
         }
 
+        // Prose description of the surrounding area, aimed at visionless models:
+        // a full 360° chest-height sweep that reports how far each cardinal direction
+        // stays clear, which headings are open, a suggested best heading, and the
+        // nearest named things (wall vs. usable vs. kobold). Lets the model describe
+        // the room and pick a corridor/doorway without ever seeing it.
+        private string SpatialLayout()
+        {
+            try
+            {
+                if (!IsAlive(_kobold) || !IsAlive(_head)) return "unknown";
+                const int N = 16; // 22.5° per step, full circle
+                float range = Mathf.Min(_cfgRayRange.Value, 15f);
+                Vector3 origin = _head.position + Vector3.up * -0.15f; // chest height
+                float[] dist = new float[N];
+                string[] kind = new string[N];
+                string[] name = new string[N];
+                for (int i = 0; i < N; i++)
+                {
+                    float relDeg = i * 22.5f;
+                    if (relDeg > 180f) relDeg -= 360f;
+                    var dir = Quaternion.Euler(0, _yawDeg + relDeg, 0) * Vector3.forward;
+                    RaycastHit hit;
+                    dist[i] = range; kind[i] = "open";
+                    if (Physics.Raycast(origin, dir, out hit, range, ~0, QueryTriggerInteraction.Ignore) && !IsOwnCollider(hit.collider))
+                    {
+                        dist[i] = hit.distance;
+                        try
+                        {
+                            var kb = hit.collider.GetComponentInParent<Kobold>();
+                            var us = hit.collider.GetComponentInParent<GenericUsable>();
+                            if (kb != null) { kind[i] = IsPlayerKobold(kb) ? "player" : "kobold"; name[i] = CleanName(kb.name); }
+                            else if (us != null) { kind[i] = "usable"; name[i] = CleanName(us.name); }
+                            else { float topH = ProbeSurfaceTop(hit.point); kind[i] = topH < 1.35f ? "barrier" : "wall"; }
+                        }
+                        catch (Exception) { kind[i] = "wall"; }
+                    }
+                }
+
+                // Cardinal distances (0/front, 90/right, 180/back, -90/left).
+                string[] card = { "front", "right", "back", "left" };
+                int[] cardIdx = { 0, 4, 8, 12 };
+                var cards = new List<string>();
+                for (int c = 0; c < 4; c++)
+                {
+                    int i = cardIdx[c];
+                    cards.Add(card[c] + " " + F(dist[i]) + "m " + (name[i].Length > 0 ? name[i] : kind[i]));
+                }
+
+                // Open headings (>=8m and not blocked by anything) + best one, biased
+                // toward straight ahead, then farthest.
+                var open = new List<string>();
+                int bestI = 0;
+                bool anyOpen = false;
+                for (int i = 0; i < N; i++)
+                {
+                    if (dist[i] >= 8f && kind[i] == "open")
+                    {
+                        anyOpen = true;
+                        float rel = i * 22.5f; if (rel > 180f) rel -= 360f;
+                        open.Add((rel == 0 ? "front" : rel > 0 ? "+" + F(rel) : F(rel)) + "(" + F(dist[i]) + "m)");
+                    }
+                    if (dist[i] > dist[bestI]) bestI = i;
+                }
+                if (anyOpen)
+                {
+                    // Prefer the nearest-to-front open heading; tie-break by distance.
+                    for (int i = 0; i < N; i++)
+                    {
+                        if (!(dist[i] >= 8f && kind[i] == "open")) continue;
+                        float ra = Mathf.Abs(i * 22.5f > 180f ? i * 22.5f - 360f : i * 22.5f);
+                        float rb = Mathf.Abs(bestI * 22.5f > 180f ? bestI * 22.5f - 360f : bestI * 22.5f);
+                        if (ra + 1f < rb || (Mathf.Abs(ra - rb) <= 1f && dist[i] > dist[bestI])) bestI = i;
+                    }
+                }
+                float bestRel = bestI * 22.5f; if (bestRel > 180f) bestRel -= 360f;
+                string bestTxt = anyOpen
+                    ? "best " + (bestRel == 0 ? "front" : bestRel > 0 ? "+" + F(bestRel) : F(bestRel))
+                    : (kind[bestI] == "open" ? "can go " + F(dist[bestI]) + "m" : "surrounded by " + kind[bestI]);
+
+                var parts = new List<string>();
+                parts.Add(string.Join(" ", cards.ToArray()));
+                if (open.Count > 0) parts.Add("open " + string.Join(" ", open.ToArray()));
+                parts.Add(bestTxt);
+
+                // Nearest named things (dupes collapsed) so it can comment on them.
+                var seen = new HashSet<string>();
+                var near = new List<string>();
+                for (int pass = 1; pass <= 3 && near.Count < 3; pass++)
+                {
+                    for (int i = 0; i < N; i++)
+                    {
+                        if (name[i].Length == 0 || dist[i] > 10f || seen.Contains(name[i])) continue;
+                        if (dist[i] <= (pass == 1 ? 4f : pass == 2 ? 7f : 10f))
+                        {
+                            seen.Add(name[i]);
+                            float rel = i * 22.5f; if (rel > 180f) rel -= 360f;
+                            string dw = "front";
+                            if (rel >= 22.5f && rel < 67.5f) dw = "front-right";
+                            else if (rel >= 67.5f && rel < 112.5f) dw = "right";
+                            else if (rel >= 112.5f && rel < 157.5f) dw = "back-right";
+                            else if (rel >= 157.5f || rel <= -157.5f) dw = "back";
+                            else if (rel > -157.5f && rel <= -112.5f) dw = "back-left";
+                            else if (rel > -112.5f && rel < -67.5f) dw = "left";
+                            else if (rel >= -67.5f && rel < -22.5f) dw = "front-left";
+                            near.Add(name[i] + " " + dw + " " + F(dist[i]) + "m");
+                        }
+                    }
+                }
+                if (near.Count > 0) parts.Add("near " + string.Join(", ", near.ToArray()));
+
+                string s = "area: " + string.Join(". ", parts.ToArray());
+                return s.Length <= 320 ? s : s.Substring(0, 320);
+            }
+            catch (Exception) { return "area: unknown"; }
+        }
+
         // How tall is the obstacle at the hit point? Stack CheckSphere upward from
         // the hit; the first free height is the obstacle's top. <~1.3m => sill/
         // ledge/window (barrier), >= => real wall. Works for glass since it reads
@@ -354,13 +515,15 @@ namespace KKLLMNPC
         // Convert a world offset into a compass bearing the model can act on directly,
         // relative to where the kobold is facing: "ahead", "right", "behind-left"…
         // Compass bearing relative to the current facing (ahead/front-right/right/...) —
-        // the model reads these as words instead of doing vector trig.
+        // the model reads these as words instead of doing vector trig. The reference is
+        // the BODY yaw (BodyYaw), not the camera yaw: that's the facing other characters
+        // actually see as "in front".
         private string RelBearing(Vector3 to)
         {
             to.y = 0;
             if (to.sqrMagnitude < 0.0001f) return "here";
             float ang = Mathf.Atan2(to.x, to.z) * 57.29578f;
-            float rel = Mathf.DeltaAngle(_yawDeg, ang);
+            float rel = Mathf.DeltaAngle(BodyYaw(), ang);
             float a = Mathf.Abs(rel);
             if (a < 22.5f) return "ahead";
             if (a < 67.5f) return rel > 0 ? "front-right" : "front-left";
@@ -376,7 +539,7 @@ namespace KKLLMNPC
             to.y = 0;
             if (to.sqrMagnitude < 0.0001f) return 0f;
             float ang = Mathf.Atan2(to.x, to.z) * 57.29578f;
-            return Mathf.DeltaAngle(_yawDeg, ang);
+            return Mathf.DeltaAngle(BodyYaw(), ang);
         }
 
         // Direction of stimulation as a short suffix: "↑"/"↓"/"" so the model sees it changing.
@@ -529,54 +692,72 @@ namespace KKLLMNPC
             if (_cam == null || !RtCreated(_rt)) return null;
             try
             {
-                Texture2D texL = null, texR = null;
-                try
+                // Left eye.
+                _cam.Render();
+                var prev = RenderTexture.active;
+                RenderTexture.active = _rt;
+                // Pool texture reuse
+                if (_texPoolL == null || _texPoolL.width != _rt.width || _texPoolL.height != _rt.height)
                 {
-                    // Left eye.
-                    _cam.Render();
-                    var prev = RenderTexture.active;
-                    RenderTexture.active = _rt;
-                    texL = new Texture2D(_rt.width, _rt.height, TextureFormat.RGB24, false);
-                    texL.ReadPixels(new Rect(0, 0, _rt.width, _rt.height), 0, 0, false);
-                    texL.Apply();
+                    _texPoolL = new Texture2D(_rt.width, _rt.height, TextureFormat.RGB24, false);
+                    Logger.LogInfo($"texture pool created: L {_rt.width}x{_rt.height}");
+                }
+                else
+                {
+                    Logger.LogInfo($"texture pool reused: L {_rt.width}x{_rt.height}");
+                }
+                Texture2D texL = _texPoolL;
+                texL.ReadPixels(new Rect(0, 0, _rt.width, _rt.height), 0, 0, false);
+                texL.Apply();
+                RenderTexture.active = prev;
+
+                // Right eye (stereo mode).
+                if (_camR != null && RtCreated(_rtR))
+                {
+                    _camR.Render();
+                    prev = RenderTexture.active;
+                    RenderTexture.active = _rtR;
+                    if (_texPoolR == null || _texPoolR.width != _rtR.width || _texPoolR.height != _rtR.height)
+                    {
+                        _texPoolR = new Texture2D(_rtR.width, _rtR.height, TextureFormat.RGB24, false);
+                        Logger.LogInfo($"texture pool created: R {_rtR.width}x{_rtR.height}");
+                    }
+                    else
+                    {
+                        Logger.LogInfo($"texture pool reused: R {_rtR.width}x{_rtR.height}");
+                    }
+                    Texture2D texR = _texPoolR;
+                    texR.ReadPixels(new Rect(0, 0, _rtR.width, _rtR.height), 0, 0, false);
+                    texR.Apply();
                     RenderTexture.active = prev;
 
-                    // Right eye (stereo mode).
-                    if (_camR != null && RtCreated(_rtR))
+                    // Stitch side-by-side: left half = left eye, right half = right eye.
+                    int w = texL.width, h = texL.height;
+                    if (_texPoolStereo == null || _texPoolStereo.width != w * 2 || _texPoolStereo.height != h)
                     {
-                        _camR.Render();
-                        prev = RenderTexture.active;
-                        RenderTexture.active = _rtR;
-                        texR = new Texture2D(_rtR.width, _rtR.height, TextureFormat.RGB24, false);
-                        texR.ReadPixels(new Rect(0, 0, _rtR.width, _rtR.height), 0, 0, false);
-                        texR.Apply();
-                        RenderTexture.active = prev;
-
-                        // Stitch side-by-side: left half = left eye, right half = right eye.
-                        int w = texL.width, h = texL.height;
-                        var stereo = new Texture2D(w * 2, h, TextureFormat.RGB24, false);
-                        var pxL = texL.GetPixels32();
-                        var pxR = texR.GetPixels32();
-                        var pxOut = new Color32[pxL.Length * 2];
-                        for (int y = 0; y < h; y++)
-                        {
-                            Array.Copy(pxL, y * w, pxOut, y * w * 2, w);
-                            Array.Copy(pxR, y * w, pxOut, y * w * 2 + w, w);
-                        }
-                        stereo.SetPixels32(pxOut);
-                        stereo.Apply();
-                        byte[] stereoJpg = UnityEngine.ImageConversion.EncodeToJPG(stereo, _cfgImageQuality.Value);
-                        Destroy(stereo);
-                        return stereoJpg;
+                        _texPoolStereo = new Texture2D(w * 2, h, TextureFormat.RGB24, false);
+                        Logger.LogInfo($"texture pool created: stereo {w*2}x{h}");
                     }
+                    else
+                    {
+                        Logger.LogInfo($"texture pool reused: stereo {w*2}x{h}");
+                    }
+                    var stereo = _texPoolStereo;
+                    var pxL = texL.GetPixels32();
+                    var pxR = texR.GetPixels32();
+                    var pxOut = new Color32[pxL.Length * 2];
+                    for (int y = 0; y < h; y++)
+                    {
+                        Array.Copy(pxL, y * w, pxOut, y * w * 2, w);
+                        Array.Copy(pxR, y * w, pxOut, y * w * 2 + w, w);
+                    }
+                    stereo.SetPixels32(pxOut);
+                    stereo.Apply();
+                    byte[] stereoJpg = UnityEngine.ImageConversion.EncodeToJPG(stereo, _cfgImageQuality.Value);
+                    return stereoJpg;
+                }
 
-                    return UnityEngine.ImageConversion.EncodeToJPG(texL, _cfgImageQuality.Value);
-                }
-                finally
-                {
-                    if (texL != null) Destroy(texL);
-                    if (texR != null) Destroy(texR);
-                }
+                return UnityEngine.ImageConversion.EncodeToJPG(texL, _cfgImageQuality.Value);
             }
             catch (Exception e) { Logger.LogWarning("screenshot: " + e.Message); return null; }
         }

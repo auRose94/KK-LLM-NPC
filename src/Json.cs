@@ -82,8 +82,22 @@ namespace KKLLMNPC
         private static void WriteStr(StringBuilder sb, string s)
         {
             sb.Append('"');
-            foreach (char c in s)
+            for (int i = 0; i < s.Length; i++)
             {
+                char c = s[i];
+                // Lone surrogates (illegal UTF-16) crash Mono's string-to-native
+                // conversion with "Illegal byte sequence in the input"; LLM output can
+                // occasionally contain them, so scrub here so no poisoned string ever
+                // leaves as JSON. Valid surrogate pairs (emoji etc.) pass through.
+                if (char.IsHighSurrogate(c) || char.IsLowSurrogate(c))
+                {
+                    if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                    {
+                        sb.Append(c).Append(s[i + 1]); i++;
+                        continue;
+                    }
+                    c = '?';
+                }
                 switch (c)
                 {
                     case '"': sb.Append("\\\""); break;

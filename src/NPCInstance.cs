@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -103,6 +104,7 @@ namespace KKLLMNPC
         private string _lastAction = "none";
         private int _tick;
         private string _blockedInfo;
+        private string _modelError;
         private int _lastCommentaryTick = -999;
         private float? _ledgeDrop;
         private string _npcName;
@@ -157,6 +159,18 @@ namespace KKLLMNPC
         private string _bumpInfo;
         private int _lastDoorTried;
         private float _lastDoorTryTime = -99f;
+        // Activity tracking for dynamic think interval
+        private float _lastMoveTime = -999f;
+        private bool _wasMovingLastTick;
+        // Perception throttling
+        private int _lastFullPerceptionTick = -999;
+        private object _cachedPerception;
+        // Nearby cache
+        private List<object> _cachedNearby;
+        private int _lastNearbyTick = -999;
+        // Empty-reply tracking (aggregate spam, expose to history so the model self-corrects)
+        private int _emptyReplies;
+        private float _lastEmptyReplyLog = -99f;
 
         // Ambient / gaze.
         private float _lastAmbientTime = -99f;
@@ -175,6 +189,10 @@ namespace KKLLMNPC
         private string _lastVisionCaption = "";
         private volatile string _lastVisionB64;
         private readonly System.Collections.Generic.List<string> _pastImages = new System.Collections.Generic.List<string>();
+        // Texture pool for capture
+        private Texture2D _texPoolL;
+        private Texture2D _texPoolR;
+        private Texture2D _texPoolStereo;
         private class VisionSteer { public float deg; public string reason; }
         private volatile VisionSteer _visionSteer;
         private volatile bool _visionBusy;
@@ -191,7 +209,7 @@ namespace KKLLMNPC
         private volatile bool _answerBusy;
 
         // Constants.
-        private const float WalkProbeRange = 1.4f;
+        private const float WalkProbeRange = 4.0f;
         private const float InteractRange = 2.6f;
 
         // ------------------------------------------------------------------
@@ -315,7 +333,7 @@ namespace KKLLMNPC
             _history.Clear();
             _thoughtHistory.Clear();
             _facts.Clear();
-            _lastThought = "just woke up"; _lastAction = "none"; _tick = 0; _blockedInfo = null;
+            _lastThought = "just woke up"; _lastAction = "none"; _tick = 0; _blockedInfo = null; _modelError = null;
             _playerChat = null; _lastDeliveredChat = null;
             _targetIdByInst.Clear();
             _targetRefByInst.Clear();
@@ -406,6 +424,15 @@ namespace KKLLMNPC
             while (_history.Count > HistoryLen) _history.RemoveFirst();
         }
 
+        // Records a structural failure of the model's reply (empty/plain-text/unknown
+        // tool) so the NEXT perception carries a prominent 'model_error' field showing
+        // the model exactly what it did wrong. Cleared once it produces a valid act.
+        private void SetModelError(string msg)
+        {
+            _modelError = msg;
+            try { Logger.LogWarning("model error queued: " + (msg.Length > 140 ? msg.Substring(0, 140) + "..." : msg)); } catch (Exception) { }
+        }
+
         private string HistoryJson()
         {
             if (_history.Count == 0) return "[]";
@@ -462,7 +489,7 @@ namespace KKLLMNPC
         private void RememberFact(string fact)
         {
             if (string.IsNullOrWhiteSpace(fact)) return;
-            string f = fact.Trim();
+            string f = Sanitize(fact.Trim());
             for (int i = 0; i < _facts.Count; i++)
                 if (_facts[i].Split(':')[0] == f.Split(':')[0]) { _facts[i] = f; return; }
             _facts.Add(f);

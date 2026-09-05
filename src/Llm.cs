@@ -83,8 +83,8 @@ namespace KKLLMNPC
                                 string line = content.Trim().Split('\n')[0].Trim().Trim('"', '"');
                                 if (line.Length > 0 && line.Length < 200)
                                 {
-                                    Logger.LogInfo("[" + MyName() + "] muses: " + line);
-                                    try { ToolSay(new TextArgs(line)); } catch (Exception) { }
+                                    Logger.LogInfo("[" + MyName() + "] muses: " + Sanitize(line));
+                                    try { ToolSay(new TextArgs(Sanitize(line))); } catch (Exception) { }
                                 }
                             }
                         }
@@ -158,7 +158,7 @@ namespace KKLLMNPC
                         string content = msg?.GetValueOrDefault("content") as string;
                         if (!string.IsNullOrWhiteSpace(content))
                         {
-                            _lastAnswer = content.Trim();
+                            _lastAnswer = Sanitize(content.Trim());
                             RememberFact("Q: " + q + " A: " + _lastAnswer);
                             Logger.LogInfo("asked: " + q + " => " + _lastAnswer);
                         }
@@ -208,26 +208,31 @@ namespace KKLLMNPC
 
                     if (lastState != "running") { lastState = "running"; Logger.LogInfo("KKLLMNPC: loop active."); }
 
-                    object perception = RunOnMainThread(() => BuildPerception(false), 15000);
-                    string userJson = Json.Write(perception);
-
-                    // Attach a first-person frame on schedule, on bump, or after turns —
-                    // and ALWAYS if the caption pass is disabled (the action model is then
-                    // the only eyes).
                     _tick++;
                     bool imageDue = _cfgSendImage.Value && (
                         !_cfgVision.Value
                         || _tick % Math.Max(1, _cfgImageEvery.Value) == 0
                         || (_cfgImageOnBump.Value && _needImageAfterBump)
                         || (_cfgImageOnTurn.Value && Time.unscaledTime - _lastBigTurnTime < 0.5f));
-                    string imageB64 = null;
+
+                    // Batch perception + image capture into a single main-thread marshal
+                    // (typed wrapper — no 'dynamic'/'anonymous type': the game lacks
+                    // Microsoft.CSharp.dll, so the dynamic binder kills the thread at JIT).
+                    var frame = (PerceptionFrame)RunOnMainThread(() =>
+                    {
+                        var perc = BuildPerception(false);
+                        string img = null;
+                        if (imageDue) img = _lastVisionB64 ?? CaptureImageB64();
+                        return new PerceptionFrame { Perception = perc, Image = img };
+                    }, 15000);
+                    object perception = frame.Perception;
+                    string userJson = Json.Write(perception);
+                    string imageB64 = frame.Image as string;
                     if (imageDue)
                     {
-                        // Prefer the frame the vision worker just captured (already
-                        // encoded, costs nothing extra); otherwise render a fresh one.
-                        imageB64 = _lastVisionB64 ?? (string)RunOnMainThread(() => (object)CaptureImageB64(), 8000);
                         _needImageAfterBump = false;
-                        // Store in past images ring buffer for multi-frame context.
+                        // Reuse vision frame for action model to avoid double render
+                        if (_cfgVision.Value && !string.IsNullOrEmpty(_lastVisionB64)) imageB64 = _lastVisionB64;
                         if (!string.IsNullOrEmpty(imageB64))
                         {
                             _pastImages.Add(imageB64);
@@ -241,10 +246,12 @@ namespace KKLLMNPC
                     MaybeCreativeCommentary(userJson);
 
                     string reply = QueryLLM(userJson, imageB64);
-                    if (reply == null) { Thread.Sleep((int)(_cfgThinkInterval.Value * 1000)); continue; }
+                    if (reply == null) { Thread.Sleep((int)(GetDynamicThinkInterval() * 1000)); continue; }
 
                     ExecuteToolCalls(reply);
-                    Thread.Sleep((int)(_cfgThinkInterval.Value * 1000));
+                    // Update activity timestamp if moving
+                    UpdateActivity();
+                    Thread.Sleep((int)(GetDynamicThinkInterval() * 1000));
                 }
                 catch (InvalidOperationException) { Thread.Sleep(1000); } // main not ready
                 catch (ThreadInterruptedException) { return; }
@@ -256,6 +263,39 @@ namespace KKLLMNPC
                 }
             }
             Logger.LogWarning("KKLLMNPC: LLMLoop exited (running=false).");
+        }
+
+        private class PerceptionFrame
+        {
+            public object Perception;
+            public string Image;
+        }
+
+        // Dynamic think interval based on activity
+        private float GetDynamicThinkInterval()
+        {
+            float baseInterval = _cfgThinkInterval.Value;
+            // If NPC has moved recently or is in station/penetration, keep fast
+            bool active = Time.unscaledTime - _lastMoveTime < 2f
+                || IsInAnimationStation()
+                || IsPenetrated()
+                || IsDickInside();
+            float interval = active ? baseInterval : Mathf.Min(baseInterval * 2f, 0.8f);
+            if (active)
+                Logger.LogInfo($"think interval: {interval:F2}s (active)");
+            else
+                Logger.LogInfo($"think interval: {interval:F2}s (idle)");
+            return interval;
+        }
+
+        private void UpdateActivity()
+        {
+            lock (_stateLock)
+            {
+                bool moving = Mathf.Abs(_moveLocalZ) > 0.01f || Mathf.Abs(_moveLocalX) > 0.01f;
+                if (moving) _lastMoveTime = Time.unscaledTime;
+                _wasMovingLastTick = moving;
+            }
         }
 
         // The configured system prompt, plus the derived body persona (personality,
@@ -270,16 +310,43 @@ namespace KKLLMNPC
         // POST the perception+memory to the model. Sends response_format: json_schema
         // (not tools/tool_choice — many chat templates 400 on tool forcing). Model replies
         // with the act-args object as its content.
+        // Protect everything stored/forwarded from Mono string conversion failures:
+        // replace lone surrogate code units with '?', keep valid surrogate pairs
+        // (emoji, CJK ext-B). LLM streaming can deliver a broken mid-multibyte
+        // sequence that .NET keeps as an unpaired surrogate; the moment such a
+        // string reaches a native call (HttpWebRequest, Logger, Unity) Mono dies
+        // with "String conversion error: Illegal byte sequence ... in the input",
+        // and because the failure text gets stored in history/state it keeps
+        // re-triggering. Sanitize at the ingest points so nothing poisoned sticks.
+        private static string Sanitize(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (char.IsHighSurrogate(c))
+                {
+                    if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { sb.Append(c).Append(s[i + 1]); i++; }
+                    else sb.Append('?');
+                }
+                else if (char.IsLowSurrogate(c)) sb.Append('?');
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
         private string QueryLLM(string perceptionJson, string imageB64)
         {
             try
             {
                 // Memory injected into the perception so the NPC remembers what it
                 // was doing — otherwise each turn starts from zero.
-                string mem = string.Format(",\"last_thought\":{0},\"memory\":{1},\"facts\":{2},\"last_action\":{3},\"scene\":{4},\"history\":{5},\"chat_log\":{6}",
+                string mem = string.Format(",\"last_thought\":{0},\"memory\":{1},\"facts\":{2},\"last_action\":{3},\"scene\":{4},\"history\":{5},\"chat_log\":{6},\"model_error\":{7}",
                     Json.Write(_lastThought + (_blockedInfo != null ? " (" + _blockedInfo + ")" : "")),
                     ThoughtHistoryJson(), FactsJson(),
-                    Json.Write(_lastAction), Json.Write(_sceneDesc), HistoryJson(), ChatLogJson());
+                    Json.Write(_lastAction), Json.Write(_sceneDesc), HistoryJson(), ChatLogJson(),
+                    Json.Write(_modelError));
                 string percep = perceptionJson;
                 if (percep.EndsWith("}")) percep = percep.Substring(0, percep.Length - 1) + mem + "}";
                 string text = "perception:" + percep;
@@ -345,9 +412,15 @@ namespace KKLLMNPC
                 {
                     if (stream == null) return null;
                     // Read SSE stream: each line is "data: {...}" or "data: [DONE]".
-                    // Accumulate delta.content chunks into the full response.
+                    // Accumulate delta.content AND delta.tool_calls into the response —
+                    // backends (LM Studio + json_schema response_format) often stream the
+                    // act output as a tool_call instead of content; dropping it is what
+                    // produced the empty / "no tool call and no content" replies.
                     var reader = new StreamReader(stream, Encoding.UTF8);
                     var contentBuilder = new StringBuilder();
+                    var toolArgsBuilder = new StringBuilder();
+                    string toolCallId = null;
+                    string toolName = null;
                     string role = "assistant";
                     string line;
                     while ((line = reader.ReadLine()) != null)
@@ -367,24 +440,47 @@ namespace KKLLMNPC
                             if (delta == null) continue;
                             if (delta.ContainsKey("role")) role = delta["role"].ToString();
                             var c = delta.GetValueOrDefault("content") as string;
-                            if (!string.IsNullOrEmpty(c)) contentBuilder.Append(c);
+                            if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                            var tcs = delta.GetValueOrDefault("tool_calls") as List<object>;
+                            if (tcs != null)
+                            {
+                                foreach (var tcObj in tcs)
+                                {
+                                    var tc = tcObj as Dictionary<string, object>; if (tc == null) continue;
+                                    if (tc.GetValueOrDefault("id") is string idStr) toolCallId = idStr;
+                                    var fn = tc.GetValueOrDefault("function") as Dictionary<string, object>; if (fn == null) continue;
+                                    if (fn.GetValueOrDefault("name") is string n && !string.IsNullOrEmpty(n)) toolName = n;
+                                    if (fn.GetValueOrDefault("arguments") is string a && !string.IsNullOrEmpty(a)) toolArgsBuilder.Append(Sanitize(a));
+                                }
+                            }
                         }
                         catch (Exception) { }
                     }
                     // Build a non-streaming response JSON so the rest of the pipeline works unchanged.
                     string fullContent = contentBuilder.ToString();
+                    var message = new Dictionary<string, object> { ["role"] = role };
+                    if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;
+                    if (toolName != null && toolArgsBuilder.Length > 0)
+                    {
+                        message["tool_calls"] = new object[]
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["id"] = toolCallId,
+                                ["type"] = "function",
+                                ["function"] = new Dictionary<string, object>
+                                {
+                                    ["name"] = toolName,
+                                    ["arguments"] = toolArgsBuilder.ToString(),
+                                },
+                            },
+                        };
+                    }
                     var fakeResp = new Dictionary<string, object>
                     {
                         ["choices"] = new object[]
                         {
-                            new Dictionary<string, object>
-                            {
-                                ["message"] = new Dictionary<string, object>
-                                {
-                                    ["role"] = role,
-                                    ["content"] = fullContent,
-                                },
-                            },
+                            new Dictionary<string, object> { ["message"] = message },
                         },
                     };
                     return Json.Write(fakeResp);
@@ -416,18 +512,37 @@ namespace KKLLMNPC
 
             if (args == null)
             {
-                // Model ignored the tool entirely and replied with text. At minimum,
-                // say it out loud so the NPC is never fully inert, and remember it.
+                // The model failed to produce a valid act call. Show it the failure:
+                // empty reply, prose instead of JSON, or JSON that doesn't parse.
+                // The error is injected back into the NEXT perception as 'model_error'
+                // so it corrects the format instead of repeating it.
                 if (!string.IsNullOrEmpty(content))
                 {
                     _lastThought = content.Length > 80 ? content.Substring(0, 80) : content;
                     _lastAction = "say";
+                    // Still say the line so the NPC isn't inert, but flag the formatting.
+                    SetModelError("You replied with PLAIN TEXT, not a structured act call. REPLY WITH ONLY ONE compact JSON object: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<1 short clause>\",\"thought\":\"<goal in <10 words>\",\"action\":\"<tool>\",...tool args...}. No prose, no markdown, no explanation around it. Your last text: " + (content.Length > 120 ? content.Substring(0, 120) + "..." : content));
                     Logger.LogInfo("LLM (plain text -> say): " + content);
                     try { ToolSay(new TextArgs(content)); } catch (Exception e) { Logger.LogWarning("say fallback: " + e.Message); }
                 }
-                else Logger.LogWarning("llm reply: no tool call and no content");
+                else
+                {
+                    _emptyReplies++;
+                    if (_emptyReplies == 1 || Time.unscaledTime - _lastEmptyReplyLog > 20f)
+                    {
+                        _lastEmptyReplyLog = Time.unscaledTime;
+                        Logger.LogWarning("llm reply: no tool call and no content (streak=" + _emptyReplies + ")");
+                    }
+                    SetModelError("Your last reply was EMPTY (no content, no tool call). REPLY WITH ONLY ONE compact JSON object per the act schema: {\"progress\":\"...\",\"why\":\"...\",\"thought\":\"...\",\"action\":\"...\",...}. Never reply with nothing.");
+                    // Feed it back to the model so next turn it corrects instead of idling.
+                    PushHistory("eval", "empty reply");
+                }
                 return;
             }
+
+            // The model produced a valid structured act — clear any outstanding error feedback.
+            _modelError = null;
+            // Even a structured act can use an invalid tool; that's flagged in ExecuteStep.
 
             _lastThought = args.S("thought", _lastThought);
             PushThought(_lastThought);
@@ -534,7 +649,7 @@ namespace KKLLMNPC
                     var fn = tc.GetValueOrDefault("function") as Dictionary<string, object>; if (fn == null) continue;
                     string name = fn.GetValueOrDefault("name") as string;
                     string argStr = fn.GetValueOrDefault("arguments") as string;
-                    if (name == null) continue;
+                    if (string.IsNullOrEmpty(name)) continue;
                     // Nested-JSON models double-encode arguments; unwrap once.
                     return UnwrapArgs(name, argStr);
                 }
@@ -907,12 +1022,25 @@ namespace KKLLMNPC
                     case "status": return ToolStatus();
                     case "none": return new { ok = true };
                     default:
-                        // Model was asked for act= but produced a legacy name.
+                        // Model was asked for act= but produced a legacy/unknown name.
+                        SetModelError("Invalid action '" + name + "'. Valid actions: walk, walk_ray, go_to, survey, look_around, look, jump, exit_station, crouch, move_to, interact, grab, drop, say, remember, ask, stop, status, none.");
                         Logger.LogWarning("unknown action: " + name);
                         return new { ok = false, reason = "unknown_tool", tool = name };
                 }
             }
-            catch (Exception e) { return new { ok = false, reason = e.Message }; }
+            catch (Exception e)
+            {
+                // Never let Mono's "Illegal byte sequence" exception message into the
+                // tool result/state — it's toxic (contains a broken code unit) and
+                // would be re-serialized every tick, turning one bad LLM byte into a
+                // permanent loop. Replace with a stable ASCII reason.
+                string msg = e.Message;
+                if (msg != null && (msg.IndexOf("Illegal byte sequence", StringComparison.OrdinalIgnoreCase) >= 0
+                    || msg.IndexOf("String conversion", StringComparison.OrdinalIgnoreCase) >= 0))
+                    msg = "bad_encoding_from_llm";
+                else msg = Sanitize(msg);
+                return new { ok = false, reason = msg };
+            }
         }
 
         // One mega-tool. Forcing tool_choice = act means the model can never

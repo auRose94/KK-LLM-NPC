@@ -283,6 +283,7 @@ namespace KKLLMNPC
         {
             string fact = p.S("mem", "");
             if (string.IsNullOrWhiteSpace(fact)) return new { ok = false, reason = "empty_mem" };
+            fact = Sanitize(fact);
             RememberFact(fact);
             return new { ok = true, remembered = fact.Trim(), facts = _facts.Count };
         }

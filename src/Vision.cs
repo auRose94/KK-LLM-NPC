@@ -102,7 +102,7 @@ namespace KKLLMNPC
                         if (float.TryParse(rest.Substring(0, end), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out deg))
                         {
                             deg = Mathf.Clamp(deg, -120f, 120f);
-                            string why = rest.Length > end + 1 ? rest.Substring(end + 1).Trim(':',' ','|','\n') : "vision";
+                            string why = rest.Length > end + 1 ? rest.Substring(end + 1).Trim(':', ' ', '|', '\n') : "vision";
                             _visionSteer = new VisionSteer { deg = deg, reason = why.Length > 0 ? why : "vision" };
                         }
                     }
@@ -147,9 +147,9 @@ namespace KKLLMNPC
         {
             try
             {
-                string model    = !string.IsNullOrWhiteSpace(_cfgVisModel.Value)    ? _cfgVisModel.Value.Trim()    : Val(_cfgModel);
+                string model = !string.IsNullOrWhiteSpace(_cfgVisModel.Value) ? _cfgVisModel.Value.Trim() : Val(_cfgModel);
                 string endpoint = !string.IsNullOrWhiteSpace(_cfgVisEndpoint.Value) ? _cfgVisEndpoint.Value.Trim() : Val(_cfgEndpoint);
-                string apiKey   = !string.IsNullOrWhiteSpace(_cfgVisApiKey.Value)   ? _cfgVisApiKey.Value          : Val(_cfgApiKey);
+                string apiKey = !string.IsNullOrWhiteSpace(_cfgVisApiKey.Value) ? _cfgVisApiKey.Value : Val(_cfgApiKey);
 
                 // Give the vision model its own prior caption as context so it can
                 // tell *what changed* instead of describing from zero every time.

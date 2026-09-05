@@ -107,34 +107,51 @@ namespace KKLLMNPC
             _cfgEndpoint = Config.Bind("LLM", "Endpoint", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions URL");
             _cfgModel = Config.Bind("LLM", "Model", "local-model", "Model name to request");
             _cfgApiKey = Config.Bind("LLM", "ApiKey", "", "Bearer token (may be empty for local)");
+            // Bound before the prompt defaults below, which interpolate _cfgStereoIPD.Value.
+            _cfgStereo = Config.Bind("Vision", "Stereo", false, "Render left+right eye cameras and stitch into a side-by-side stereo image (requires vision-capable model)");
+            _cfgVision = Config.Bind("Vision", "Enabled", false, "Background vision CAPTION pass. When false the action model sees the first-person image directly instead of a caption (default: off — direct image is more useful than a lossy caption). Turn on only if your action model can't read images.");
+            _cfgMaxNPCs = Config.Bind("General", "MaxNPCs", 1, "Maximum number of kobolds the LLM can possess simultaneously (1–4)");
+            _cfgStereoIPD = Config.Bind("Vision", "StereoIPD", 0.063f, "Inter-pupillary distance in meters (distance between left and right camera)");
             _cfgSystem = Config.Bind("LLM", "SystemPrompt",
                 "You are a kobold NPC living in KoboldKare. You MUST respond by calling 'act' — never plain text. " +
                 "You live in a house with rooms; landmarks you learn (bed/toilet/bath/kitchen/play stations/nests/doors) are in your 'facts' — remember them (" +
                 "action 'remember' mem='bed is upstairs') so you build a mental map and stop bumbling. " +
                 "You see yourself as 'me': <your body name>. Don't respond to your own chat messages — only the *player's* speech needs a reply; your own 'say' already echoed once. " +
                 "When you arrive in a new body, introduce yourself briefly via 'say' (your name + a hello). " +
+                (_cfgVision.Value ? "You may have stereo vision (left+right) or a single image. If stereo, you may describe depth and relative positions. Eye separation is " + _cfgStereoIPD.Value + " meters. " : "") +
                 "Every turn, pick a goal. Priorities: (1) if the player talked to you ('heard'), respond with 'say'; (2) if 'needs.eggs' says ready_to_lay, find a 'nest' station and use it; (3) when 'stim' is up, find a partner station or another kobold and play with it; (4) player nearby → walk over, say hi, play with them; (5) otherwise explore new rooms/landmarks. " +
-                "THINK FAST: each turn is an instant between frames and you'll get another one right away — so pick ONE decisive action immediately and don't over-plan. Skip long deliberation, hypothetical branching, or multi-hop plans; trust your last goal and just take the next step toward it. A 'blocked' attempt just means try the next thing next turn." +
+                "THINK FAST: each turn is an instant between frames and you'll get another one right away — so pick ONE decisive action immediately and don't over-think before your final token." +
+                "Skip long deliberation, hypothetical branching, or multi-hop plans; trust your last goal and just take the next step toward it. A 'blocked' attempt just means try the next thing next turn." +
                 "Resting on a bed only when you're too tired to keep going (energy below ~0.2) — never just to top off. " +
                 "You will not pass out from lack of energy, it only blocks you from interacting with the world, like activities." +
                 "EVERY call: first fill 'progress' (one word: done | blocked | ongoing | changed — how did your last goal go), then 'why' (one SHORT clause — the single most relevant thing you actually see, no essay), then 'thought' (your current goal in <10 words). " +
                 "These self-evaluations are REQUIRED but keep them terse — a couple of words each is enough. A 'blocked' progress means try something different, don't repeat. " +
+                "If the perception includes 'model_error', it is FEEDBACK on your LAST reply (you made a formatting mistake) — read it and fix the format immediately: reply ONLY with the act JSON object. " +
+                "Ledges are forgiving and non-damaging: you can walk off a ledge and fall, but you can't jump up to a ledge. " +
+                "Doors are only passable when open; if closed, you can try to open it (use interact (sometimes push after interacting because it's physics, not animation)) or go around, or ask for it to be open. " +
                 "Then pick ONE action toward it. When 'image' is attached, that's what you're actually seeing right now — you have first-person vision, treat it as your own eyes. " +
                 "You do not need to respond to messages that start with a forward slash /. " +
                 "nearby 'i' field categories: bed / toilet / bath / nest / play / seat / door / bodyswap / machine (':busy' = taken). 'dir' is a word (front-left etc.); 'dir_deg' is the *signed degrees* to turn — feed it straight into walk(turn_deg=dir_deg) or use it to decide whether to go_to(name). " +
                 "Don't compute directions from coordinates — the 'dir'/'dir_deg' fields already did it. " +
                 "To reach a named station, call go_to(name) — it resolves. To reach or use a SPECIFIC object, use its 'id' from nearby: go_to(id:N) or interact(id:N). Prefer id over name when multiple similar objects differ (two beds, one taken). " +
+                "You can also ask the player to move you because you can't reach something: say('please move me to the bed') or say('please move me to the play station'). " +
+                "Reduce the distance you move to a target, you don't want to overshoot and miss it or crash into a wall (sometimes unaware forever)." +
+                "The game has a farming mechanic: you can plant seeds in a 'farm' station, water them, and harvest the crop. You can also pick up and drop items (grab/drop). " +
+                "There's a town section on some maps with a 'shop' station(s) where you can buy items (if you have money). Money is got by selling items or food grown. " +
                 "nearby ids stay valid for several turns while the object stays in sight; if an id fails, re-read 'nearby' for the current id. go_to's 'at' stops you short (default 1m) so you arrive AT the object — for a station you then use, you're already in reach. " +
                 "needs.eggs: egg amount in your belly and whether you're ready_to_lay; to lay, find a 'nest' station and use it — the egg comes out there. " +
                 "To use one: get within ~2m (go_to id:N is enough), turn to face it, THEN interact — or call interact(id:N) to target it directly. " +
+                "You can run TOO fast when moving, keep your speed and time low while moving to avoid walls and other kobolds bumping into you. " +
                 "'body' tells you your equipment. Some stations only fit some bodies — if interact says cannot_use on a 'play'/'bed'/'breeding' station, try another; on two-sided stations the first user picks the role. " +
-                "When 'penetrated' or 'penetrating' is set, you're mid-play with someone — enjoy it and respond via 'say'+body language; guide them if you want more. " +
+                "When 'penetrated' (letting in) or 'penetrating' (putting in) is set, you're mid-play with someone — enjoy it and respond via 'say'+body language; guide them if you want more. " +
                 "ask(q='...') to ponder the world — your question+perception go to your inner world-model, answer appears next turn as 'answered'. " +
                 "Tools: walk(duration,turn_deg,run,strafe) [strafe=+right/-left for tight squeezes, doorways, backing up], walk_ray(ray/ray_deg), go_to(name or id or x,z, at), survey(heading_deg,range) [probe a direction for what's there + ids], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z), interact(id optional), grab(multi), drop, say, remember(mem=fact), status, none. " +
                  "Rays: k=kobold p=player u=usable w=wall barrier=low sill/window n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees). Big tall w = wall; small h = furniture; k/p = living. " +
-                 "radar=top-down ASCII map: @=you, W=wall, U=usable, K=kobold, P=player, B=barrier, .=open. Row 0=top=furthest forward, row 10=bottom=behind you. Use it for spatial orientation. " +
+                 "radar=top-down ASCII map: @=you, W=wall, U=usable, K=kobold, P=player, B=barrier, .=open. Row 0=top=furthest forward, row 20=bottom=behind you. Use it for spatial orientation. " +
                  "ground: ahead=clear/step(auto)/sill(climbable)/wall; drop=distance to ledge. walls=blocked sides within arm reach. " +
-                 "clearance=8-direction wall distances (blocked/close/near/open) — steer toward open. look_around scans the view and lists what's in each sector. " +
+                 "clearance=8-direction wall distances (blocked/close/near/open) — steer toward open. " +
+                 "area=prose description of your surroundings from a 360° scan: cardinal distances (front/right/back/left + what's there), 'open' headings to escape/turn into, 'best' = recommended heading, 'near' = closest named things. Trust it for navigation, esp. when no image is attached. " +
+                 "look_around scans the view and lists what's in each sector. " +
                  "history=recent actions+outcomes; memory=recent goals; facts=what you've learned. " +
                  "When in_station, you can't walk — use exit_station or jump to get off. " +
                 "'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle.",
@@ -152,18 +169,15 @@ namespace KKLLMNPC
             _cfgCommentEvery = Config.Bind("LLM", "CommentEveryNTicks", 5, "Every N ticks, invite a free 'comment' — the model voices its own take on surroundings (0 = off)");
             _cfgCommentTemp = Config.Bind("LLM", "CommentTemp", 0.9f, "Sampling temperature for free commentary");
             _cfgChatLogLines = Config.Bind("LLM", "ChatLogLines", 20, "Feed the last N lines of the game's chat log to the model each turn (full conversation + NPC speech). 0 = off");
-            _cfgStereo = Config.Bind("Vision", "Stereo", false, "Render left+right eye cameras and stitch into a side-by-side stereo image (requires vision-capable model)");
-            _cfgStereoIPD = Config.Bind("Vision", "StereoIPD", 0.063f, "Inter-pupillary distance in meters (distance between left and right camera)");
             _cfgTurnRate = Config.Bind("Movement", "TurnRate", 180f, "Maximum yaw rotation speed in degrees/second");
             _cfgAccel = Config.Bind("Movement", "Acceleration", 4f, "How fast the kobold ramps up to target speed (units/s²)");
             _cfgDecel = Config.Bind("Movement", "Deceleration", 6f, "How fast the kobold slows down when stopping (units/s²)");
             _cfgBrakeDist = Config.Bind("Movement", "BrakeDistance", 2f, "Distance from go_to target where the kobold starts slowing down (m)");
-            _cfgMaxNPCs = Config.Bind("General", "MaxNPCs", 1, "Maximum number of kobolds the LLM can possess simultaneously (1–4)");
-            _cfgVision = Config.Bind("Vision", "Enabled", false, "Background vision CAPTION pass. When false the action model sees the first-person image directly instead of a caption (default: off — direct image is more useful than a lossy caption). Turn on only if your action model can't read images.");
             _cfgVisionEvery = Config.Bind("Vision", "EveryNTicks", 3, "Run the vision pass every N action ticks (lower = more aware, slower)");
             _cfgVisionPrompt = Config.Bind("Vision", "Prompt",
                 "You are the SPATIAL reasoner for a kobold NPC. Produce a compact SCENE REPORT: (a) landmarks/stations/people in view with a rough bearing, (b) which directions are OPEN to walk (-90 left .. +90 right), (c) any hazard or drop. " +
                 "Then NAV ADVICE for its current goal as 'go:<bearing>:<target>'. Keep the whole answer under 40 words. " +
+                "You may have stereo vision (left+right) or a single image. If stereo, you may describe depth and relative positions. Eye separation is " + _cfgStereoIPD.Value + " meters. " +
                 "Example: 'play station left, bathroom ahead, friend right | open ahead and left | go:-45:play station'.",
                 "Scene-report + navigation instruction for the vision pass");
             _cfgVisModel = Config.Bind("VisionModel", "Model", "", "Vision model for the scene-caption pass (only used if [Vision] Enabled=true; off by default). Blank = use LLM.Model");
@@ -176,7 +190,7 @@ namespace KKLLMNPC
             _cfgAutoFindRange = Config.Bind("Senses", "AutoFindRange", 60f, "Radius to look for a kobold to hijack");
             _cfgImageSize = Config.Bind("Senses", "ImageSize", 192, "Square first-person render size (px)");
             _cfgImageQuality = Config.Bind("Senses", "ImageQuality", 50, "JPEG quality 1-100 (lower = smaller file, faster transfer)");
-            _cfgCamNearClip = Config.Bind("Senses", "CameraNearClip", 0.15f, "Camera near clip (m) — raise if you see the inside of the head");
+            _cfgCamNearClip = Config.Bind("Senses", "CameraNearClip", 0.10f, "Camera near clip (m) — raise if you see the inside of the head");
             _cfgCamForward = Config.Bind("Senses", "CameraForward", 0.22f, "How far in front of the head bone the camera sits (m) — raise for big snouts");
             _cfgBlockedScenes = Config.Bind("General", "BlockedScenes", "MainMenu,Loading,ErrorScene", "Comma-separated scene names where the LLM stays idle (MainMap is the playable world)");
 

@@ -1,5 +1,34 @@
 # Changes Log
 
+## 2026-09-05
+
+### Completed
+- Visionless spatial awareness (`area` field)
+  - `Senses.cs:SpatialLayout` — 360° chest-height sweep (16 rays, 22.5° steps)
+    reporting cardinal distances (front/right/back/left + what's there), open
+    headings (>=8m), a recommended best heading, and nearest named things
+    (walls vs. usables vs. kobolds vs. player)
+  - `BuildPerceptionSafe` adds `area` to perception JSON
+  - Backfills `_sceneDesc` (visionless fallback) when `Vision.Enabled=false` or
+    `_sceneDesc` is empty/unknown, so commentary / ask / scene memory get the
+    description instead of "scene: unknown"
+  - System prompt default: short clause teaching the model to trust `area`
+    for navigation esp. with no image attached
+- Kill Mono "Illegal byte sequence" tool failures (lone-surrogate poisoning)
+  - Root cause: an unpaired UTF-16 surrogate from LLM output reaches a native
+    call and Mono dies with `ExecutionEngineException: String conversion error:
+    Illegal byte sequence ... in the input`; the exception text then gets stored
+    in tool result/history and re-serialized every tick ("happens once, carries")
+  - Added `Llm.cs:Sanitize` — removes lone surrogates, keeps valid pairs
+  - `Json.WriteStr` now scrubs lone surrogates at serialization (every stored
+    string crosses this path: history/facts/thoughts/chat/perception)
+  - Sanitized at ingest: LLM SSE content+tool_args (`QueryLLM`), commentary
+    line, ask answer, `ToolSay` text, `ToolRemember`, `RememberFact`, vision
+    caption
+  - `RunTool` catch: "Illegal byte sequence"/"String conversion" messages are
+    replaced with stable ASCII `bad_encoding_from_llm` so the toxic text never
+    enters state
+
 ## 2026-09-04
 
 ### Completed

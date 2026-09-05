@@ -141,6 +141,7 @@ namespace KKLLMNPC
         {
             string text = p.S("text", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
+            text = Sanitize(text);
             string who = CleanName(_kobold != null ? _kobold.name : "NPC");
             Logger.LogInfo("[NPC] " + who + ": " + text); // always visible in the console/log
             RunOnMainThreadAsync(() =>
