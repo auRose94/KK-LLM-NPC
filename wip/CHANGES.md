@@ -28,6 +28,14 @@
   - `RunTool` catch: "Illegal byte sequence"/"String conversion" messages are
     replaced with stable ASCII `bad_encoding_from_llm` so the toxic text never
     enters state
+- Structured default system prompt
+  - Reorganized the LLM system prompt from prose into labeled JSON-style
+    sections: RESPONSE CONTRACT (exact act-JSON shape + strict-schema note),
+    WORLD, YOUR BODY, GOAL, PERCEPTION, NAVIGATION, INTERACT, THINGS, SOCIAL,
+    TOOLS, LEGEND
+  - The model reply was already JSON-constrained server-side via
+    `response_format: json_schema` (ActSchema); the prompt now states the
+    contract explicitly up front so the model emits the conforming object
 
 ## 2026-09-04
 
