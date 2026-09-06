@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Perception: ray fan, clearance sectors, ground/ledge probes, nearby objects, identity.
 using System;
 using System.Collections;
@@ -77,7 +78,8 @@ namespace KKLLMNPC
                         cached["tick"] = _tick;
                         cached["yaw"] = F(_yawDeg);
                         // Update needs quickly without full raycast
-                        var needs = new { 
+                        var needs = new
+                        {
                             energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
                             horniness = HorninessText(),
                             eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
@@ -161,10 +163,19 @@ namespace KKLLMNPC
                         // stays terse to keep the prompt small.
                         r = name.Length == 0
                             ? (object)new { p = rowNames[rI], a = F(hAngle), d = F(hit.distance), k = kind }
-                            : new {
-                                p = rowNames[rI], a = F(hAngle), d = F(hit.distance), k = kind, n = name,
-                                w = F(size.x), l = F(size.z), h = F(size.y),
-                                x = F(wpos.x), y = F(wpos.y), z = F(wpos.z),
+                            : new
+                            {
+                                p = rowNames[rI],
+                                a = F(hAngle),
+                                d = F(hit.distance),
+                                k = kind,
+                                n = name,
+                                w = F(size.x),
+                                l = F(size.z),
+                                h = F(size.y),
+                                x = F(wpos.x),
+                                y = F(wpos.y),
+                                z = F(wpos.z),
                                 f = F(facingDeg),
                             };
                     }
@@ -201,7 +212,8 @@ namespace KKLLMNPC
             result["ground"] = ground;
             result["clearance"] = clearance;
             result["vis_go"] = _visionSteer != null ? _visionSteer.deg.ToString("0") + "deg (" + _visionSteer.reason + ")" : null;
-            result["needs"] = new {
+            result["needs"] = new
+            {
                 energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
                 horniness = HorninessText(),
                 eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
@@ -363,9 +375,9 @@ namespace KKLLMNPC
                 // Forward at knee vs. chest vs. head height to tell step vs window
                 // vs wall.
                 Vector3 fwd = Quaternion.Euler(0, _yawDeg, 0) * Vector3.forward;
-                bool kneeBlocked  = CastBlocked(pos + Vector3.up * 0.3f, fwd, 1.3f);
+                bool kneeBlocked = CastBlocked(pos + Vector3.up * 0.3f, fwd, 1.3f);
                 bool chestBlocked = CastBlocked(pos + Vector3.up * 0.9f, fwd, 1.3f);
-                bool headBlocked  = CastBlocked(pos + Vector3.up * 1.6f, fwd, 1.3f);
+                bool headBlocked = CastBlocked(pos + Vector3.up * 1.6f, fwd, 1.3f);
                 string ahead = "clear";
                 if (kneeBlocked && !chestBlocked && !headBlocked) ahead = "step";         // auto-step
                 else if (chestBlocked && !headBlocked) ahead = "sill";                    // window/counter — look over it, maybe climb
@@ -641,7 +653,7 @@ namespace KKLLMNPC
             string s = name.ToLowerInvariant();
             if (s.Contains("breeding") || s.Contains("threeway") || s.Contains("mount")
                 || s.Contains("actionstation") || s.Contains("play") || s.Contains("sex")
-                || s.Contains("erotic"))  return "play";
+                || s.Contains("erotic")) return "play";
             if (s.Contains("bed") || s.Contains("sleep") || s.Contains("cot")
                 || s.Contains("mattress") || s.Contains("nap") || s.Contains("rest")) return "bed";
             if (s.Contains("toilet") || s.Contains("potty") || s.Contains("bathroom")) return "toilet";
@@ -662,18 +674,18 @@ namespace KKLLMNPC
         {
             switch (kind)
             {
-                case "play":     return "pleasure station";
-                case "bed":      return "resting - can also be used for play";
-                case "nest":     return "egg laying";
-                case "machine":  return "mounted play/farming";
-                case "toilet":   return "relief";
-                case "bath":     return "clean";
-                case "seat":     return "just a seat";
-                case "door":     return "passage";
-                case "food":     return "cook/eat — drop items into blender to make edible food";
+                case "play": return "pleasure station";
+                case "bed": return "resting - can also be used for play";
+                case "nest": return "egg laying";
+                case "machine": return "mounted play/farming";
+                case "toilet": return "relief";
+                case "bath": return "clean";
+                case "seat": return "just a seat";
+                case "door": return "passage";
+                case "food": return "cook/eat — drop items into blender to make edible food";
                 case "contract": return "buy to unlock a machine";
                 case "bodyswap": return "swap bodies";
-                default:         return null;
+                default: return null;
             }
         }
 
@@ -718,11 +730,13 @@ namespace KKLLMNPC
                     Vector3 bsize = Vector3.zero;
                     Vector3 bpos = c.transform.position;
                     float bfacing = 0f;
-                    try {
+                    try
+                    {
                         var rend = c.GetComponentInChildren<Renderer>();
                         if (rend != null) { bsize = rend.bounds.size; bpos = rend.bounds.center; }
                         bfacing = c.transform.eulerAngles.y;
-                    } catch (Exception) { }
+                    }
+                    catch (Exception) { }
 
                     // For usables: strip Unity's "(Clone)", report whether it's
                     // useable right now (bed free? station occupied?), and a guess
@@ -787,8 +801,12 @@ namespace KKLLMNPC
                         ["dir_deg"] = F(RelBearingDeg(d)),
                         ["h"] = hrel,
                         ["i"] = info,
-                        ["w"] = F(bsize.x), ["l"] = F(bsize.z), ["ht"] = F(bsize.y),
-                        ["x"] = F(bpos.x), ["y"] = F(bpos.y), ["z"] = F(bpos.z),
+                        ["w"] = F(bsize.x),
+                        ["l"] = F(bsize.z),
+                        ["ht"] = F(bsize.y),
+                        ["x"] = F(bpos.x),
+                        ["y"] = F(bpos.y),
+                        ["z"] = F(bpos.z),
                         ["f"] = F(bfacing),
                     };
                     if (stateNote != null) entry["note"] = stateNote;

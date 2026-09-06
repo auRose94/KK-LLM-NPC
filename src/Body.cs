@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Possession, teardown, camera, ownership; reagent/egg/penetration listeners and equipment awareness.
 using System;
 using System.Collections;

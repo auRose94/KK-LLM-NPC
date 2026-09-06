@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 using System;
 using System.Collections.Generic;
 using System.Net;

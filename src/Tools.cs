@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // act tool implementations (walk, look, go_to, interact, say, memory, crouch, ...).
 using System;
 using System.Collections;

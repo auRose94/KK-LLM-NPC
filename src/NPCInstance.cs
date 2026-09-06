@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // NPCInstance — per-NPC state and behavior for a single LLM-driven kobold.
 // One plugin manages many NPCInstances; each owns its kobold, camera, LLM thread, and memory.
 //

@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // 3D layered A* pathfinding on a local walkability grid. Physics queries must
 // run on the main thread, so FindPath() is called via RunOnMainThread from
 // ToolGoTo. Instead of a flat floor plane, every grid cell is sampled with a

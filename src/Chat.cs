@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Real chat via Photon RaiseEvent + local bubble + ambient voice; hears the player.
 using System;
 using System.Collections;
@@ -175,7 +176,8 @@ namespace KKLLMNPC
                         string chatText = senderName + ": " + text;
                         if (PhotonNetwork.InRoom)
                         {
-                            var opts = new Photon.Realtime.RaiseEventOptions {
+                            var opts = new Photon.Realtime.RaiseEventOptions
+                            {
                                 CachingOption = Photon.Realtime.EventCaching.DoNotCache,
                                 Receivers = Photon.Realtime.ReceiverGroup.Others, // everyone else
                             };

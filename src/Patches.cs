@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Harmony patches that tame the game's animator behaviors that fight our control.
 //
 // Problem: CharacterControllerAnimator spawns coroutines (AnimationRoutine when entering

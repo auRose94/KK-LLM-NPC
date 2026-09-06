@@ -58,7 +58,7 @@ each other's chat bubbles.
 
 ## Install
 
-Drop `KKLLMNPC*.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
+Drop `KKLLMNPC.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
 `BepInEx/config/com.kk.llmnpc.cfg`.
 
 ## Config (per instance)

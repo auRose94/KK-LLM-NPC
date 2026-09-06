@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Decision loop: payload, JSON-schema act response, tool-call extraction (incl. salvage), plan chaining.
 using System;
 using System.Collections;
@@ -1109,10 +1110,25 @@ namespace KKLLMNPC
         {
             switch (key)
             {
-                case "walk": case "walk_ray": case "go_to": case "survey": case "stop":
-                case "look": case "jump": case "exit_station": case "crouch": case "move_to":
-                case "interact": case "grab": case "drop": case "say": case "status":
-                case "remember": case "ask": case "look_around": case "none": return true;
+                case "walk":
+                case "walk_ray":
+                case "go_to":
+                case "survey":
+                case "stop":
+                case "look":
+                case "jump":
+                case "exit_station":
+                case "crouch":
+                case "move_to":
+                case "interact":
+                case "grab":
+                case "drop":
+                case "say":
+                case "status":
+                case "remember":
+                case "ask":
+                case "look_around":
+                case "none": return true;
                 default: return false;
             }
         }
@@ -1130,21 +1146,46 @@ namespace KKLLMNPC
             // Build a list of (pattern → canonical) for the most frequent errors.
             var aliases = new Dictionary<string, string>
             {
-                ["goo_to"] = "go_to", ["go_too"] = "go_to", ["goto"] = "go_to", ["go_t"] = "go_to",
-                ["wal"] = "walk", ["waalk"] = "walk", ["wakl"] = "walk", ["wakk"] = "walk",
-                ["waalk_ray"] = "walk_ray", ["walk_r"] = "walk_ray",
-                ["suvey"] = "survey", ["survay"] = "survey", ["survy"] = "survey",
-                ["surver"] = "survey", ["surevy"] = "survey",
-                ["intercat"] = "interact", ["interac"] = "interact", ["intreract"] = "interact",
-                ["interatc"] = "interact", ["intract"] = "interact",
-                ["rember"] = "remember", ["remembr"] = "remember", ["remmber"] = "remember",
-                ["rememeber"] = "remember", ["reember"] = "remember",
-                ["saaay"] = "say", ["saay"] = "say", ["sya"] = "say", ["sy"] = "say",
-                ["exitt_station"] = "exit_station", ["exit_statoin"] = "exit_station",
-                ["exit_staton"] = "exit_station", ["exit_stat"] = "exit_station",
-                ["loo_around"] = "look_around", ["look_arond"] = "look_around",
-                ["look_ardound"] = "look_around", ["lookarond"] = "look_around",
-                ["move_o"] = "move_to", ["mov_to"] = "move_to", ["moveo"] = "move_to",
+                ["goo_to"] = "go_to",
+                ["go_too"] = "go_to",
+                ["goto"] = "go_to",
+                ["go_t"] = "go_to",
+                ["wal"] = "walk",
+                ["waalk"] = "walk",
+                ["wakl"] = "walk",
+                ["wakk"] = "walk",
+                ["waalk_ray"] = "walk_ray",
+                ["walk_r"] = "walk_ray",
+                ["suvey"] = "survey",
+                ["survay"] = "survey",
+                ["survy"] = "survey",
+                ["surver"] = "survey",
+                ["surevy"] = "survey",
+                ["intercat"] = "interact",
+                ["interac"] = "interact",
+                ["intreract"] = "interact",
+                ["interatc"] = "interact",
+                ["intract"] = "interact",
+                ["rember"] = "remember",
+                ["remembr"] = "remember",
+                ["remmber"] = "remember",
+                ["rememeber"] = "remember",
+                ["reember"] = "remember",
+                ["saaay"] = "say",
+                ["saay"] = "say",
+                ["sya"] = "say",
+                ["sy"] = "say",
+                ["exitt_station"] = "exit_station",
+                ["exit_statoin"] = "exit_station",
+                ["exit_staton"] = "exit_station",
+                ["exit_stat"] = "exit_station",
+                ["loo_around"] = "look_around",
+                ["look_arond"] = "look_around",
+                ["look_ardound"] = "look_around",
+                ["lookarond"] = "look_around",
+                ["move_o"] = "move_to",
+                ["mov_to"] = "move_to",
+                ["moveo"] = "move_to",
                 ["look_aound"] = "look_around",
             };
             string alias;
@@ -1171,10 +1212,25 @@ namespace KKLLMNPC
         {
             switch (key)
             {
-                case "walk": case "walk_ray": case "go_to": case "survey": case "stop":
-                case "look": case "jump": case "exit_station": case "crouch": case "move_to":
-                case "interact": case "grab": case "drop": case "say": case "status":
-                case "remember": case "ask": case "look_around": case "none": return true;
+                case "walk":
+                case "walk_ray":
+                case "go_to":
+                case "survey":
+                case "stop":
+                case "look":
+                case "jump":
+                case "exit_station":
+                case "crouch":
+                case "move_to":
+                case "interact":
+                case "grab":
+                case "drop":
+                case "say":
+                case "status":
+                case "remember":
+                case "ask":
+                case "look_around":
+                case "none": return true;
                 default: return false;
             }
         }

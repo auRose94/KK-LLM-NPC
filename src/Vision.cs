@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Background vision caption thread and frame dumps; vision steering hints fed to the action model.
 using System;
 using System.Collections;

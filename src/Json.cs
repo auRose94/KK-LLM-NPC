@@ -1,3 +1,4 @@
+// Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Hand-rolled JSON write/parse (no external deps), and JsonObj accessors for LLM arguments.
 using System;
 using System.Collections;
