@@ -1,4 +1,6 @@
-# KK-LLM-NPC
+# KK-LLM-NPC (Name WIP)
+
+## License: Open-Source MIT
 
 LLM-driven Kobold NPCs for [KoboldKare](https://store.steampowered.com/app/2938400/KoboldKare/).
 
@@ -50,22 +52,14 @@ each other's chat bubbles.
 - **Asks itself questions** (`ask` tool) — answers land next tick and auto-remember as facts.
 - **Distinct name per body** (from the kobold's own name + instance suffix), says it in chat.
 
-## Multiple NPCs
-
-The plugin builds one instance per DLL: `KKLLMNPC.dll`, `KKLLMNPC2.dll`, `KKLLMNPC3.dll`
-(each with its own BepInEx GUID → own config). Each possesses the nearest unoccupied AI kobold
-and a static claim set stops them from stealing each other's body. Build more:
-
 ```bash
-./build.sh 4    # builds instances 1..4
+./build.sh 
 ```
-
-(One-plugin-many-bodies is planned but not done yet — see SPLIT-PLAN.md for the path.)
 
 ## Install
 
 Drop `KKLLMNPC*.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
-`BepInEx/config/com.kk.llmnpc*.cfg`.
+`BepInEx/config/com.kk.llmnpc.cfg`.
 
 ## Config (per instance)
 
@@ -119,36 +113,5 @@ All blank = use `[LLM]` config.
 ## Build
 
 ```bash
-./build.sh        # build + deploy instance 1
-./build.sh 3      # instances 1..3
+./build.sh        # build + deploy instance
 ```
-
-Requires the game's Managed/ assemblies; paths are at the top of `build.sh`.
-
-## Architecture
-
-- Plugin thread per instance: a **decision loop** (main-thread for perception via a
-  marshalling queue, off-thread for HTTP), a **vision worker** (non-blocking, fires
-  every N ticks), and a **camera render on the main thread** only.
-- Movement state (`_stateLock`) written by the LLM thread, consumed by `FixedUpdate`.
-- Chat via `PhotonNetwork.RaiseEvent` with the game's own `CustomChatEvent` (shows in
-  the real chat window) + a `Chatter` bubble + a local echo via `CheatsProcessor.AppendText`.
-- All logs prefix with the instance: `[KKLLMNPC2] …` — BepInEx/LogOutput.log per instance
-  tells you its state: scene gating, body possession, every `act`, reagent/penetration events.
-
-## Layout / roadmap
-
-- `src/` — the plugin source, one `public partial class LLMNPCPlugin` per concern:
-  - `Main.cs` — `[BepInPlugin]` decl, config fields, Unity lifecycle (`Awake`/`Update`/
-    `OnDestroy`), main-thread marshalling, scene gating, memory (history/facts)
-  - `Body.cs` — possession/teardown, camera, belly/egg + penetration awareness
-  - `Senses.cs` — perception build, ray fan, clearance, nearby, equipment
-  - `Movement.cs` — `FixedUpdate`, move/stop, gaze, camera-clip auto-crouch
-  - `Llm.cs` — decision loop, HTTP, act-schema parsing, ask/commentary workers
-  - `Vision.cs` — background vision caption thread
-  - `Tools.cs` — the `Tool*` action implementations + `RunTool` switch
-  - `Chat.cs` — Photon chat listener, `ToolSay`, naming
-  - `Json.cs` — `Json` + `JsonObj` (independent helpers)
-- `build.sh` — multi-instance build/deploy (compiles `src/*.cs`)
-- `SPLIT-PLAN.md` — the (now done) split into partial-class files + the follow-up
-  single-plugin-multi-body refactor
