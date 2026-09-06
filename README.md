@@ -2,7 +2,7 @@
 
 ## License: Open-Source MIT
 
-LLM-driven Kobold NPCs for [KoboldKare](https://store.steampowered.com/app/2938400/KoboldKare/).
+LLM-driven Kobold NPCs for [KoboldKare](https://store.steampowered.com/app/1102930/KoboldKare/).
 
 Possesses unoccupied AI kobolds in the world and plays them through an OpenAI-compatible
 chat-completion endpoint: each NPC perceives, plans, moves, interacts, talks in chat,
