@@ -61,11 +61,13 @@ namespace KKLLMNPC
 
         private static void SkipRotationIfOurs(object routineState)
         {
+            if (routineState == null) return;
             try
             {
                 var ownerField = routineState.GetType().GetField("<>4__this");
                 if (ownerField == null) return;
-                if (!(ownerField.GetValue(routineState) is CharacterControllerAnimator self)) return;
+                var self = ownerField.GetValue(routineState) as CharacterControllerAnimator;
+                if (self == null) return;
                 // kobold is a private field on CharacterControllerAnimator — reflect it.
                 var kf = typeof(CharacterControllerAnimator).GetField("kobold",
                     BindingFlags.NonPublic | BindingFlags.Instance);

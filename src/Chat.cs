@@ -79,6 +79,7 @@ namespace KKLLMNPC
                 string myName = MyName();
                 foreach (var raw in output.Split('\n'))
                 {
+                    if (string.IsNullOrEmpty(raw)) continue;
                     string l = raw.Trim();
                     if (l.Length == 0) continue;
                     // Keep only human-readable speech lines: "<speaker>: <text>". Strip
@@ -98,7 +99,7 @@ namespace KKLLMNPC
                     lines.Add(clean);
                 }
 
-                int keep = _cfgChatLogLines.Value;
+                int keep = Math.Min(_cfgChatLogLines.Value, MaxChatLog);
                 int start = lines.Count - keep;
                 if (start < 0) start = 0;
 
@@ -142,53 +143,57 @@ namespace KKLLMNPC
             string text = p.S("text", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
             text = Sanitize(text);
-            string who = CleanName(_kobold != null ? _kobold.name : "NPC");
+            string who = _kobold != null ? CleanName(_kobold.name) : "NPC";
             Logger.LogInfo("[NPC] " + who + ": " + text); // always visible in the console/log
             RunOnMainThreadAsync(() =>
             {
-                // 1) Floating bubble above the kobold (local flavor). Force-activate
-                //    the chatter hierarchy so AI kobolds' bubbles actually show.
                 try
                 {
-                    var chatter = _kobold != null ? _kobold.GetComponentInChildren<Chatter>(true) : null;
-                    if (chatter != null)
+                    // 1) Floating bubble above the kobold (local flavor). Force-activate
+                    //    the chatter hierarchy so AI kobolds' bubbles actually show.
+                    try
                     {
-                        if (!chatter.gameObject.activeSelf) chatter.gameObject.SetActive(true);
-                        var node = chatter.transform;
-                        for (var par = node.parent; par != null; par = par.parent) if (!par.gameObject.activeSelf) par.gameObject.SetActive(true);
-                        chatter.DisplayMessage(text, 4f);
+                        var chatter = _kobold != null ? _kobold.GetComponentInChildren<Chatter>(true) : null;
+                        if (chatter != null)
+                        {
+                            if (!chatter.gameObject.activeSelf) chatter.gameObject.SetActive(true);
+                            var node = chatter.transform;
+                            for (var par = node.parent; par != null; par = par.parent) if (!par.gameObject.activeSelf) par.gameObject.SetActive(true);
+                            chatter.DisplayMessage(text, 4f);
+                        }
                     }
-                }
-                catch (Exception e) { Logger.LogWarning("say bubble: " + e.Message); }
+                    catch (Exception e) { Logger.LogWarning("say bubble: " + e.Message); }
 
-                // 2) The real chat window: same Photon event the ChatPanel raises,
-                // so it lands in everyone's chat history. The receiver renders it as
-                // "<sender nickname>: <message>" — and since we own the kobold's
-                // PhotonView, the sender is YOUR username. So we prefix the kobold's
-                // name in the message text itself so chat reads clearly.
-                try
-                {
-                    string senderName = MyName();
-                    string chatText = senderName + ": " + text;
-                    if (PhotonNetwork.InRoom)
+                    // 2) The real chat window: same Photon event the ChatPanel raises,
+                    // so it lands in everyone's chat history. The receiver renders it as
+                    // "<sender nickname>: <message>" — and since we own the kobold's
+                    // PhotonView, the sender is YOUR username. So we prefix the kobold's
+                    // name in the message text itself so chat reads clearly.
+                    try
                     {
-                        var opts = new Photon.Realtime.RaiseEventOptions {
-                            CachingOption = Photon.Realtime.EventCaching.DoNotCache,
-                            Receivers = Photon.Realtime.ReceiverGroup.Others, // everyone else
-                        };
-                        bool sent = PhotonNetwork.RaiseEvent(
-                            NetworkManager.CustomChatEvent,
-                            chatText.TrimEnd(),
-                            opts,
-                            ExitGames.Client.Photon.SendOptions.SendReliable);
-                        if (!sent) Logger.LogWarning("say: RaiseEvent returned false");
+                        string senderName = MyName();
+                        string chatText = senderName + ": " + text;
+                        if (PhotonNetwork.InRoom)
+                        {
+                            var opts = new Photon.Realtime.RaiseEventOptions {
+                                CachingOption = Photon.Realtime.EventCaching.DoNotCache,
+                                Receivers = Photon.Realtime.ReceiverGroup.Others, // everyone else
+                            };
+                            bool sent = PhotonNetwork.RaiseEvent(
+                                NetworkManager.CustomChatEvent,
+                                chatText.TrimEnd(),
+                                opts,
+                                ExitGames.Client.Photon.SendOptions.SendReliable);
+                            if (!sent) Logger.LogWarning("say: RaiseEvent returned false");
+                        }
+                        // Local echo: we won't receive our own event, so push it into the
+                        // chat log directly the same way NetworkManager.OnEvent does.
+                        try { CheatsProcessor.AppendText(chatText + "\n"); } catch (Exception e) { Logger.LogWarning("say local echo: " + e.Message); }
+                        if (!PhotonNetwork.InRoom) Logger.LogInfo("say (offline, not in a room): " + text);
                     }
-                    // Local echo: we won't receive our own event, so push it into the
-                    // chat log directly the same way NetworkManager.OnEvent does.
-                    try { CheatsProcessor.AppendText(chatText + "\n"); } catch (Exception e) { Logger.LogWarning("say local echo: " + e.Message); }
-                    if (!PhotonNetwork.InRoom) Logger.LogInfo("say (offline, not in a room): " + text);
+                    catch (Exception e) { Logger.LogWarning("say chat: " + e.Message); }
                 }
-                catch (Exception e) { Logger.LogWarning("say chat: " + e.Message); }
+                catch (Exception e) { Logger.LogWarning("say async: " + e.Message); }
             });
             return new { ok = true, said = text };
         }

@@ -17,6 +17,7 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 - **8-direction clearance** — which way is open, what's a wall/sill/window.
 - **Ground** — supported / step / sill / ledge / drop distance.
 - **Nearby** — kobolds, the player, and usable stations within 14m, with bearing ("front-right") and category (`bed`/`nest`/`play`/...).
+- **Pathfinding** — A* pathfinding allows the npcs to walk to locations and navigate obstacles.
 - **First-person JPEG** (optional, on a bump / after turns / periodically).
 - **Body** — equipment (penis / penetrables), energy, horniness (with trend arrow), egg amount.
 - **State** — in-station, being penetrated (depth/hole/thrust per penetrator), penetrating someone.
@@ -71,7 +72,7 @@ Drop `KKLLMNPC*.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
 ### `[LLM]` — the planner
 
 | Key | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `Endpoint` | `http://127.0.0.1:11434/v1/chat/completions` | OpenAI-compatible chat completions URL |
 | `Model` | `local-model` | model name |
 | `ApiKey` | empty | bearer token |
@@ -89,7 +90,7 @@ Drop `KKLLMNPC*.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
 ### `[Vision]` — the background "eyes" thread
 
 | Key | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `Enabled` | true | run the caption pass |
 | `EveryNTicks` | 3 | every N action ticks |
 | `Prompt` | built-in | vision task instruction |

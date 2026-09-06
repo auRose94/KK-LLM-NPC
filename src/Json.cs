@@ -205,6 +205,7 @@ namespace KKLLMNPC
     internal class JsonObj
     {
         private readonly Dictionary<string, object> _d;
+        public Dictionary<string, object> Dict => _d;
         public JsonObj(string json)
         {
             _d = Json.Parse(json) as Dictionary<string, object> ?? new Dictionary<string, object>();

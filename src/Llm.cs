@@ -33,7 +33,7 @@ namespace KKLLMNPC
             if (_cfgCommentEvery == null || _cfgCommentEvery.Value <= 0) return;
             if (_tick - _lastCommentaryTick < Math.Max(1, _cfgCommentEvery.Value)) return;
             _lastCommentaryTick = _tick;
-            string percep = perceptionJson; // captured for the worker
+            string percep = perceptionJson ?? "{}"; // captured for the worker
             var t = new Thread(() => CreativeCommentaryWorker(percep)) { IsBackground = true, Name = "KKLLMNPC-Comment" };
             t.Start();
         }
@@ -120,10 +120,11 @@ namespace KKLLMNPC
             try
             {
                 string q = _pendingQuestion;
+                if (string.IsNullOrEmpty(q)) return;
                 // Build context from the current perception.
                 string percep = null;
                 try { percep = (string)RunOnMainThread(() => Json.Write(BuildPerception(false)), 8000); } catch (Exception) { }
-                string ctx = "Perception now: " + percep + " Scene: " + _sceneDesc + " Remembered: " + FactsJson();
+                string ctx = "Perception now: " + (percep ?? "null") + " Scene: " + (_sceneDesc ?? "unknown") + " Remembered: " + FactsJson();
                 var payload = new Dictionary<string, object>
                 {
                     ["model"] = Val(_cfgModel),
@@ -147,26 +148,107 @@ namespace KKLLMNPC
                 using (var stream = resp.GetResponseStream())
                 {
                     if (stream == null) { _answerBusy = false; return; }
-                    var ms = new MemoryStream(); var buf = new byte[8192]; int total = 0, n;
-                    while ((n = stream.Read(buf, 0, buf.Length)) > 0) { total += n; if (total > 512 * 1024) break; ms.Write(buf, 0, n); }
-                    string json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-                    var root = Json.Parse(json) as Dictionary<string, object>;
-                    var choices = root?.GetValueOrDefault("choices") as List<object>;
-                    if (choices != null && choices.Count > 0)
+                    using (var ms = new MemoryStream())
                     {
-                        var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
-                        string content = msg?.GetValueOrDefault("content") as string;
-                        if (!string.IsNullOrWhiteSpace(content))
+                        var buf = new byte[8192]; int total = 0, n;
+                        while ((n = stream.Read(buf, 0, buf.Length)) > 0) { total += n; if (total > 512 * 1024) break; ms.Write(buf, 0, n); }
+                        string json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                        var root = Json.Parse(json) as Dictionary<string, object>;
+                        var choices = root?.GetValueOrDefault("choices") as List<object>;
+                        if (choices != null && choices.Count > 0)
                         {
-                            _lastAnswer = Sanitize(content.Trim());
-                            RememberFact("Q: " + q + " A: " + _lastAnswer);
-                            Logger.LogInfo("asked: " + q + " => " + _lastAnswer);
+                            var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                            string content = msg?.GetValueOrDefault("content") as string;
+                            if (!string.IsNullOrWhiteSpace(content))
+                            {
+                                _lastAnswer = Sanitize(content.Trim());
+                                RememberFact("Q: " + q + " A: " + _lastAnswer);
+                                Logger.LogInfo("asked: " + q + " => " + _lastAnswer);
+                            }
                         }
                     }
                 }
             }
             catch (Exception e) { Logger.LogWarning("ask: " + e.Message); }
             finally { _answerBusy = false; }
+        }
+
+        // ------------------------------------------------------------------
+        // Name selection: ask the LLM to pick a fitting name for the body.
+        // ------------------------------------------------------------------
+        // Sends a one-shot prompt with the body's gender, species, and personality
+        // traits, asks for a single name.  Falls back to the prefab name on failure.
+        internal string ChooseNameWithLLM(string gender, string species, string traits)
+        {
+            if (string.IsNullOrEmpty(Val(_cfgEndpoint)) || IsSmallModel)
+            {
+                // Small models are bad at creative naming — skip the LLM call.
+                Logger.LogInfo("[" + MyName() + "] name selection: skipped (small model or no endpoint)");
+                return null;
+            }
+
+            try
+            {
+                string prompt = "You are naming a character in a kobold-themed game. " +
+                    "Gender: " + (gender ?? "unknown") + ". " +
+                    "Species: " + (species ?? "kobold") + ". " +
+                    "Personality: " + (traits ?? "unknown") + ". " +
+                    "Pick ONE short name (2-10 characters, no spaces, no punctuation). " +
+                    "Reply with ONLY the name. Nothing else.";
+
+                var payload = new Dictionary<string, object>
+                {
+                    ["model"] = Val(_cfgModel),
+                    ["messages"] = new object[]
+                    {
+                        new Dictionary<string, object> { ["role"] = "user", ["content"] = prompt },
+                    },
+                    ["temperature"] = 0.9,
+                    ["max_tokens"] = 16,
+                    ["stream"] = false,
+                };
+                string body = Json.Write(payload);
+
+                var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(_cfgEndpoint.Value);
+                req.Method = "POST";
+                req.ContentType = "application/json";
+                if (!string.IsNullOrEmpty(_cfgApiKey.Value))
+                    req.Headers["Authorization"] = "Bearer " + _cfgApiKey.Value;
+                req.Timeout = 15000; req.ReadWriteTimeout = 15000;
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(body);
+                req.ContentLength = bytes.Length;
+                using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
+                using (var resp = req.GetResponse())
+                using (var stream = resp.GetResponseStream())
+                {
+                    if (stream == null) return null;
+                    using (var reader = new System.IO.StreamReader(stream, System.Text.Encoding.UTF8))
+                    {
+                        string json = reader.ReadToEnd();
+                        var root = Json.Parse(json) as Dictionary<string, object>;
+                        if (root == null) return null;
+                        var choices = root.GetValueOrDefault("choices") as List<object>;
+                        if (choices == null || choices.Count == 0) return null;
+                        var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                        if (msg == null) return null;
+                        string content = (msg.GetValueOrDefault("content") as string)?.Trim().Trim('"', '\'', ' ', '\n', '\r', '\t');
+                        // Validate: alphanumeric, 2-10 chars
+                        if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 10
+                            && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9]+$"))
+                        {
+                            Logger.LogInfo("[" + MyName() + "] LLM chose name: " + content);
+                            return content;
+                        }
+                        Logger.LogInfo("[" + MyName() + "] LLM name rejected: '" + (content ?? "null") + "' — using fallback");
+                        return null;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("[" + MyName() + "] name selection failed: " + e.Message);
+                return null;
+            }
         }
 
         // ------------------------------------------------------------------
@@ -248,6 +330,23 @@ namespace KKLLMNPC
                     string reply = QueryLLM(userJson, imageB64);
                     if (reply == null) { Thread.Sleep((int)(GetDynamicThinkInterval() * 1000)); continue; }
 
+                    // Context pressure tracking: estimate fill and let the ContextManager
+                    // adjust compaction level if needed.
+                    if (_ctxMgr != null && ModelProbe.DetectedContextLength > 0)
+                    {
+                        int factCount = 0, histCount = 0, thoughtCount = 0, chatCount = 0;
+                        lock (_facts) { factCount = _facts.Count; }
+                        lock (_history) { histCount = _history.Count; }
+                        lock (_thoughtHistory) { thoughtCount = _thoughtHistory.Count; }
+                        // Rough estimate: ~300 tokens system prompt, ~200 per nearby item,
+                        // ~50 per fact, ~30 per history, ~20 per thought, ~15 per chat line.
+                        int estTokens = 300 + (10 * 200) + (factCount * 50) + (histCount * 30) + (thoughtCount * 20);
+                        float fill = (float)estTokens / ModelProbe.DetectedContextLength;
+                        string ctxAction = _ctxMgr.Update(fill);
+                        if (ctxAction != null)
+                            Logger.LogInfo("[" + MyName() + "] " + ctxAction);
+                    }
+
                     ExecuteToolCalls(reply);
                     // Update activity timestamp if moving
                     UpdateActivity();
@@ -274,17 +373,13 @@ namespace KKLLMNPC
         // Dynamic think interval based on activity
         private float GetDynamicThinkInterval()
         {
-            float baseInterval = _cfgThinkInterval.Value;
+            float baseInterval = _cfgThinkInterval != null ? Mathf.Max(0.05f, _cfgThinkInterval.Value) : 0.4f;
             // If NPC has moved recently or is in station/penetration, keep fast
             bool active = Time.unscaledTime - _lastMoveTime < 2f
                 || IsInAnimationStation()
                 || IsPenetrated()
                 || IsDickInside();
             float interval = active ? baseInterval : Mathf.Min(baseInterval * 2f, 0.8f);
-            if (active)
-                Logger.LogInfo($"think interval: {interval:F2}s (active)");
-            else
-                Logger.LogInfo($"think interval: {interval:F2}s (idle)");
             return interval;
         }
 
@@ -305,6 +400,30 @@ namespace KKLLMNPC
             string base_ = Val(_cfgSystem);
             if (string.IsNullOrEmpty(_persona)) return base_;
             return base_ + "\n" + _persona;
+        }
+
+        // Compact system prompt for small models (7B-13B). Covers the essentials
+        // without overwhelming the context window or instruction-following capacity.
+        private string CompactSystemPrompt()
+        {
+            string base_ = Val(_cfgSystem);
+            // If the user already wrote a custom prompt, respect it.
+            if (base_ != null && base_.Length > 200 && !base_.Contains("RESPONSE CONTRACT")) return base_;
+            string vision = "";
+            if (_cfgVision != null && _cfgVision.Value)
+                vision = " You have stereo vision. Eye separation: " + (_cfgStereoIPD != null ? _cfgStereoIPD.Value.ToString() : "0.063") + "m.";
+            string persona = !string.IsNullOrEmpty(_persona) ? "\n" + _persona : "";
+            return "You are an NPC in KoboldKare. Reply with ONE JSON object only. No markdown, no prose, no explanation." + vision + persona +
+                "\nJSON shape: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<short>\",\"thought\":\"<goal>\",\"action\":\"<tool>\",...tool params...,\"plan\":[{\"action\":\"...\",...}]}" +
+                "\nTools: go_to(name|id|x,z,at) walk(duration,turn_deg) walk_ray(ray) survey look_around look(yaw,pitch) jump exit_station crouch move_to interact(id) grab drop say remember(mem) ask(q) status stop none" +
+                "\nRules: progress/why/thought required. action must be a tool name. Use go_to for ALL travel. Use id from nearby for specific objects. Keep plan steps ≤4. 'say' posts to chat." +
+                "\nPriorities: (1) player talked → say, (2) eggs ready → nest, (3) horny → play station, (4) player nearby → walk+say, (5) explore." +
+                "\nPerception has: nearby (objects+ids+dir), rays, ground, area, facts, history, chat_log." +
+                "\nIf perception has 'model_error', fix your JSON format. Never repeat the same failed action." +
+                "\nStation rules: When in_station=true, stay unless your NEW goal differs from the station type. Player 'stay' = stay until they say 'leave'." +
+                "\nNearby tags: ':busy'=in use, ':needs_buy'=must buy contract first, ':not_built'=machine not constructed yet, ':done'=already bought." +
+                "\nFood: blenders don't make food from nothing — drop a food item into it. If ':not_built', find its ConstructionContract first." +
+                "\nCompaction: if 'compaction' appears in perception, your context is being compressed — be extra terse, use fewer facts, shorter thoughts.";
         }
 
         // POST the perception+memory to the model. Sends response_format: json_schema
@@ -371,24 +490,33 @@ namespace KKLLMNPC
                 // with HTTP 400 on LM Studio), constrain output with a JSON schema.
                 // The model then replies *with the act-args object as content*,
                 // which our parser already accepts via the content-JSON path.
-                var schema = ActSchema();
-                var responseFormat = new Dictionary<string, object>
-                {
-                    ["type"] = "json_schema",
-                    ["json_schema"] = new Dictionary<string, object>
+                // For small models: skip json_schema (they can't follow it) and
+                // rely on the compact prompt + lenient parsing instead.
+                // If strict=true causes empty replies, we'll fall back next turn.
+                bool useSchema = !IsSmallModel && _emptyReplies < 2;
+                bool useStrict = _emptyReplies == 0;  // only strict on first try
+                var schema = useSchema ? ActSchema() : null;
+                var responseFormat = useSchema
+                    ? (object)new Dictionary<string, object>
                     {
-                        ["name"] = "act",
-                        ["strict"] = true,
-                        ["schema"] = schema,
-                    },
-                };
+                        ["type"] = "json_schema",
+                        ["json_schema"] = new Dictionary<string, object>
+                        {
+                            ["name"] = "act",
+                            ["strict"] = useStrict,
+                            ["schema"] = schema,
+                        },
+                    }
+                    : new Dictionary<string, object> { ["type"] = "text" };
+
+                string sysPrompt = IsSmallModel ? CompactSystemPrompt() : SystemPromptWithPersona();
 
                 var payload = new Dictionary<string, object>
                 {
                     ["model"] = Val(_cfgModel),
                     ["messages"] = new object[]
                     {
-                        new Dictionary<string, object> { ["role"] = "system", ["content"] = SystemPromptWithPersona() },
+                        new Dictionary<string, object> { ["role"] = "system", ["content"] = sysPrompt },
                         new Dictionary<string, object> { ["role"] = "user", ["content"] = userContent },
                     },
                     ["response_format"] = responseFormat,
@@ -411,25 +539,28 @@ namespace KKLLMNPC
                 using (var stream = resp.GetResponseStream())
                 {
                     if (stream == null) return null;
-                    // Read SSE stream: each line is "data: {...}" or "data: [DONE]".
-                    // Accumulate delta.content AND delta.tool_calls into the response —
-                    // backends (LM Studio + json_schema response_format) often stream the
-                    // act output as a tool_call instead of content; dropping it is what
-                    // produced the empty / "no tool call and no content" replies.
-                    var reader = new StreamReader(stream, Encoding.UTF8);
+
+                    // Read the full response first — it may be SSE or plain JSON.
+                    string rawResponse;
+                    using (var reader = new StreamReader(stream, Encoding.UTF8))
+                        rawResponse = reader.ReadToEnd();
+
                     var contentBuilder = new StringBuilder();
                     var toolArgsBuilder = new StringBuilder();
                     string toolCallId = null;
                     string toolName = null;
                     string role = "assistant";
-                    string line;
-                    while ((line = reader.ReadLine()) != null)
+
+                    // Try SSE format first: lines prefixed with "data: ".
+                    bool anySSE = false;
+                    foreach (var rawLine in rawResponse.Split('\n'))
                     {
+                        string line = rawLine.TrimEnd('\r');
                         if (line.Length == 0) continue;
                         if (!line.StartsWith("data: ")) continue;
+                        anySSE = true;
                         string data = line.Substring(6);
                         if (data == "[DONE]") break;
-                        // Parse the SSE chunk
                         try
                         {
                             var chunk = Json.Parse(data) as Dictionary<string, object>;
@@ -456,8 +587,50 @@ namespace KKLLMNPC
                         }
                         catch (Exception) { }
                     }
+
+                    // Fallback: non-streaming JSON response (common with LM Studio /v1/chat/completions).
+                    if (!anySSE && contentBuilder.Length == 0 && toolName == null)
+                    {
+                        try
+                        {
+                            var root = Json.Parse(rawResponse) as Dictionary<string, object>;
+                            if (root != null)
+                            {
+                                var choices = root.GetValueOrDefault("choices") as List<object>;
+                                if (choices != null && choices.Count > 0)
+                                {
+                                    var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                                    if (msg != null)
+                                    {
+                                        if (msg.ContainsKey("role")) role = msg["role"].ToString();
+                                        var c = msg.GetValueOrDefault("content") as string;
+                                        if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                                        var tcs = msg.GetValueOrDefault("tool_calls") as List<object>;
+                                        if (tcs != null)
+                                        {
+                                            foreach (var tcObj in tcs)
+                                            {
+                                                var tc = tcObj as Dictionary<string, object>; if (tc == null) continue;
+                                                if (tc.GetValueOrDefault("id") is string idStr) toolCallId = idStr;
+                                                var fn = tc.GetValueOrDefault("function") as Dictionary<string, object>; if (fn == null) continue;
+                                                if (fn.GetValueOrDefault("name") is string n && !string.IsNullOrEmpty(n)) toolName = n;
+                                                if (fn.GetValueOrDefault("arguments") is string a && !string.IsNullOrEmpty(a)) toolArgsBuilder.Append(Sanitize(a));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception) { }
+                    }
                     // Build a non-streaming response JSON so the rest of the pipeline works unchanged.
                     string fullContent = contentBuilder.ToString();
+                    // Debug: log raw response when empty, so we can see what the model actually sent.
+                    if (string.IsNullOrEmpty(fullContent) && toolName == null && rawResponse.Length > 0)
+                    {
+                        string preview = rawResponse.Length > 500 ? rawResponse.Substring(0, 500) + "..." : rawResponse;
+                        Logger.LogWarning("LLM raw response (empty content): " + preview);
+                    }
                     var message = new Dictionary<string, object> { ["role"] = role };
                     if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;
                     if (toolName != null && toolArgsBuilder.Length > 0)
@@ -488,13 +661,24 @@ namespace KKLLMNPC
             }
             catch (Exception e)
             {
-                Logger.LogWarning("LLM endpoint: " + e.Message);
+                string msg = e.Message;
+                // Detect LM Studio "no model loaded" error and provide clear guidance.
+                if (msg.Contains("No models loaded") || msg.Contains("no model"))
+                {
+                    Logger.LogWarning("LLM endpoint: NO MODEL LOADED on the server! Load a model first.");
+                    Logger.LogWarning("  LM Studio: Developer tab → Load Model");
+                    Logger.LogWarning("  KoboldCpp: load via GUI or --model flag");
+                    Logger.LogWarning("  Ollama: ollama pull <model> then ollama serve");
+                }
+                else
+                    Logger.LogWarning("LLM endpoint: " + msg);
                 return null;
             }
         }
 
         private void ExecuteToolCalls(string responseJson)
         {
+            if (string.IsNullOrEmpty(responseJson)) { Logger.LogWarning("llm reply: null/empty"); return; }
             Dictionary<string, object> root;
             try { root = Json.Parse(responseJson) as Dictionary<string, object>; }
             catch (Exception e) { Logger.LogWarning("parse llm json: " + e.Message); return; }
@@ -512,6 +696,7 @@ namespace KKLLMNPC
 
             if (args == null)
             {
+                NotifyInvalidResponse();
                 // The model failed to produce a valid act call. Show it the failure:
                 // empty reply, prose instead of JSON, or JSON that doesn't parse.
                 // The error is injected back into the NEXT perception as 'model_error'
@@ -521,7 +706,10 @@ namespace KKLLMNPC
                     _lastThought = content.Length > 80 ? content.Substring(0, 80) : content;
                     _lastAction = "say";
                     // Still say the line so the NPC isn't inert, but flag the formatting.
-                    SetModelError("You replied with PLAIN TEXT, not a structured act call. REPLY WITH ONLY ONE compact JSON object: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<1 short clause>\",\"thought\":\"<goal in <10 words>\",\"action\":\"<tool>\",...tool args...}. No prose, no markdown, no explanation around it. Your last text: " + (content.Length > 120 ? content.Substring(0, 120) + "..." : content));
+                    string hint = IsSmallModel
+                        ? "You replied with PLAIN TEXT. Reply with ONLY a JSON object. Example: {\"progress\":\"done\",\"why\":\"I see a bed\",\"thought\":\"go to bed\",\"action\":\"go_to\",\"name\":\"bed\"}. No words outside the JSON."
+                        : "You replied with PLAIN TEXT, not a structured act call. REPLY WITH ONLY ONE compact JSON object: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<1 short clause>\",\"thought\":\"<goal in <10 words>\",\"action\":\"<tool>\",...tool args...}. No prose, no markdown, no explanation around it. Your last text: " + (content.Length > 120 ? content.Substring(0, 120) + "..." : content);
+                    SetModelError(hint);
                     Logger.LogInfo("LLM (plain text -> say): " + content);
                     try { ToolSay(new TextArgs(content)); } catch (Exception e) { Logger.LogWarning("say fallback: " + e.Message); }
                 }
@@ -533,7 +721,10 @@ namespace KKLLMNPC
                         _lastEmptyReplyLog = Time.unscaledTime;
                         Logger.LogWarning("llm reply: no tool call and no content (streak=" + _emptyReplies + ")");
                     }
-                    SetModelError("Your last reply was EMPTY (no content, no tool call). REPLY WITH ONLY ONE compact JSON object per the act schema: {\"progress\":\"...\",\"why\":\"...\",\"thought\":\"...\",\"action\":\"...\",...}. Never reply with nothing.");
+                    string hint = IsSmallModel
+                        ? "Your last reply was EMPTY. Reply with ONLY a JSON object. Example: {\"progress\":\"ongoing\",\"why\":\"looking around\",\"thought\":\"explore\",\"action\":\"look_around\"}"
+                        : "Your last reply was EMPTY (no content, no tool call). REPLY WITH ONLY ONE compact JSON object per the act schema: {\"progress\":\"...\",\"why\":\"...\",\"thought\":\"...\",\"action\":\"...\",...}. Never reply with nothing.";
+                    SetModelError(hint);
                     // Feed it back to the model so next turn it corrects instead of idling.
                     PushHistory("eval", "empty reply");
                 }
@@ -542,6 +733,8 @@ namespace KKLLMNPC
 
             // The model produced a valid structured act — clear any outstanding error feedback.
             _modelError = null;
+            _emptyReplies = 0;  // valid response — reset empty streak
+            NotifyValidActJson();
             // Even a structured act can use an invalid tool; that's flagged in ExecuteStep.
 
             _lastThought = args.S("thought", _lastThought);
@@ -554,16 +747,49 @@ namespace KKLLMNPC
 
             Logger.LogInfo($"act: thought=\"{_lastThought}\"");
 
+            // Fuzzy match the root action for small models.
+            string rootAction = args.S("action", "none");
+            if (rootAction != "none" && !IsKnownToolWord(rootAction))
+            {
+                string fuzzy = FuzzyMatchTool(rootAction);
+                if (fuzzy != null)
+                {
+                    Logger.LogInfo("fuzzy root action: " + rootAction + " → " + fuzzy);
+                    args = new JsonObj(new Dictionary<string, object>(args.Dict) { ["action"] = fuzzy });
+                    rootAction = fuzzy;
+                }
+            }
+
             // Execute the root action, then the queued plan[] steps, with a delay
             // between each. Runs on the LLM thread — sleeping here is fine.
             ExecuteStep(args);
-            var plan = args.A("plan");
+            var plan = DeduplicatePlan(args.A("plan"));
             int max = Math.Max(1, _cfgMaxPlan.Value);
+            if (IsSmallModel) max = Math.Min(max, 4); // small models plan poorly — cap lower
             int ran = 0;
-            foreach (var step in plan)
+            foreach (var stepRaw in plan)
             {
                 if (ran >= max) { Logger.LogWarning($"plan capped at {max} steps"); break; }
                 if (!_running) return;
+                // Validate and fuzzy-fix each plan step before executing.
+                var step = stepRaw;
+                string stepAction = step.S("action", "");
+                if (!string.IsNullOrEmpty(stepAction) && !IsKnownToolWord(stepAction))
+                {
+                    string fuzzy = FuzzyMatchTool(stepAction);
+                    if (fuzzy != null)
+                    {
+                        Logger.LogInfo("fuzzy plan step: " + stepAction + " → " + fuzzy);
+                        step = new JsonObj(new Dictionary<string, object>(step.Dict) { ["action"] = fuzzy });
+                    }
+                    else
+                    {
+                        Logger.LogWarning("plan step has unknown action '" + stepAction + "', skipping");
+                        PushHistory("plan", "skip:" + stepAction);
+                        ran++;
+                        continue;
+                    }
+                }
                 float wait = Mathf.Clamp(step.F("wait", _cfgStepDelay.Value), 0f, 3f);
                 if (wait > 0f) Thread.Sleep((int)(wait * 1000f));
                 else Thread.Sleep((int)(_cfgStepDelay.Value * 1000f));
@@ -634,6 +860,26 @@ namespace KKLLMNPC
             catch (Exception) { return null; }
         }
 
+        // Clean up a plan array: remove 'none' actions, collapse consecutive duplicates,
+        // and cap at maxPlan steps. Small models often emit ["none","none","none"] or
+        // repeat the same action 5 times. Returns the cleaned list (or the original if clean).
+        private List<JsonObj> DeduplicatePlan(List<JsonObj> plan)
+        {
+            if (plan == null || plan.Count == 0) return plan;
+            var cleaned = new List<JsonObj>();
+            string lastAction = null;
+            foreach (var step in plan)
+            {
+                string action = step.S("action", "").ToLowerInvariant().Trim();
+                if (string.IsNullOrEmpty(action) || action == "none") continue;
+                // Skip consecutive duplicate actions (e.g. walk, walk, walk → walk once).
+                if (action == lastAction) continue;
+                cleaned.Add(step);
+                lastAction = action;
+            }
+            return cleaned.Count != plan.Count ? cleaned : plan;
+        }
+
         // Finds the `act` function arguments regardless of how the model formatted them.
         // Find the act args across any reply shape: real tool_calls, JSON in content,
         // {"name":...,"arguments":{...}}, {"walk":{...}}, markdown-fenced, or truncated. Salvage
@@ -650,6 +896,8 @@ namespace KKLLMNPC
                     string name = fn.GetValueOrDefault("name") as string;
                     string argStr = fn.GetValueOrDefault("arguments") as string;
                     if (string.IsNullOrEmpty(name)) continue;
+                    // Fuzzy match tool name for small models.
+                    if (!IsKnownToolWord(name)) { string fuzzy = FuzzyMatchTool(name); if (fuzzy != null) name = fuzzy; }
                     // Nested-JSON models double-encode arguments; unwrap once.
                     return UnwrapArgs(name, argStr);
                 }
@@ -661,7 +909,17 @@ namespace KKLLMNPC
                 var parsed = TryParseObj(content);
                 if (parsed != null)
                 {
-                    if (parsed.ContainsKey("action")) return new JsonObj(parsed);
+                    if (parsed.ContainsKey("action"))
+                    {
+                        // Fuzzy match the action name for small models.
+                        string act = parsed["action"] as string;
+                        if (act != null && !IsKnownToolWord(act))
+                        {
+                            string fuzzy = FuzzyMatchTool(act);
+                            if (fuzzy != null) parsed["action"] = fuzzy;
+                        }
+                        return new JsonObj(parsed);
+                    }
                     string n = (parsed.GetValueOrDefault("name") ?? parsed.GetValueOrDefault("tool")) as string;
                     if (n != null)
                     {
@@ -685,6 +943,14 @@ namespace KKLLMNPC
                 //     Honor it so the NPC acts instead of reading its own plan aloud.
                 var flat = TryParseFlatArgs(content);
                 if (flat != null) return flat;
+
+                // 2c) Small models: try aggressive salvage — scan for ANY known tool word
+                //     followed by ( or = or : and build an act call from it.
+                if (IsSmallModel)
+                {
+                    var salvage = TrySalvageSmallModel(content);
+                    if (salvage != null) return salvage;
+                }
             }
             return null;
         }
@@ -803,9 +1069,13 @@ namespace KKLLMNPC
             }
             if (action == null) return null;
             // Validate the action is one we know; if not, don't fabricate.
-            bool known = false;
-            foreach (var k in new[] { "walk", "walk_ray", "go_to", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status", "remember", "ask", "look_around", "none" })
-                if (k == action) { known = true; break; }
+            // Use fuzzy matching for small models that produce misspelled tool names.
+            bool known = IsKnownToolWord(action);
+            if (!known)
+            {
+                string fuzzy = FuzzyMatchTool(action);
+                if (fuzzy != null) { action = fuzzy; known = true; }
+            }
             if (!known) return null;
 
             var d = new Dictionary<string, object> { ["action"] = action };
@@ -845,6 +1115,84 @@ namespace KKLLMNPC
                 case "remember": case "ask": case "look_around": case "none": return true;
                 default: return false;
             }
+        }
+
+        // Fuzzy match a potentially-misspelled tool name to the closest valid tool.
+        // Returns the canonical tool name or null if nothing close enough.
+        // Designed for small models that produce "goo_to", "saaay", "intercat", etc.
+        private static string FuzzyMatchTool(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return null;
+            string s = input.ToLowerInvariant().Trim();
+            // Exact match first.
+            if (IsKnownToolWordStatic(s)) return s;
+            // Common small-model misspellings: doubled letters, transposed chars, extra/missing chars.
+            // Build a list of (pattern → canonical) for the most frequent errors.
+            var aliases = new Dictionary<string, string>
+            {
+                ["goo_to"] = "go_to", ["go_too"] = "go_to", ["goto"] = "go_to", ["go_t"] = "go_to",
+                ["wal"] = "walk", ["waalk"] = "walk", ["wakl"] = "walk", ["wakk"] = "walk",
+                ["waalk_ray"] = "walk_ray", ["walk_r"] = "walk_ray",
+                ["suvey"] = "survey", ["survay"] = "survey", ["survy"] = "survey",
+                ["surver"] = "survey", ["surevy"] = "survey",
+                ["intercat"] = "interact", ["interac"] = "interact", ["intreract"] = "interact",
+                ["interatc"] = "interact", ["intract"] = "interact",
+                ["rember"] = "remember", ["remembr"] = "remember", ["remmber"] = "remember",
+                ["rememeber"] = "remember", ["reember"] = "remember",
+                ["saaay"] = "say", ["saay"] = "say", ["sya"] = "say", ["sy"] = "say",
+                ["exitt_station"] = "exit_station", ["exit_statoin"] = "exit_station",
+                ["exit_staton"] = "exit_station", ["exit_stat"] = "exit_station",
+                ["loo_around"] = "look_around", ["look_arond"] = "look_around",
+                ["look_ardound"] = "look_around", ["lookarond"] = "look_around",
+                ["move_o"] = "move_to", ["mov_to"] = "move_to", ["moveo"] = "move_to",
+                ["look_aound"] = "look_around",
+            };
+            string alias;
+            if (aliases.TryGetValue(s, out alias)) return alias;
+            // Substring containment: "go" in a blob → go_to, "walk" in a blob → walk, etc.
+            // Order matters: check longer matches first to avoid "go" matching before "go_to".
+            string[] ordered = new[] { "exit_station", "look_around", "walk_ray", "go_to", "move_to", "interact", "remember", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
+            foreach (var tool in ordered)
+                if (s.Contains(tool)) return tool;
+            // Prefix match: first 3+ chars of a known tool.
+            foreach (var tool in ordered)
+                if (tool.Length >= 3 && s.Length >= 3 && tool.StartsWith(s.Substring(0, Math.Min(3, s.Length)))) return tool;
+            // Levenshtein distance ≤2 from any known tool.
+            string best = null; int bestDist = 999;
+            foreach (var tool in ordered)
+            {
+                int d = Levenshtein(s, tool);
+                if (d < bestDist && d <= 2) { bestDist = d; best = tool; }
+            }
+            return best;
+        }
+
+        private static bool IsKnownToolWordStatic(string key)
+        {
+            switch (key)
+            {
+                case "walk": case "walk_ray": case "go_to": case "survey": case "stop":
+                case "look": case "jump": case "exit_station": case "crouch": case "move_to":
+                case "interact": case "grab": case "drop": case "say": case "status":
+                case "remember": case "ask": case "look_around": case "none": return true;
+                default: return false;
+            }
+        }
+
+        private static int Levenshtein(string a, string b)
+        {
+            int na = a.Length, nb = b.Length;
+            if (na == 0) return nb; if (nb == 0) return na;
+            var d = new int[na + 1, nb + 1];
+            for (int i = 0; i <= na; i++) d[i, 0] = i;
+            for (int j = 0; j <= nb; j++) d[0, j] = j;
+            for (int i = 1; i <= na; i++)
+                for (int j = 1; j <= nb; j++)
+                {
+                    int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+                }
+            return d[na, nb];
         }
 
         // Strip leading chat-template control/role tokens from a reply, e.g.
@@ -970,6 +1318,74 @@ namespace KKLLMNPC
             return new JsonObj(d);
         }
 
+        // Small-model salvage: scan freeform text for a known tool word and infer
+        // an act call from it. Handles outputs like:
+        //   "I'll go to the bed. go_to(name=\"BedStation\")"
+        //   "Let me walk forward. walk(duration=2)"
+        //   "say Hello there!"  (just the tool word + payload)
+        private JsonObj TrySalvageSmallModel(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            string lower = text.ToLowerInvariant();
+            // Try each known tool and see if it appears in the text with args.
+            string[] tools = new[] { "go_to", "walk_ray", "walk", "survey", "interact", "move_to", "look_around", "look", "remember", "say", "ask", "jump", "exit_station", "crouch", "grab", "drop", "stop", "status", "none" };
+            foreach (var tool in tools)
+            {
+                // Look for "tool(args...)" pattern.
+                int idx = lower.IndexOf(tool + "(");
+                if (idx >= 0)
+                {
+                    int open = idx + tool.Length;
+                    int close = text.IndexOf(')', open);
+                    string args = close > open ? text.Substring(open + 1, close - open - 1) : "";
+                    var d = new Dictionary<string, object> { ["action"] = tool, ["thought"] = "salvaged" };
+                    if (args.Length > 0) ApplyCallArgs(d, args);
+                    Logger.LogInfo("small-model salvage: " + tool + "(" + args + ")");
+                    return new JsonObj(d);
+                }
+                // Look for "tool: value" or "tool value" patterns (e.g. "say Hello").
+                int spaceIdx = -1;
+                if (lower.StartsWith(tool + ": ")) spaceIdx = tool.Length + 2;
+                else if (lower.StartsWith(tool + " ")) spaceIdx = tool.Length + 1;
+                if (spaceIdx > 0 && tool != "none")
+                {
+                    string payload = text.Substring(spaceIdx).Trim().Trim('"', '\'');
+                    if (payload.Length > 0)
+                    {
+                        var d = new Dictionary<string, object> { ["action"] = tool, ["thought"] = "salvaged" };
+                        if (tool == "say" && !d.ContainsKey("say")) d["say"] = payload;
+                        else if (tool == "go_to" && !d.ContainsKey("name")) d["name"] = payload;
+                        else if (tool == "remember" && !d.ContainsKey("mem")) d["mem"] = payload;
+                        else if (tool == "ask" && !d.ContainsKey("q")) d["q"] = payload;
+                        Logger.LogInfo("small-model salvage: " + tool + " → " + payload);
+                        return new JsonObj(d);
+                    }
+                }
+            }
+            // Last resort: if the text contains a JSON-like fragment with "action", try to extract it.
+            int actIdx = lower.IndexOf("\"action\"");
+            if (actIdx >= 0)
+            {
+                // Try to find a JSON object starting a few chars before "action".
+                int start = lower.LastIndexOf('{', actIdx);
+                if (start >= 0 && start > actIdx - 30)
+                {
+                    var parsed = TryParseObj(text.Substring(start));
+                    if (parsed != null && parsed.ContainsKey("action"))
+                    {
+                        string act = parsed["action"] as string;
+                        if (act != null && !IsKnownToolWord(act))
+                        {
+                            string fuzzy = FuzzyMatchTool(act);
+                            if (fuzzy != null) parsed["action"] = fuzzy;
+                        }
+                        return new JsonObj(parsed);
+                    }
+                }
+            }
+            return null;
+        }
+
         private static Dictionary<string, object> TryParseObj(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return null;
@@ -998,6 +1414,12 @@ namespace KKLLMNPC
         // so a bad tool call is just a 'fail:' line in history, not a crash.
         private object RunTool(string name, JsonObj p)
         {
+            // Fuzzy match the tool name for small models.
+            if (name != null && !IsKnownToolWord(name))
+            {
+                string fuzzy = FuzzyMatchTool(name);
+                if (fuzzy != null) { Logger.LogInfo("fuzzy tool: " + name + " → " + fuzzy); name = fuzzy; }
+            }
             try
             {
                 switch (name)

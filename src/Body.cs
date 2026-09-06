@@ -38,8 +38,10 @@ namespace KKLLMNPC
                             _dickIn[listener] = st;
                         }
                         st.src = listener.lastTarget;
-                        Logger.LogInfo("dick in " + hole);
-                        EmitAmbient("haa~"); // their dick slid in
+                        //Logger.LogInfo("dick in " + hole);
+                        //EmitAmbient("haa~"); // their dick slid in
+                        _stimSource = PartnerName(listener.lastTarget, hole);
+                        _stimSourceT = Time.unscaledTime;
                     }
                     else _dickIn.Remove(listener);
                 }
@@ -146,11 +148,45 @@ namespace KKLLMNPC
                 if (LLMNPCPlugin.ClaimedKobolds.Contains(id)) return;
                 LLMNPCPlugin.ClaimedKobolds.Add(id);
             }
+            BindBody(target, false);
+            TryHookBodySwap();
+        }
+
+        // Wire the possessed body's drivable parts (controller, head, camera,
+        // subscriptions, nav/ownership state). reuseIdentity=true keeps the NPC's
+        // name + persona across a bodyswap machine — only its physical body changed.
+        private void BindBody(Kobold target, bool reuseIdentity)
+        {
             _kobold = target;
-            _currentKoboldId = id;
-            _npcName = PickName(target);   // choose a name for this body
-            _persona = BuildPersona();     // personality + gender + pronouns from the body
-            Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'" + (_persona != null ? " — " + _persona : ""));
+            _currentKoboldId = target.GetInstanceID();
+            if (!reuseIdentity)
+            {
+                _npcName = PickName(target);   // default: use prefab name
+                _persona = BuildPersona();     // personality + gender + pronouns from the body
+
+                // Ask the LLM to choose a fitting name based on the body's traits.
+                if (_cfgNameSelection != null && _cfgNameSelection.Value && _persona != null)
+                {
+                    try
+                    {
+                        string gender = InferGender();
+                        string species = SpeciesForm(MyName());
+                        string traits = _persona.Contains("Personality:")
+                            ? _persona.Substring(_persona.IndexOf("Personality:") + 12).Trim().TrimEnd('.')
+                            : "";
+                        string llmName = ChooseNameWithLLM(gender, species, traits);
+                        if (!string.IsNullOrEmpty(llmName))
+                        {
+                            string oldName = _npcName;
+                            _npcName = llmName;
+                            Logger.LogInfo("KKLLMNPC: '" + oldName + "' renamed to '" + llmName + "' by LLM");
+                        }
+                    }
+                    catch (Exception e) { Logger.LogWarning("LLM name selection: " + e.Message); }
+                }
+
+                Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'" + (_persona != null ? " — " + _persona : ""));
+            }
             _yawDeg = target.transform.eulerAngles.y; // start from current facing
             _controller = target.GetComponent<KoboldCharacterController>();
             _descriptor = target.GetComponent<CharacterDescriptor>();
@@ -179,7 +215,9 @@ namespace KKLLMNPC
             // Stop the game's LookAtHandler from driving the head/body — we manage it,
             // otherwise it fights our rigidbody steering and produces the sideways drift.
             if (_charAnimator != null) { try { _charAnimator.SetLookEnabled(false); } catch (Exception) { } }
-            _navTarget = null; _navTargetName = null;
+            _navTarget = null; _navTargetName = null; _path = null; _pathIdx = 0; _pathGoalSet = false; _stimSource = null;
+            _horny = _cfgHornyBaseline != null ? _cfgHornyBaseline.Value : 0.08f;
+            _hornyPrevStim = target != null ? target.stimulation : 0f;
 
             // Reagent awareness: listen to the belly container for drink/spray/metabolize events.
             _bellySnapshotPending = true; // first OnChange after possessing = baseline, not a gift
@@ -199,10 +237,69 @@ namespace KKLLMNPC
                     var anim = desc != null && IsAlive(desc) ? desc.GetDisplayAnimator() : null;
                     _head = anim != null ? anim.GetBoneTransform(HumanBodyBones.Head) : target.transform;
                     SetupCamera();
-                    Logger.LogInfo($"KKLLMNPC: possessed '{target.name}'");
+                    Logger.LogInfo($"KKLLMNPC: {(reuseIdentity ? "re-" : "")}possessed '{target.name}'");
                 }
-                catch (Exception e) { Logger.LogError("Possess head/cam: " + e); }
+                catch (Exception e) { Logger.LogError("BindBody head/cam: " + e); }
             });
+        }
+
+        // The brain-swap machine swapped our NPC with whoever was on the other pod.
+        // The Kobold objects don't move — the machine hands control of the other
+        // body to whoever its flags say. Rebinding keeps our NPCInstance pointed at
+        // the body it now inhabits, with name + persona intact.
+        private void OnBodySwap(Kobold a, Kobold b)
+        {
+            Kobold next = null;
+            if (a == _kobold) next = b;
+            else if (b == _kobold) next = a;
+            if (next == null || _kobold == null) return;
+            string prevName = PickName(_kobold);
+            Logger.LogInfo("KKLLMNPC: '" + (_npcName ?? "?") + "' body-swapping " + prevName + " -> " + PickName(next));
+            RunOnMainThread(() =>
+            {
+                try { RebindAfterSwap(next); }
+                catch (Exception e) { Logger.LogError("body swap rebind: " + e); }
+                return true;
+            });
+        }
+
+        private void RebindAfterSwap(Kobold next)
+        {
+            if (next == null || !IsAlive(next) || _kobold == next) return;
+            int oldId = _currentKoboldId;
+            int id = next.GetInstanceID();
+            // Release the swapped-out body (it's the other party's now) and claim
+            // the incoming one, unless another instance took it first.
+            lock (LLMNPCPlugin.ClaimedKobolds)
+            {
+                if (oldId >= 0) LLMNPCPlugin.ClaimedKobolds.Remove(oldId);
+                if (LLMNPCPlugin.ClaimedKobolds.Contains(id)) { LLMNPCPlugin.ClaimedKobolds.Add(oldId); return; }
+                LLMNPCPlugin.ClaimedKobolds.Add(id);
+            }
+            // BindBody re-subscribes belly + penetration listeners on the new body
+            // (both helpers unsubscribe the old ones first).
+            BindBody(next, true);
+            _persona = BuildPersona(); // physical gender/species changed — rebuild from the new body
+        }
+
+        // Follow body-swaps: the machine's AssignKobolds ends by raising the static
+        // bodySwapped(a, b) event with the two pod occupants. One static handler per
+        // instance — subscribe when we take a body, drop it on teardown.
+        private bool _bodySwapHooked;
+
+        private void TryHookBodySwap()
+        {
+            if (_bodySwapHooked) return;
+            try { BrainSwapperMachine.bodySwapped += OnBodySwap; _bodySwapHooked = true; }
+            catch (Exception e) { Logger.LogWarning("hook bodySwap: " + e.Message); }
+        }
+
+        private void TryUnhookBodySwap()
+        {
+            if (!_bodySwapHooked) return;
+            try { BrainSwapperMachine.bodySwapped -= OnBodySwap; }
+            catch (Exception) { }
+            _bodySwapHooked = false;
         }
 
         // ------------------------------------------------------------------
@@ -282,7 +379,7 @@ namespace KKLLMNPC
                     case GenericReagentContainer.InjectType.Spray: how = "sprayed"; break;
                     case GenericReagentContainer.InjectType.Flood: how = "filled up with"; break;
                     case GenericReagentContainer.InjectType.Vacuum: how = "pumped out"; break;
-                    default: how = "drank"; break; // Inject = consume
+                    default: how = "injected"; break; // Inject = consume
                 }
                 string ev = how + " " + what;
 
@@ -296,7 +393,10 @@ namespace KKLLMNPC
                     while (_reagentEvents.Count > 6) _reagentEvents.Dequeue();
                 }
                 RememberFact(how + " " + what.Split(' ')[0]); // remember *what*, not the volume
-                Logger.LogInfo("reagent: " + ev);
+                if (!_cfgDisableReagentMessages.Value)
+                {
+                    Logger.LogInfo("reagent: " + ev);
+                }
             }
             catch (Exception e) { Logger.LogWarning("reagent event: " + e.Message); }
         }
@@ -354,8 +454,12 @@ namespace KKLLMNPC
             if (_rt != null) { try { _rt.Release(); Destroy(_rt); } catch (Exception) { } _rt = null; }
             if (_camR != null) { try { Destroy(_camR.gameObject); } catch (Exception) { } _camR = null; }
             if (_rtR != null) { try { _rtR.Release(); Destroy(_rtR); } catch (Exception) { } _rtR = null; }
+            if (_texPoolL != null) { try { Destroy(_texPoolL); } catch (Exception) { } _texPoolL = null; }
+            if (_texPoolR != null) { try { Destroy(_texPoolR); } catch (Exception) { } _texPoolR = null; }
+            if (_texPoolStereo != null) { try { Destroy(_texPoolStereo); } catch (Exception) { } _texPoolStereo = null; }
             UnsubscribeBelly();
             UnsubscribePenetrables();
+            TryUnhookBodySwap();
             if (_charAnimator != null) { try { _charAnimator.SetLookEnabled(true); } catch (Exception) { } }
             if (_descriptor != null)
             {
@@ -363,7 +467,7 @@ namespace KKLLMNPC
             }
             _kobold = null; _controller = null; _descriptor = null; _grabber = null;
             _charAnimator = null; _head = null; _photonView = null;
-            _navTarget = null; _navTargetName = null;
+            _navTarget = null; _navTargetName = null; _path = null; _pathIdx = 0; _pathGoalSet = false; _stimSource = null;
             if (_currentKoboldId >= 0) { lock (LLMNPCPlugin.ClaimedKobolds) { LLMNPCPlugin.ClaimedKobolds.Remove(_currentKoboldId); } _currentKoboldId = -1; }
             StopMove();
         }
@@ -373,21 +477,31 @@ namespace KKLLMNPC
         // are config-tuned per kobold body model (some snouts are longer).
         private void SetupCamera()
         {
+            // Rebind (bodyswap) reuses this path — free any camera still attached to
+            // the previous body's head before wiring up the new one.
+            if (_cam != null) { try { Destroy(_cam.gameObject); } catch (Exception) { } _cam = null; }
+            if (_rt != null) { try { _rt.Release(); Destroy(_rt); } catch (Exception) { } _rt = null; }
+            if (_camR != null) { try { Destroy(_camR.gameObject); } catch (Exception) { } _camR = null; }
+            if (_rtR != null) { try { _rtR.Release(); Destroy(_rtR); } catch (Exception) { } _rtR = null; }
             if (_head == null) return;
             float halfIPD = (_cfgStereo != null && _cfgStereo.Value) ? _cfgStereoIPD.Value * 0.5f : 0f;
+            float camFwd = _cfgCamForward != null ? _cfgCamForward.Value : 0.22f;
+            float nearClip = _cfgCamNearClip != null ? _cfgCamNearClip.Value : 0.10f;
+            float farClip = _cfgCamFarClip != null ? _cfgCamFarClip.Value : 80f;
+            int imgSize = _cfgImageSize != null ? _cfgImageSize.Value : 192;
 
             // Left eye camera (center when stereo is off).
             var go = new GameObject("LLMNPC_Cam_L");
             go.transform.SetParent(_head, false);
-            go.transform.localPosition = new Vector3(-halfIPD, 0.06f, _cfgCamForward.Value);
+            go.transform.localPosition = new Vector3(-halfIPD, 0.06f, camFwd);
             go.transform.localRotation = Quaternion.identity;
             _cam = go.AddComponent<Camera>();
             _cam.fieldOfView = 90f;
-            _cam.nearClipPlane = _cfgCamNearClip.Value;
-            _cam.farClipPlane = 80f;
+            _cam.nearClipPlane = nearClip;
+            _cam.farClipPlane = farClip;
             _cam.enabled = false;
             if (RtCreated(_rt)) { try { _rt.Release(); Destroy(_rt); } catch (Exception) { } }
-            _rt = new RenderTexture(_cfgImageSize.Value, _cfgImageSize.Value, 16, RenderTextureFormat.ARGB32);
+            _rt = new RenderTexture(imgSize, imgSize, 16, RenderTextureFormat.ARGB32);
             _rt.Create();
             _cam.targetTexture = _rt;
 
@@ -396,15 +510,15 @@ namespace KKLLMNPC
             {
                 var goR = new GameObject("LLMNPC_Cam_R");
                 goR.transform.SetParent(_head, false);
-                goR.transform.localPosition = new Vector3(halfIPD, 0.06f, _cfgCamForward.Value);
+                goR.transform.localPosition = new Vector3(halfIPD, 0.06f, camFwd);
                 goR.transform.localRotation = Quaternion.identity;
                 _camR = goR.AddComponent<Camera>();
                 _camR.fieldOfView = 90f;
-                _camR.nearClipPlane = _cfgCamNearClip.Value;
-                _camR.farClipPlane = 80f;
+                _camR.nearClipPlane = nearClip;
+                _camR.farClipPlane = farClip;
                 _camR.enabled = false;
                 if (RtCreated(_rtR)) { try { _rtR.Release(); Destroy(_rtR); } catch (Exception) { } }
-                _rtR = new RenderTexture(_cfgImageSize.Value, _cfgImageSize.Value, 16, RenderTextureFormat.ARGB32);
+                _rtR = new RenderTexture(imgSize, imgSize, 16, RenderTextureFormat.ARGB32);
                 _rtR.Create();
                 _camR.targetTexture = _rtR;
             }
@@ -663,7 +777,9 @@ namespace KKLLMNPC
                             st = new PenState { name = whoPen, lastT = now, depth = worldSpaceDistanceToPenetrator, vel = 0f, hole = ClassifyPenetrable(penetrable) };
                             _pen[penetrator] = st;
                             Logger.LogInfo("penetrated by " + whoPen + " (" + st.hole + ")");
-                            EmitAmbient("hah~"); // being entered
+                            //EmitAmbient("hah~"); // being entered
+                            _stimSource = whoPen; // name the source: partner or machine part
+                            _stimSourceT = now;
                         }
                         st.src = penetrator.gameObject != null ? penetrator.transform : null;
                         float d = worldSpaceDistanceToPenetrator;
@@ -830,6 +946,43 @@ namespace KKLLMNPC
             }
             if (best != null && IsAlive(best.gameObject)) return best;
             return null;
+        }
+
+        // Who/what is responsible for the pleasure right now, for perception's
+        // 'stim_from'. Live partners win; otherwise the station/machine we last
+        // used while still (or recently) mounted; nothing otherwise. This exists
+        // so the model credits the actual source instead of hallucinating "player".
+        private string StimFromText()
+        {
+            try
+            {
+                float now = Time.unscaledTime;
+                if (IsPenetrated())
+                {
+                    lock (_pen)
+                        foreach (var kv in _pen)
+                        {
+                            var st = kv.Value;
+                            if (now - st.lastT < 3f)
+                                return "being_filled_by:" + PartnerName(st.src, st.name);
+                        }
+                }
+                if (IsDickInside())
+                {
+                    lock (_dickIn)
+                        foreach (var kv in _dickIn)
+                        {
+                            var st = kv.Value;
+                            if (now - st.lastT < 3f)
+                                return "inside:" + PartnerName(st.src, st.name);
+                        }
+                }
+                bool inStation = IsInAnimationStation();
+                if (_stimSource != null && (inStation || now - _stimSourceT < 8f))
+                    return "machine:" + _stimSource;
+                return null;
+            }
+            catch (Exception) { return null; }
         }
     }
 }

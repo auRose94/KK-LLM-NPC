@@ -27,8 +27,8 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         private object ToolMoveTo(JsonObj p)
         {
+            if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
             float x = p.F("x"), y = p.F("y"), z = p.F("z");
-            if (_kobold == null) return new { ok = false, reason = "no_body" };
             Vector3 target = new Vector3(x, y, z);
             Vector3 toT = target - _kobold.transform.position;
             float dist = toT.magnitude;
@@ -123,7 +123,7 @@ namespace KKLLMNPC
                         try
                         {
                             var kb = hit.collider.GetComponentInParent<Kobold>();
-                            var us = hit.collider.GetComponentInParent<GenericUsable>();
+                            var us = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
                             if (kb != null) what = (IsPlayerKobold(kb) ? "player:" : "kobold:") + kb.name;
                             else if (us != null) what = "usable:" + us.name;
                             else what = "wall:" + hit.collider.gameObject.name;
@@ -168,10 +168,9 @@ namespace KKLLMNPC
                     try
                     {
                         var kb = hit.collider.GetComponentInParent<Kobold>();
-                        var us = hit.collider.GetComponentInParent<GenericUsable>();
-                        Transform root = hit.collider.transform.root != null ? hit.collider.transform.root : hit.collider.transform;
-                        if (kb != null) { what = (IsPlayerKobold(kb) ? "player:" : "kobold:") + kb.name; cat = "kobold"; tid = TargetIdFor(root, kb.name); }
-                        else if (us != null) { string cn = CleanName(us.name); what = "usable:" + cn; cat = ClassifyUsable(cn); tid = TargetIdFor(root, cn); }
+                        var us = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
+                        if (kb != null) { what = (IsPlayerKobold(kb) ? "player:" : "kobold:") + kb.name; cat = "kobold"; tid = TargetIdFor(kb.transform, kb.name); }
+                        else if (us != null) { string cn = CleanName(us.name); what = "usable:" + cn; cat = ClassifyUsable(cn); tid = TargetIdFor(us.transform, cn); }
                     }
                     catch (Exception) { }
                     string key = res.ContainsKey("hit") ? "hit2" : "hit";
@@ -211,7 +210,7 @@ namespace KKLLMNPC
                 {
                     double idv = p.DB("id", -1);
                     int id = (int)idv;
-                    tf = (Transform)RunOnMainThread(() => FindTargetById(id), 8000);
+                    if (id > 0) tf = (Transform)RunOnMainThread(() => FindTargetById(id), 8000);
                 }
                 catch (Exception) { }
                 if (tf == null) return new { ok = false, reason = "unknown_target", id = p.S("id"), note = "that id wasn't nearby; re-read 'nearby' for current ids" };
@@ -221,28 +220,129 @@ namespace KKLLMNPC
             }
             else if (!string.IsNullOrEmpty(name))
             {
+                var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Mechanics", "FarmRegion" };
+                if (ignore.Contains(name.ToLowerInvariant())) return new { ok = false, reason = "ignored_place", tried = name };
                 var hit = FindPlaceByName(name);
                 if (!hit.HasValue) return new { ok = false, reason = "unknown_place", tried = name };
+
                 target = hit.Value;
                 _navTargetName = name;
             }
             else { target = new Vector3(p.F("x"), 0, p.F("z")); _navTargetName = null; namedTarget = false; }
+
+            // Movement can't apply at all without the body's character controller.
+            // Say so explicitly instead of "ok" + doing nothing (the model then
+            // wrongly thinks it moved).
+            if (_controller == null || _controller.body == null)
+                return new { ok = false, reason = "no_movement_controller", note = "this body can't move right now" };
+
+            // Auto-recover from an animation-station lock — but only if the new
+            // destination is actually DIFFERENT from what this station provides.
+            // If the model re-issues go_to to the same kind of place, stay put.
+            if (IsInAnimationStation())
+            {
+                bool shouldExit = true;
+                if (_stayInStation)
+                {
+                    shouldExit = false;
+                    Logger.LogInfo("go_to: player asked to stay — ignoring navigation while in station");
+                }
+                else if (_stationPurpose != null && namedTarget)
+                {
+                    string destClass = ClassifyUsable(name).ToLowerInvariant();
+                    // Same purpose (e.g. play→play, bed→bed) — don't exit.
+                    if (string.Equals(_stationPurpose, destClass, StringComparison.OrdinalIgnoreCase))
+                        shouldExit = false;
+                    // Also stay if the destination name contains the current station's name.
+                    else if (!string.IsNullOrEmpty(_navTargetName) && name.ToLowerInvariant().Contains(_navTargetName.ToLowerInvariant()))
+                        shouldExit = false;
+                }
+                if (shouldExit)
+                {
+                    try { _photonView?.RPC("StopAnimationRPC", RpcTarget.All); }
+                    catch (Exception e) { Logger.LogWarning("go_to exit station: " + e.Message); }
+                    _stationPurpose = null;
+                    _stationEntryThought = null;
+                }
+                else
+                {
+                    _blockedInfo = "staying in " + (_stationPurpose ?? "station") + " (same purpose)";
+                    return new { ok = true, to = _navTargetName ?? "position", dist = F(0f), note = "already in a " + (_stationPurpose ?? "station") + " — staying" };
+                }
+            }
 
             // Stop short so we arrive AT the target rather than plowing through it.
             float at = p.F("at", namedTarget ? 1f : 0f);
             at = Mathf.Clamp(at, 0f, 8f);
             Vector3 to = target - _kobold.transform.position; to.y = 0;
             float fullDist = to.magnitude;
+
+            // No chasing phantom targets across a huge map: beyond our reachable
+            // A* window a straight-line/wall-grind "walk" is worse than a refusal.
+            float maxReach = (_cfgPathSpan != null ? _cfgPathSpan.Value : 20f) * 2f + 30f;
+            if (fullDist > maxReach + at)
+                return new { ok = false, reason = "too_far", name = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), note = "in range of ~" + F(maxReach) + "m only — pick something from 'nearby'/'survey' or ask the player to take you" };
             float stopAt = Mathf.Max(0f, fullDist - at);
             float yaw = Mathf.Atan2(to.x, to.z) * 57.29578f;
             lock (_stateLock) { _yawDeg = yaw; }
             if (fullDist > at + 0.1f)
             {
                 var arrive = _kobold.transform.position + to.normalized * stopAt;
+                List<Vector3> path = null;
+                if (_cfgPathEnabled.Value && stopAt > 1.5f)
+                {
+                    // Reuse an active path to ~the same place instead of replanning
+                    // every think tick (planning is physics-heavy, main-thread).
+                    bool reuse = false;
+                    lock (_stateLock)
+                    {
+                        if (_path != null && _pathIdx < _path.Count && _pathGoalSet
+                            && Time.unscaledTime - _pathLastPlanTime < 6f)
+                        {
+                            var g = new Vector3(arrive.x, 0, arrive.z);
+                            if (Vector3.Distance(g, _pathGoal) <= 1.5f) reuse = true;
+                        }
+                    }
+                    if (reuse)
+                    {
+                        lock (_stateLock)
+                        {
+                            if (_pathIdx >= _path.Count) _pathIdx = Math.Max(0, _path.Count - 1);
+                            _navTarget = _path[_pathIdx];
+                            _pathLastPlanTime = Time.unscaledTime;
+                        }
+                        SetMove(1f, 0f, false, 0f, Mathf.Clamp(stopAt / 2f, 0.3f, 12f), p.B("run", false));
+                        return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "continuing path; re-issue go_to to replan" };
+                    }
+                    try
+                    {
+                        path = (List<Vector3>)RunOnMainThread(() => FindPath(_kobold.transform.position, arrive), 8000);
+                    }
+                    catch (Exception e) { Logger.LogWarning("pathfind: " + e.Message); }
+                }
+                if (path != null && path.Count >= 2)
+                {
+                    lock (_stateLock)
+                    {
+                        _path = path;
+                        _pathIdx = 0;
+                        _navTarget = path[0];
+                        _pathGoal = new Vector3(arrive.x, 0, arrive.z);
+                        _pathGoalSet = true;
+                        _pathLastPlanTime = Time.unscaledTime;
+                    }
+                    float pathLen = 0f;
+                    for (int i = 1; i < path.Count; i++) pathLen += Vector3.Distance(path[i - 1], path[i]);
+                    SetMove(1f, 0f, false, 0f, Mathf.Clamp(pathLen / 1.5f, 1f, 30f), p.B("run", false));
+                    string dnote = _pathDoorBlocked ? " (a CLOSED door is on the way — the body will open it when it gets there, or use interact on it)" : "";
+                    return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "a* path (" + (path.Count - 2) + " posts)" + dnote + "; re-issue go_to to replan" };
+                }
+                // Fallback: direct steering toward the arrive point (previous behavior).
+                lock (_stateLock) { _path = null; _pathIdx = 0; _pathGoalSet = false; }
                 _navTarget = new Vector3(arrive.x, 0, arrive.z);
                 SetMove(1f, 0f, false, 0f, Mathf.Clamp(stopAt / 2f, 0.3f, 12f), p.B("run", false));
             }
-            else { _navTarget = null; StopMove(); _blockedInfo = "already at " + name; }
+            else { _navTarget = null; _path = null; _pathIdx = 0; _pathGoalSet = false; StopMove(); _blockedInfo = "already at " + name; }
             return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "walking with obstacle steering; re-issue go_to to update heading" };
         }
 
@@ -255,24 +355,38 @@ namespace KKLLMNPC
             // The player.
             if (needle.Contains("player") || needle.Contains("me") || needle.Contains("you"))
             {
-                if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
-                    return pp.kobold.transform.position;
+                try
+                {
+                    if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
+                        return pp.kobold.transform.position;
+                }
+                catch (Exception) { }
             }
             // Best matching GenericUsable (bed/toilet/tub/seat/door/swap...) in range.
             GenericUsable best = null; float bestD = float.MaxValue;
-            foreach (var c in Physics.OverlapSphere(_kobold.transform.position, 60f, ~0, QueryTriggerInteraction.Collide))
+            try
             {
-                if (c == null || IsOwnCollider(c)) continue;
-                var u = c.GetComponentInParent<GenericUsable>();
-                if (u == null) continue;
-                string n = CleanName(u.name).ToLowerInvariant();
-                string cls = ClassifyUsable(n).ToLowerInvariant();
-                if (n.Contains(needle) || cls.Contains(needle) || needle.Contains(cls))
+                var colliders = Physics.OverlapSphere(_kobold.transform.position, 60f, ~0, QueryTriggerInteraction.Collide);
+                if (colliders != null)
                 {
-                    float d = Vector3.Distance(u.transform.position, _kobold.transform.position);
-                    if (d < bestD) { bestD = d; best = u; }
+                    foreach (var c in colliders)
+                    {
+                        if (c == null) continue;
+                        if (IsOwnCollider(c)) continue;
+                        GenericUsable u = null;
+                        try { u = c.GetComponent<GenericUsable>() ?? c.GetComponentInParent<GenericUsable>(); } catch (Exception) { continue; }
+                        if (u == null) continue;
+                        string n = CleanName(u.name).ToLowerInvariant();
+                        string cls = ClassifyUsable(n).ToLowerInvariant();
+                        if (n.Contains(needle) || cls.Contains(needle) || needle.Contains(cls))
+                        {
+                            float d = Vector3.Distance(u.transform.position, _kobold.transform.position);
+                            if (d < bestD) { bestD = d; best = u; }
+                        }
+                    }
                 }
             }
+            catch (Exception) { }
             return best != null ? best.transform.position : (Vector3?)null;
         }
 
@@ -308,6 +422,11 @@ namespace KKLLMNPC
                 catch (Exception e) { Logger.LogWarning("exit station: " + e.Message); return false; }
             });
             StopMove(); // also release local input (controller ignores it while animating)
+            _stimSource = null; // no longer mounted: the machine's not the stim source
+            _stationPurpose = null; // no longer in a station
+            _stationEntryThought = null;
+            _stationEntryTime = 0f;
+            _stayInStation = false;
             return new { ok = sent, was_in_station = inStation, note = "exits any animation station — same as pressing jump" };
         }
 
@@ -365,7 +484,7 @@ namespace KKLLMNPC
                     double idv = -1; try { idv = p.DB("id", -1); } catch (Exception) { }
                     Transform tf = FindTargetById((int)idv);
                     if (tf == null) return new { ok = false, reason = "unknown_target", id = p.S("id"), note = "that id wasn't nearby; re-read 'nearby' for current ids" };
-                    target = tf.GetComponentInParent<GenericUsable>();
+                    target = tf.GetComponent<GenericUsable>() ?? tf.GetComponentInParent<GenericUsable>();
                     dist = Vector3.Distance(tf.position, _kobold.transform.position);
                     if (target == null) return new { ok = false, reason = "target_not_usable", name = CleanName(tf.name) };
                 }
@@ -388,7 +507,16 @@ namespace KKLLMNPC
                 if (!target.CanUse(_kobold)) return new { ok = false, reason = "cannot_use", name = CleanName(target.name), hint = "maybe busy/occupied or wrong state", dist = F(dist) };
                 try { target.LocalUse(_kobold); }
                 catch (Exception e) { Logger.LogWarning("use: " + e.Message); return new { ok = false, reason = "use_failed", name = CleanName(target.name) }; }
-                return (object)new { ok = true, used = CleanName(target.name), type = ClassifyUsable(CleanName(target.name)), dist = F(dist) };
+                // The machine/station is what we just climbed onto — this is the
+                // source of any pleasure that follows, not "the player".
+                _stimSource = CleanName(target.name);
+                _stimSourceT = Time.unscaledTime;
+                // Track station purpose for smart exit decisions.
+                _stationPurpose = ClassifyUsable(CleanName(target.name));
+                _stationEntryThought = _lastThought;
+                _stationEntryTime = Time.unscaledTime;
+                _stayInStation = false; // entering a new station clears any previous stay request
+                return (object)new { ok = true, used = CleanName(target.name), type = _stationPurpose, dist = F(dist) };
             });
         }
 
@@ -410,25 +538,38 @@ namespace KKLLMNPC
                 if (Physics.Raycast(_head.position, dir, out RaycastHit hit, InteractRange, ~0, QueryTriggerInteraction.Collide)
                     && !IsOwnCollider(hit.collider))
                 {
-                    var u = hit.collider.GetComponentInParent<GenericUsable>();
-                    if (u != null && u.CanUse(_kobold)) { best = u; dist = hit.distance; }
+                    try
+                    {
+                        var u = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
+                        if (u != null && u.CanUse(_kobold)) { best = u; dist = hit.distance; }
+                    }
+                    catch (Exception) { }
                 }
             }
 
             // 2) Otherwise nearest within the touch bubble, preferring forward-facing.
             float bestScore = best != null ? dist : float.MaxValue;
-            foreach (var c in Physics.OverlapSphere(pos, InteractRange, ~0, QueryTriggerInteraction.Collide))
+            try
             {
-                if (c == null || IsOwnCollider(c)) continue;
-                var u2 = c.GetComponentInParent<GenericUsable>();
-                if (u2 == null) continue;
-                try { if (!u2.CanUse(_kobold)) continue; } catch (Exception) { continue; }
-                Vector3 d = u2.transform.position - pos;
-                float m = d.magnitude;
-                float facing = Vector3.Dot(d.normalized, fwd);
-                float score = m * (facing > -0.2f ? 1f : 2.5f);
-                if (score < bestScore) { bestScore = score; dist = m; best = u2; }
+                var colliders = Physics.OverlapSphere(pos, InteractRange, ~0, QueryTriggerInteraction.Collide);
+                if (colliders != null)
+                {
+                    foreach (var c in colliders)
+                    {
+                        if (c == null || IsOwnCollider(c)) continue;
+                        GenericUsable u2 = null;
+                        try { u2 = c.GetComponent<GenericUsable>() ?? c.GetComponentInParent<GenericUsable>(); } catch (Exception) { continue; }
+                        if (u2 == null) continue;
+                        try { if (!u2.CanUse(_kobold)) continue; } catch (Exception) { continue; }
+                        Vector3 d = u2.transform.position - pos;
+                        float m = d.magnitude;
+                        float facing = Vector3.Dot(d.normalized, fwd);
+                        float score = m * (facing > -0.2f ? 1f : 2.5f);
+                        if (score < bestScore) { bestScore = score; dist = m; best = u2; }
+                    }
+                }
             }
+            catch (Exception) { }
             return best;
         }
 

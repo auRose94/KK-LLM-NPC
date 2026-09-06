@@ -79,8 +79,7 @@ namespace KKLLMNPC
                         // Update needs quickly without full raycast
                         var needs = new { 
                             energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
-                            horniness = F(_kobold.stimulation) + StimTrend(_kobold.stimulation)
-                                      + (_kobold.stimulation > 0.5f ? " very" : _kobold.stimulation > 0.25f ? "" : " low"),
+                            horniness = HorninessText(),
                             eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
                             crouch = F(_crouch),
                         };
@@ -105,8 +104,8 @@ namespace KKLLMNPC
 
             var rays = new List<object>();
             result["rays"] = rays;
-            int n = Mathf.Max(1, _cfgRayCount.Value);
-            float range = _cfgRayRange.Value;
+            int n = Mathf.Max(1, _cfgRayCount != null ? _cfgRayCount.Value : 9);
+            float range = _cfgRayRange != null ? _cfgRayRange.Value : 25f;
             Vector3 origin = _head.position + _head.forward * 0.1f;
             float fov = _cam != null ? _cam.fieldOfView : 90f;
             float aspect = 1f;
@@ -143,13 +142,16 @@ namespace KKLLMNPC
                                 facingDeg = hit.collider.transform.eulerAngles.y;
 
                                 var kb = hit.collider.GetComponentInParent<Kobold>();
-                                var usable = hit.collider.GetComponentInParent<GenericUsable>();
+                                var usable = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
                                 if (kb != null) { kind = IsPlayerKobold(kb) ? "p" : "k"; name = kb.name; }
                                 else if (usable != null) { kind = "u"; name = usable.name; }
                                 else
                                 {
+                                    // Low anonymous geometry — sill/window, step-over and
+                                    // climbable — NOT an obstacle worth narrating. Neutral
+                                    // letter so models don't dramatize it as a "barrier".
                                     float topH = ProbeSurfaceTop(hit.point);
-                                    if (topH < 1.35f) kind = "barrier";
+                                    if (topH < 1.35f) kind = "s";
                                 }
                             }
                         }
@@ -177,12 +179,23 @@ namespace KKLLMNPC
 
             result["ok"] = true;
             result["me"] = MyName();
+            // Session clock: elapsed time since this NPC instance started.
+            float sessionElapsed = Time.unscaledTime - _sessionStartTime;
+            int eh = (int)(sessionElapsed / 3600f);
+            int em = (int)((sessionElapsed % 3600f) / 60f);
+            int es = (int)(sessionElapsed % 60f);
+            result["time"] = string.Format("{0:D2}:{1:D2}:{2:D2}", eh, em, es);
+            // Model info from the startup probe — tells the model what it is and its limits.
+            if (ModelProbe.DetectedModelName != null)
+                result["model"] = ModelProbe.DetectedModelName + (ModelProbe.DetectedContextLength > 0 ? " (ctx:" + ModelProbe.DetectedContextLength + ")" : "")
+                    + (_resolvedTier != null ? " tier:" + _resolvedTier : "");
             result["gender"] = InferGender();
             result["pronouns"] = InferPronouns();
             result["body"] = DescribeEquipment();
             result["pos"] = new { x = F(pos.x), y = F(pos.y), z = F(pos.z) };
             result["yaw"] = F(_yawDeg);
-            result["radar"] = BuildRadarMap(rays);
+            if (_cfgRadarEnabled != null && _cfgRadarEnabled.Value)
+                result["radar"] = BuildRadarMap(rays);
             result["blocked"] = _blockedInfo;
             result["walls"] = _bumpInfo;
             result["ground"] = ground;
@@ -190,15 +203,26 @@ namespace KKLLMNPC
             result["vis_go"] = _visionSteer != null ? _visionSteer.deg.ToString("0") + "deg (" + _visionSteer.reason + ")" : null;
             result["needs"] = new {
                 energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
-                horniness = F(_kobold.stimulation) + StimTrend(_kobold.stimulation)
-                          + (_kobold.stimulation > 0.5f ? " very" : _kobold.stimulation > 0.25f ? "" : " low"),
+                horniness = HorninessText(),
                 eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
                 crouch = F(_crouch),
             };
             result["consumed"] = DrainReagentEvents();
             result["in_station"] = IsInAnimationStation();
+            bool inStn = IsInAnimationStation();
+            if (inStn && _stationPurpose != null)
+            {
+                float elapsed = Time.unscaledTime - _stationEntryTime;
+                string elapsedStr = elapsed < 60f ? ((int)elapsed) + "s"
+                    : elapsed < 3600f ? ((int)(elapsed / 60)) + "m" + ((int)(elapsed % 60)) + "s"
+                    : ((int)(elapsed / 3600)) + "h" + ((int)((elapsed % 3600) / 60)) + "m";
+                result["station_use"] = _stationPurpose + " (" + PurposeFor(_stationPurpose) + ") for " + elapsedStr;
+            }
+            else result["station_use"] = null;
+            result["station_stay"] = _stayInStation;
             result["penetrated"] = IsPenetrated() ? PenetrationInfo() : null;
             result["penetrating"] = IsDickInside() ? DickInInfo() : null;
+            result["stim_from"] = StimFromText();
             result["partners"] = PartnersList();
             result["heard"] = RecentPlayerChat();
             result["asked"] = _pendingQuestion;
@@ -213,6 +237,26 @@ namespace KKLLMNPC
             // so give commentary / ask / scene memory a real description of the area.
             if (!_cfgVision.Value || string.IsNullOrEmpty(_sceneDesc) || _sceneDesc == "unknown")
                 _sceneDesc = areaTxt;
+
+            // Context pressure: tell the model how full its context window is.
+            // Helps it know to be terse when context is running low.
+            if (ModelProbe.DetectedContextLength > 0)
+            {
+                int factCount = 0, histCount = 0, thoughtCount = 0;
+                lock (_facts) { factCount = _facts.Count; }
+                lock (_history) { histCount = _history.Count; }
+                lock (_thoughtHistory) { thoughtCount = _thoughtHistory.Count; }
+                // Rough estimate: ~300 tokens system prompt, ~200 per nearby item,
+                // ~50 per fact, ~30 per history, ~20 per thought, ~15 per chat line.
+                int estTokens = 300 + (nearby.Count * 200) + (factCount * 50) + (histCount * 30) + (thoughtCount * 20);
+                float fill = (float)estTokens / ModelProbe.DetectedContextLength;
+                if (fill > 0.7f)
+                    result["context_pressure"] = fill > 0.9f ? "critical" : "high";
+            }
+
+            // Compaction status: tell the model if it's running in compressed mode.
+            if (_ctxMgr != null && _ctxMgr.CompactionLevel > 0)
+                result["compaction"] = _ctxMgr.CompactionStatusJson();
 
             return result;
         }
@@ -230,12 +274,11 @@ namespace KKLLMNPC
         }
 
         // ASCII radar: top-down grid from level-row rays.  Center = '@' (self).
-        // w=wall W=wall U=usable K=kobold P=player B=barrier .=open.
         // Row 0 = farthest forward (in front of the kobold).
         private string BuildRadarMap(List<object> rays)
         {
-            const int S = 10;             // half-grid: 21x21 cells
-            const float scale = 1.2f;     // meters per cell
+            int S = _cfgRadarSize != null && _cfgRadarSize.Value > 0 ? _cfgRadarSize.Value : 10;
+            float scale = _cfgRadarScale != null && _cfgRadarScale.Value > 0f ? _cfgRadarScale.Value : 1.2f;
             char[,] grid = new char[S * 2 + 1, S * 2 + 1];
             for (int r = 0; r <= S * 2; r++)
                 for (int c = 0; c <= S * 2; c++)
@@ -270,7 +313,8 @@ namespace KKLLMNPC
                     case "u": ch = 'U'; break;
                     case "k": ch = 'K'; break;
                     case "p": ch = 'P'; break;
-                    case "barrier": ch = 'B'; break;
+                    case "barrier":
+                    case "s": ch = 'S'; break;
                     default: ch = '?'; break;
                 }
                 grid[row, col] = ch;
@@ -401,10 +445,10 @@ namespace KKLLMNPC
                         try
                         {
                             var kb = hit.collider.GetComponentInParent<Kobold>();
-                            var us = hit.collider.GetComponentInParent<GenericUsable>();
+                            var us = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
                             if (kb != null) { kind[i] = IsPlayerKobold(kb) ? "player" : "kobold"; name[i] = CleanName(kb.name); }
                             else if (us != null) { kind[i] = "usable"; name[i] = CleanName(us.name); }
-                            else { float topH = ProbeSurfaceTop(hit.point); kind[i] = topH < 1.35f ? "barrier" : "wall"; }
+                            else { float topH = ProbeSurfaceTop(hit.point); kind[i] = topH < 1.35f ? "sill" : "wall"; }
                         }
                         catch (Exception) { kind[i] = "wall"; }
                     }
@@ -503,6 +547,7 @@ namespace KKLLMNPC
                 {
                     var p = new Vector3(hitPoint.x, baseY + up, hitPoint.z);
                     var colliders = Physics.OverlapSphere(p, 0.09f, ~0, QueryTriggerInteraction.Ignore);
+                    if (colliders == null || colliders.Length == 0) return up;
                     bool blocked = false;
                     foreach (var c in colliders) { if (c != null && !IsOwnCollider(c)) { blocked = true; break; } }
                     if (!blocked) return up; // first height with clear air
@@ -554,6 +599,25 @@ namespace KKLLMNPC
             return t;
         }
 
+        // Horniness the model sees: the body's live stimulation while being played
+        // with, otherwise the slowly-climbing slow-burn value (so the NPC starts
+        // wanting play even when nothing is happening).
+        private string HorninessText()
+        {
+            try
+            {
+                float stim = _kobold.stimulation;
+                bool driven = stim >= 0.15f;
+                float val = driven ? stim : _horny;
+                string tier = val > 0.5f ? " very" : val > 0.25f ? "" : " low";
+                string src = (!driven && _horny > 0.3f)
+                    ? " (slow-burn: unstimulated a while — horniness climbing)"
+                    : "";
+                return F(val) + StimTrend(stim) + tier + src;
+            }
+            catch (Exception) { return F(_horny); }
+        }
+
         // Turn "BedStation(2) (Clone)" into "BedStation".
         internal static string CleanName(string n)
         {
@@ -567,23 +631,50 @@ namespace KKLLMNPC
 
         // Human-readable category so the model can act on needs, not object noise.
         // Turn a usable's Unity object name into the semantic bucket the model plans on:
-        // bed/toilet/bath/nest/play/seat/door/bodyswap/machine/food.
-        private static string ClassifyUsable(string name)
+        // play/bed/toilet/bath/nest/seat/door/bodyswap/machine/food.
+        // Order matters: "play" before "bed" so a "PlayBed"/"PlayStation" is a play
+        // station (pleasure), NOT a bed (rest) — that mislabel is what made the model
+        // think play stations were for sleeping.
+        internal static string ClassifyUsable(string name)
         {
             if (string.IsNullOrEmpty(name)) return "usable";
             string s = name.ToLowerInvariant();
-            if (s.Contains("bed"))        return "bed";
+            if (s.Contains("breeding") || s.Contains("threeway") || s.Contains("mount")
+                || s.Contains("actionstation") || s.Contains("play") || s.Contains("sex")
+                || s.Contains("erotic"))  return "play";
+            if (s.Contains("bed") || s.Contains("sleep") || s.Contains("cot")
+                || s.Contains("mattress") || s.Contains("nap") || s.Contains("rest")) return "bed";
             if (s.Contains("toilet") || s.Contains("potty") || s.Contains("bathroom")) return "toilet";
             if (s.Contains("tub") || s.Contains("bath") || s.Contains("shower")) return "bath";
-            if (s.Contains("breeding") || s.Contains("threeway") || s.Contains("mount") || s.Contains("actionstation")) return "play";
-            if (s.Contains("sex") ) return "play";
             if (s.Contains("laying") || s.Contains("ovip") || s.Contains("nest") || s.Contains("egg")) return "nest";
             if (s.Contains("kitchen") || s.Contains("stove") || s.Contains("blender") || s.Contains("food") || s.Contains("cook")) return "food";
             if (s.Contains("swap") || s.Contains("possess") || s.Contains("body")) return "bodyswap";
             if (s.Contains("door") || s.Contains("gate")) return "door";
-            if (s.Contains("upgrade") || s.Contains("machine")) return "machine";
-            if (s.Contains("table") || s.Contains("chair") || s.Contains("sofa") || s.Contains("couch")) return "seat";
+            if (s.Contains("contract") || s.Contains("blueprint") || s.Contains("plan") || s.Contains("construction")) return "contract";
+            if (s.Contains("upgrade") || s.Contains("machine") || s.Contains("milk")) return "machine";
+            if (s.Contains("table") || s.Contains("chair") || s.Contains("sofa") || s.Contains("couch") || s.Contains("seat")) return "seat";
             return "usable";
+        }
+
+        // One short phrase explaining what a category is FOR, appended to the
+        // nearby 'i' field so the model never has to guess (play ≠ resting).
+        internal static string PurposeFor(string kind)
+        {
+            switch (kind)
+            {
+                case "play":     return "pleasure station";
+                case "bed":      return "resting - can also be used for play";
+                case "nest":     return "egg laying";
+                case "machine":  return "mounted play/farming";
+                case "toilet":   return "relief";
+                case "bath":     return "clean";
+                case "seat":     return "just a seat";
+                case "door":     return "passage";
+                case "food":     return "cook/eat — drop items into blender to make edible food";
+                case "contract": return "buy to unlock a machine";
+                case "bodyswap": return "swap bodies";
+                default:         return null;
+            }
         }
 
         // OverlapSphere within 14m, deduped by root, tagged: k=kobold p=player u=usable,
@@ -598,14 +689,23 @@ namespace KKLLMNPC
             {
                 var seen = new HashSet<int>();
                 var nearbyRadius = 14f;
-                foreach (var c in Physics.OverlapSphere(_kobold.transform.position, nearbyRadius, ~0, QueryTriggerInteraction.Collide))
+                var colliders = Physics.OverlapSphere(_kobold.transform.position, nearbyRadius, ~0, QueryTriggerInteraction.Collide);
+                if (colliders == null) return list;
+                foreach (var c in colliders)
                 {
                     if (c == null) continue;
-                    GenericUsable u = c.GetComponentInParent<GenericUsable>();
-                    Kobold k = c.GetComponentInParent<Kobold>();
+                    GenericUsable u = null;
+                    Kobold k = null;
+                    try
+                    {
+                        u = c.GetComponent<GenericUsable>() ?? c.GetComponentInParent<GenericUsable>();
+                        k = c.GetComponentInParent<Kobold>();
+                    }
+                    catch (Exception) { continue; }
                     if (k != null && k == _kobold) continue;
                     if (u == null && k == null) continue;
                     var rootComp = (Component)k ?? u;
+                    if (rootComp == null) continue;
                     if (!seen.Add(rootComp.transform.root.GetInstanceID() * 31 + rootComp.GetInstanceID())) continue;
                     Vector3 d = c.transform.position - _kobold.transform.position;
                     string label = k != null ? "kobold" : "usable";
@@ -628,34 +728,71 @@ namespace KKLLMNPC
                     // useable right now (bed free? station occupied?), and a guess
                     // at what it is so the model can plan toward needs.
                     string info = null;
+                    string stateNote = null;
                     if (u != null)
                     {
                         nm = CleanName(nm);
                         string kind = ClassifyUsable(nm);
                         bool canUse = true;
                         try { canUse = u.CanUse(_kobold); } catch (Exception) { }
-                        info = kind + (canUse ? "" : ":busy");
+
+                        // Detect unbought upgrades and unbuilt machines so the
+                        // model doesn't waste time trying to use them.
+                        string stateTag = "";
+                        try
+                        {
+                            // ConstructionContract: purchasable station blueprint
+                            if (u.GetType().Name == "ConstructionContract")
+                            {
+                                bool bought = GetField<bool>(u, "bought");
+                                float cost = GetField<float>(u, "cost");
+                                if (bought)
+                                    stateTag = ":done";
+                                else
+                                {
+                                    stateTag = ":needs_buy";
+                                    stateNote = "costs " + cost + " coins — must buy before the machine works";
+                                }
+                            }
+                            // UsableMachine: the machine itself — may not be constructed yet
+                            if (u is UsableMachine)
+                            {
+                                bool constructed = GetField<bool>(u, "constructed");
+                                if (!constructed)
+                                {
+                                    stateTag = ":not_built";
+                                    stateNote = "not built yet — find and buy its ConstructionContract first";
+                                }
+                            }
+                        }
+                        catch (Exception) { }
+
+                        info = kind + stateTag + (canUse ? "" : ":busy")
+                               + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : "");
                         // Landmark memory: remember where things are once seen.
                         if (canUse) RememberFact(kind + " is " + RelBearing(d) + " here");
                     }
                     // Stable addressable id so the model can target this exact object:
                     // go_to id:N / interact id:N. Door/usable/kobold all get one.
-                    int tid = rootComp.transform.root != null
-                        ? TargetIdFor(rootComp.transform.root, nm)
-                        : TargetIdFor(rootComp.transform, nm);
-                    list.Add(new {
-                        id = tid,
-                        k = label,
-                        n = nm,
-                        d = F(d.magnitude),
-                        dir = RelBearing(d),
-                        dir_deg = F(RelBearingDeg(d)),
-                        h = hrel,
-                        i = info,
-                        w = F(bsize.x), l = F(bsize.z), ht = F(bsize.y),
-                        x = F(bpos.x), y = F(bpos.y), z = F(bpos.z),
-                        f = F(bfacing),
-                    });
+                    // Use rootComp.transform (the actual object) not .root (scene root)
+                    // so the id resolves to the station, not the parent container.
+                    int tid = TargetIdFor(rootComp.transform, nm);
+                    var entry = new Dictionary<string, object>
+                    {
+                        ["id"] = tid,
+                        ["k"] = label,
+                        ["n"] = nm,
+                        ["d"] = F(d.magnitude),
+                        ["dir"] = RelBearing(d),
+                        ["dir_deg"] = F(RelBearingDeg(d)),
+                        ["h"] = hrel,
+                        ["i"] = info,
+                        ["w"] = F(bsize.x), ["l"] = F(bsize.z), ["ht"] = F(bsize.y),
+                        ["x"] = F(bpos.x), ["y"] = F(bpos.y), ["z"] = F(bpos.z),
+                        ["f"] = F(bfacing),
+                    };
+                    if (stateNote != null) entry["note"] = stateNote;
+                    list.Add(entry);
                     if (list.Count >= 8) break;
                 }
             }
@@ -682,14 +819,14 @@ namespace KKLLMNPC
         private string CaptureImageB64()
         {
             byte[] jpg = CaptureImageBytes();
-            if (jpg != null && _cfgVisionDebug != null && _cfgVisionDebug.Value)
+            if (jpg != null && jpg.Length > 0 && _cfgVisionDebug != null && _cfgVisionDebug.Value)
                 DumpVisionFrame(jpg);
-            return jpg != null ? "data:image/jpeg;base64," + Convert.ToBase64String(jpg) : null;
+            return jpg != null && jpg.Length > 0 ? "data:image/jpeg;base64," + Convert.ToBase64String(jpg) : null;
         }
 
         private byte[] CaptureImageBytes()
         {
-            if (_cam == null || !RtCreated(_rt)) return null;
+            if (_cam == null || _rt == null || !RtCreated(_rt)) return null;
             try
             {
                 // Left eye.
@@ -699,12 +836,8 @@ namespace KKLLMNPC
                 // Pool texture reuse
                 if (_texPoolL == null || _texPoolL.width != _rt.width || _texPoolL.height != _rt.height)
                 {
+                    if (_texPoolL != null) Destroy(_texPoolL);
                     _texPoolL = new Texture2D(_rt.width, _rt.height, TextureFormat.RGB24, false);
-                    Logger.LogInfo($"texture pool created: L {_rt.width}x{_rt.height}");
-                }
-                else
-                {
-                    Logger.LogInfo($"texture pool reused: L {_rt.width}x{_rt.height}");
                 }
                 Texture2D texL = _texPoolL;
                 texL.ReadPixels(new Rect(0, 0, _rt.width, _rt.height), 0, 0, false);
@@ -712,19 +845,15 @@ namespace KKLLMNPC
                 RenderTexture.active = prev;
 
                 // Right eye (stereo mode).
-                if (_camR != null && RtCreated(_rtR))
+                if (_camR != null && _rtR != null && RtCreated(_rtR))
                 {
                     _camR.Render();
                     prev = RenderTexture.active;
                     RenderTexture.active = _rtR;
                     if (_texPoolR == null || _texPoolR.width != _rtR.width || _texPoolR.height != _rtR.height)
                     {
+                        if (_texPoolR != null) Destroy(_texPoolR);
                         _texPoolR = new Texture2D(_rtR.width, _rtR.height, TextureFormat.RGB24, false);
-                        Logger.LogInfo($"texture pool created: R {_rtR.width}x{_rtR.height}");
-                    }
-                    else
-                    {
-                        Logger.LogInfo($"texture pool reused: R {_rtR.width}x{_rtR.height}");
                     }
                     Texture2D texR = _texPoolR;
                     texR.ReadPixels(new Rect(0, 0, _rtR.width, _rtR.height), 0, 0, false);
@@ -735,12 +864,8 @@ namespace KKLLMNPC
                     int w = texL.width, h = texL.height;
                     if (_texPoolStereo == null || _texPoolStereo.width != w * 2 || _texPoolStereo.height != h)
                     {
+                        if (_texPoolStereo != null) Destroy(_texPoolStereo);
                         _texPoolStereo = new Texture2D(w * 2, h, TextureFormat.RGB24, false);
-                        Logger.LogInfo($"texture pool created: stereo {w*2}x{h}");
-                    }
-                    else
-                    {
-                        Logger.LogInfo($"texture pool reused: stereo {w*2}x{h}");
                     }
                     var stereo = _texPoolStereo;
                     var pxL = texL.GetPixels32();

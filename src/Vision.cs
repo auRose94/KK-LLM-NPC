@@ -123,16 +123,22 @@ namespace KKLLMNPC
         // and keep only the last 40, so you can inspect what it's reacting to.
         private void DumpVisionFrame(byte[] jpg)
         {
+            if (jpg == null || jpg.Length == 0) return;
             try
             {
-                string dir = Path.Combine(Path.GetDirectoryName(Plugin.Config.ConfigFilePath), "..", "plugins", "KKLLMNPC_frames");
+                string dir = Path.Combine(Path.GetDirectoryName(Plugin.Config.ConfigFilePath) ?? "", "..", "plugins", "KKLLMNPC_frames");
                 dir = Path.GetFullPath(dir);
-                Directory.CreateDirectory(dir);
+                try { Directory.CreateDirectory(dir); } catch (Exception) { return; }
                 int idx = ++_visionShot;
-                File.WriteAllBytes(Path.Combine(dir, $"v{idx:D4}_{(int)_yawDeg}.jpg"), jpg);
+                string path = Path.Combine(dir, $"v{idx:D4}_{(int)_yawDeg}.jpg");
+                File.WriteAllBytes(path, jpg);
                 // Keep only the last 40 frames.
-                var files = new DirectoryInfo(dir).GetFiles("v*.jpg").OrderBy(f => f.Name).ToList();
-                while (files.Count > 40) { try { files[0].Delete(); } catch (Exception) { } files.RemoveAt(0); }
+                try
+                {
+                    var files = new DirectoryInfo(dir).GetFiles("v*.jpg").OrderBy(f => f.Name).ToList();
+                    while (files.Count > 40) { try { files[0].Delete(); } catch (Exception) { } files.RemoveAt(0); }
+                }
+                catch (Exception) { }
             }
             catch (Exception e) { Logger.LogWarning("vision dump: " + e.Message); }
         }
@@ -195,20 +201,22 @@ namespace KKLLMNPC
                 using (var stream = resp.GetResponseStream())
                 {
                     if (stream == null) return null;
-                    var ms = new MemoryStream();
-                    var buf = new byte[8192]; int total = 0, nRead;
-                    while ((nRead = stream.Read(buf, 0, buf.Length)) > 0)
+                    using (var ms = new MemoryStream())
                     {
-                        total += nRead; if (total > 1024 * 1024) break;
-                        ms.Write(buf, 0, nRead);
+                        var buf = new byte[8192]; int total = 0, nRead;
+                        while ((nRead = stream.Read(buf, 0, buf.Length)) > 0)
+                        {
+                            total += nRead; if (total > 1024 * 1024) break;
+                            ms.Write(buf, 0, nRead);
+                        }
+                        string json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                        var root = Json.Parse(json) as Dictionary<string, object>;
+                        var choices = root?.GetValueOrDefault("choices") as List<object>;
+                        if (choices == null || choices.Count == 0) return null;
+                        var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                        string content = msg?.GetValueOrDefault("content") as string;
+                        return string.IsNullOrWhiteSpace(content) ? null : content.Trim();
                     }
-                    string json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-                    var root = Json.Parse(json) as Dictionary<string, object>;
-                    var choices = root?.GetValueOrDefault("choices") as List<object>;
-                    if (choices == null || choices.Count == 0) return null;
-                    var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
-                    string content = msg?.GetValueOrDefault("content") as string;
-                    return string.IsNullOrWhiteSpace(content) ? null : content.Trim();
                 }
             }
             catch (Exception e) { Logger.LogWarning("vision endpoint: " + e.Message); return null; }

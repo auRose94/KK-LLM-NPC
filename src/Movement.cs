@@ -22,7 +22,7 @@ namespace KKLLMNPC
     internal partial class NPCInstance
     {
         // True if the collider belongs to our own kobold (its body/limbs) — ignore it.
-        private bool IsOwnCollider(Collider c)
+        internal bool IsOwnCollider(Collider c)
         {
             if (c == null || _kobold == null) return false;
             return c.transform.root == _kobold.transform.root;
@@ -55,7 +55,7 @@ namespace KKLLMNPC
         {
             try
             {
-                var u = hit.collider.GetComponentInParent<GenericUsable>();
+                var u = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
                 if (u == null) return false;
                 int inst = u.GetInstanceID();
                 if (inst == _lastDoorTried && Time.unscaledTime - _lastDoorTryTime < 1.5f) return false;
@@ -102,15 +102,44 @@ namespace KKLLMNPC
             // Arousal spiking while being played with — moan without waiting on the LLM.
             if (IsInAnimationStation() || IsPenetrated() || IsDickInside())
             {
-                float stim = _kobold.stimulation;
-                if (_ambientStimPrev >= 0f && stim > _ambientStimPrev + 0.06f)
+                try
                 {
-                    EmitAmbient("mmm~");
+                    float stim = _kobold.stimulation;
+                    if (_ambientStimPrev >= 0f && stim > _ambientStimPrev + 0.06f)
+                    {
+                        //EmitAmbient("mmm~");
+                        _ambientStimPrev = stim;
+                        return;
+                    }
                     _ambientStimPrev = stim;
+                }
+                catch (Exception) { }
+            }
+        }
+
+        // Slow-burn horniness (main thread). Climbs only while the body is getting
+        // NO stimulation — any ongoing play (game stim, station, penetration)
+        // holds it; a climax (stim swinging from high to ~0) spends it.
+        private void UpdateHorniness(float dt)
+        {
+            if (!IsAlive(_kobold)) return;
+            try
+            {
+                float stim = _kobold.stimulation;
+                float rate = _cfgHornyRate != null ? Mathf.Max(0f, _cfgHornyRate.Value) : 5f;
+
+                if (_hornyPrevStim >= 0.8f && stim < 0.3f)
+                {
+                    _horny = 0.05f; // climax spent the built-up need
+                    _hornyPrevStim = stim;
                     return;
                 }
+
+                bool driven = stim >= 0.15f || IsInAnimationStation() || IsPenetrated() || IsDickInside();
+                if (!driven) _horny = Mathf.Min(1f, _horny + (rate / 60f) * dt);
+                _hornyPrevStim = stim;
             }
-            _ambientStimPrev = _kobold.stimulation;
+            catch (Exception) { }
         }
 
         // Say a short ambient line: bubble + console, no chat-window spam.
@@ -175,6 +204,7 @@ namespace KKLLMNPC
             }
 
             float dt = Time.fixedDeltaTime;
+            UpdateHorniness(dt);
             float turnRate = _cfgTurnRate != null ? _cfgTurnRate.Value : 180f;
             float accel = _cfgAccel != null ? _cfgAccel.Value : 4f;
             float decel = _cfgDecel != null ? _cfgDecel.Value : 6f;
@@ -199,11 +229,32 @@ namespace KKLLMNPC
                 float dist = toT.magnitude;
                 if (dist < 0.8f)
                 {
-                    _navTarget = null;
-                    StopMove();
-                    _blockedInfo = "arrived" + (_navTargetName != null ? " at " + _navTargetName : "");
+                    // A* path: advance to the next waypoint (keep going) instead of
+                    // declaring arrival while posts remain.
+                    bool advance;
+                    lock (_stateLock)
+                    {
+                        advance = _path != null && _pathIdx < _path.Count - 1;
+                        if (advance) _pathIdx++;
+                    }
+                    if (advance)
+                    {
+                        lock (_stateLock) { _navTarget = _path[_pathIdx]; }
+                        toT = _navTarget.Value - _kobold.transform.position;
+                        toT.y = 0;
+                        dist = toT.magnitude;
+                    }
+                    else
+                    {
+                        _navTarget = null;
+                        _path = null;
+                        _pathIdx = 0;
+                        _pathGoalSet = false;
+                        StopMove();
+                        _blockedInfo = "arrived" + (_navTargetName != null ? " at " + _navTargetName : "");
+                    }
                 }
-                else
+                if (_navTarget.HasValue)
                 {
                     // Smooth turning toward nav target instead of snapping.
                     float yaw = Mathf.Atan2(toT.x, toT.z) * 57.29578f;
@@ -413,30 +464,35 @@ namespace KKLLMNPC
 
                 // Arousal reaction: on a noticeable stim jump, make a sound (koba's
                 // chatter yowl pack) — visible to nearby players, like the real thing.
-                float stim = _kobold.stimulation;
-                if (_lastStim >= 0f && stim > _lastStim + 0.08f && Time.unscaledTime - _lastMoan > 3f)
+                try
                 {
-                    _lastMoan = Time.unscaledTime;
-                    RunOnMainThreadAsync(() =>
+                    float stim = _kobold.stimulation;
+                    if (_lastStim >= 0f && stim > _lastStim + 0.08f && Time.unscaledTime - _lastMoan > 3f)
                     {
-                        try
+                        _lastMoan = Time.unscaledTime;
+                        RunOnMainThreadAsync(() =>
                         {
-                            var chatter = _kobold.GetComponentInChildren<Chatter>(true);
-                            if (chatter != null)
+                            try
                             {
-                                // Use the game's yowl pack directly — one short vocal.
-                                var pack = typeof(Chatter).GetField("yowls", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                                    ?.GetValue(chatter) as AudioPack;
-                                var src = chatter.GetComponent<AudioSource>();
-                                if (pack != null && src != null) { pack.PlayOneShot(src); return; }
-                                // Fallback: tiny self-talk bubble so others see something.
-                                chatter.DisplayMessage("~", 1.2f);
+                                if (!IsAlive(_kobold)) return;
+                                var chatter = _kobold.GetComponentInChildren<Chatter>(true);
+                                if (chatter != null)
+                                {
+                                    // Use the game's yowl pack directly — one short vocal.
+                                    var pack = typeof(Chatter).GetField("yowls", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                                        ?.GetValue(chatter) as AudioPack;
+                                    var src = chatter.GetComponent<AudioSource>();
+                                    if (pack != null && src != null) { pack.PlayOneShot(src); return; }
+                                    // Fallback: tiny self-talk bubble so others see something.
+                                    chatter.DisplayMessage("~", 1.2f);
+                                }
                             }
-                        }
-                        catch (Exception e) { Logger.LogWarning("moan: " + e.Message); }
-                    });
+                            catch (Exception e) { Logger.LogWarning("moan: " + e.Message); }
+                        });
+                    }
+                    _lastStim = stim;
                 }
-                _lastStim = stim;
+                catch (Exception) { _lastStim = -1f; }
             }
             else _lastStim = -1f;
         }
