@@ -17,7 +17,8 @@ using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
 using Photon.Pun;
 using Photon.Realtime;
-
+using System.Threading.Tasks;
+using System.Net.Http;
 namespace KKLLMNPC
 {
     internal partial class NPCInstance

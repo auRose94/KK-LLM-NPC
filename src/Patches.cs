@@ -85,7 +85,7 @@ namespace KKLLMNPC
                         : self.transform.rotation);
                 }
             }
-            catch (Exception) { /* never break the game's coroutine */ }
+            catch (Exception) { /* never break the game's coroutine — errors here are benign */ }
         }
     }
 }

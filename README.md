@@ -80,38 +80,129 @@ Drop `KKLLMNPC.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
 | `ImageEveryNTicks` | 6 | baseline image cadence |
 | `ImageOnBump` | true | extra image right after blocked/bump |
 | `ImageOnTurn` | true | extra image after a >=30° turn |
+| `ImageHistory` | 3 | number of past frames to attach (0 = current only) |
+| `ModelTier` | auto | `auto` / `small` / `medium` / `large` — model capability tier |
+| `AutoSwitchModel` | false | auto-switch to larger-context model when pressure is critical |
+| `LLMNameSelection` | true | ask the LLM to choose a name for each body |
+| `CommentEveryNTicks` | 5 | free commentary interval (0 = off) |
+| `CommentTemp` | 0.9 | sampling temperature for commentary |
+| `ChatLogLines` | 20 | lines of chat history to feed the model (0 = off) |
 
 ### `[Vision]` — the background "eyes" thread
 
-| Key | Default | Purpose |
-| --- | --- | --- |
-| `Enabled` | true | run the caption pass |
-| `EveryNTicks` | 3 | every N action ticks |
-| `Prompt` | built-in | vision task instruction |
-| `DebugDumpFrames` | true | dump frames to `BepInEx/plugins/KKLLMNPC_frames/` |
+| Key | Default | Range | Purpose |
+| --- | --- | --- | --- |
+| `Enabled` | false | bool | Background vision CAPTION pass (off by default — direct image is more useful) |
+| `EveryNTicks` | 3 | ≥1 | Run the vision pass every N action ticks |
+| `Prompt` | built-in | — | Scene-report + navigation instruction for the vision pass |
+| `DebugDumpFrames` | true | bool | Write the exact JPEG given to the vision model to `BepInEx/plugins/KKLLMNPC_frames/` |
+| `Stereo` | false | bool | Render left+right eye cameras and stitch into side-by-side stereo image |
+| `StereoIPD` | 0.063 | — | Inter-pupillary distance in meters |
 
 ### `[VisionModel]` — route the captioner to a different model (or same)
 
 All blank = use `[LLM]` config.
-| `Model` `Endpoint` `ApiKey` | blank | vision model identity |
-| `MaxTokens` | 80 | caption length |
 
-### `[Senses]`
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `Model` | blank | Vision model for the scene-caption pass |
+| `Endpoint` | blank | Chat-completions URL for the vision model |
+| `ApiKey` | blank | Bearer token for the vision endpoint |
+| `MaxTokens` | 80 | Caption token cap (short = fast) |
 
-| `RayCount` | 9 | rays per vertical row |
-| `RayRange` | 25 | meters |
-| `AutoFindRange` | 60 | possess radius |
-| `ImageSize` | 192 | px |
-| `CameraNearClip` | 0.15 | clip past face geometry |
-| `CameraForward` | 0.22 | how far ahead of the head bone the camera sits |
+### `[Senses]` — perception settings
 
-### `[General]`
+| Key | Default | Range | Purpose |
+| --- | --- | --- | --- |
+| `RayCount` | 9 | ≥2 | Number of rays across the frustum fan |
+| `RayRange` | 25 | 1–100m | Raycast range |
+| `AutoFindRange` | 60 | 1–500m | Radius to look for an entity to hijack |
+| `RadarEnabled` | true | bool | Top-down ASCII radar map in perception |
+| `RadarSize` | 10 | 3–30 | Radar half-grid size in cells |
+| `RadarScale` | 1.2 | 0.1–10m | Radar meters per cell |
+| `ImageSize` | 192 | 32–2048px | Square first-person render size |
+| `ImageQuality` | 50 | 1–100 | JPEG quality |
+| `CameraNearClip` | 0.10 | 0.01–10m | Camera near clip (raise if you see inside the head) |
+| `CameraFarClip` | 80 | 1–500m | Camera far clip (draw distance) |
+| `CameraForward` | 0.22 | -2–5m | Camera offset ahead of the head bone |
 
-| `BlockedScenes` | `MainMenu,Loading,ErrorScene` | idle on these |
-| `MaxKobolds` | 1 | (future single-plugin multi-kobold) |
+### `[Movement]` — navigation
+
+| Key | Default | Range | Purpose |
+| --- | --- | --- | --- |
+| `TurnRate` | 180 | 10–1000°/s | Maximum yaw rotation speed |
+| `Acceleration` | 4 | 0.5–50 units/s² | How fast the entity ramps up |
+| `Deceleration` | 6 | 0.5–50 units/s² | How fast the entity slows down |
+| `BrakeDistance` | 2 | 0.1–20m | Distance from target to start slowing |
+| `PathfindingEnabled` | true | bool | A* pathfinding on a local walkability grid |
+| `PathfindingCellSize` | 0.5 | 0.1–5m | A* grid cell size |
+| `PathfindingWindow` | 20 | 2–100m | A* search window radius |
+| `PathfindingNodes` | 9000 | 200–50000 | Max pathfinding node budget |
+
+### `[Needs]` — body state
+
+| Key | Default | Range | Purpose |
+| --- | --- | --- | --- |
+| `HornyClimbPerMin` | 5 | 0–60/min | Slow-burn horniness rise rate per minute |
+| `HornyBaseline` | 0.08 | 0–1 | Starting horniness when the NPC takes a body |
+
+### `[General]` — global
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `MaxNPCs` | 1 | Maximum entities the LLM can possess (1–4) |
+| `DisableReagentMessages` | true | Suppress reagent injection messages in log |
+| `BlockedScenes` | `MainMenu,Loading,ErrorScene` | Comma-separated scene names where the LLM stays idle |
 
 ## Build
 
+### Linux / macOS
+
 ```bash
 ./build.sh        # build + deploy instance
+# Or specify your game path:
+KOBOLDKARE_DIR=/path/to/KoboldKare ./build.sh
 ```
+
+### Windows (PowerShell)
+
+The `build.sh` script requires bash. On Windows, use:
+
+```powershell
+# Option 1: Git Bash / WSL
+bash build.sh
+
+# Option 2: Manual mcs compilation
+mcs -target:library -out:KKLLMNPC.dll src/*.cs \
+  -r:"C:\path\to\KoboldKare\BepInEx\core\BepInEx.dll" \
+  -r:"C:\path\to\KoboldKare\BepInEx\core\0Harmony.dll" \
+  -r:"C:\path\to\KoboldKare\KoboldKare_Data\Managed\*.dll"
+```
+
+### Multi-instance
+
+```bash
+# Instance 1 (default)
+./build.sh
+
+# Instance 2 (deployed as KKLLMNPC2.dll)
+# Modify build.sh to accept an instance count parameter
+```
+
+## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture overview.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+MIT — see [LICENSE.txt](LICENSE.txt).
+
+## Documentation
+
+- [CONFIG.md](docs/CONFIG.md) — Complete configuration reference
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Architecture overview
+- [CHANGELOG.md](CHANGELOG.md) — Release history

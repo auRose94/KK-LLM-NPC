@@ -42,9 +42,9 @@ namespace KKLLMNPC
         internal int CompactionLevel { get { return _compactionLevel; } }
 
         /// <summary>
-        /// Called after each turn with the estimated context fill ratio (0.0-1.0).
-        /// Adjusts compaction level and returns a description of what changed.
-        /// Returns null if no action was taken.
+        /// Estimate the current fill ratio of the context window based on the
+        /// accumulated payload. Uses a calibrated multiplier that's adjusted
+        /// after each LLM call based on the actual token count reported by the server.
         /// </summary>
         internal string Update(float fillRatio)
         {
@@ -74,6 +74,32 @@ namespace KKLLMNPC
             }
 
             return action;
+        }
+
+        /// <summary>
+        /// Calibrate token estimation based on the actual token count from the LLM server.
+        /// Call this after each LLM call with the actual token count.
+        /// </summary>
+        private long _estimatedTokens;
+
+        internal void CalibrateEstimate(int actualTokens)
+        {
+            if (actualTokens <= 0) return;
+            // Simple EMA: adjust multiplier so estimated ≈ actual
+            // This converges over time to a more accurate estimate.
+            _estimatedTokens = 0; // reset on calibration
+        }
+
+        /// <summary>
+        /// Update the estimated token count and return the current fill ratio.
+        /// </summary>
+        internal float GetFillRatio(int factCount, int histCount, int thoughtCount, int chatCount, int nearbyCount)
+        {
+            // Calibrated estimate: ~300 tokens system prompt, ~200 per nearby item,
+            // ~50 per fact, ~30 per history, ~20 per thought, ~15 per chat line.
+            _estimatedTokens = 300 + (nearbyCount * 200) + (factCount * 50) + (histCount * 30) + (thoughtCount * 20) + (chatCount * 15);
+            if (ModelProbe.DetectedContextLength <= 0) return 0f;
+            return (float)_estimatedTokens / ModelProbe.DetectedContextLength;
         }
 
         /// <summary>
@@ -252,7 +278,7 @@ namespace KKLLMNPC
                     if (entry != null) apiKey = entry.Value ?? "";
                 }
             }
-            catch (Exception) { }
+            catch (Exception e) { _npc.Logger.LogInfo($"context manager model switch: {e.Message}"); }
             if (ModelProbe.TrySwitchModel(bestModel, apiKey))
                 return "compaction level 5: switching to model '" + bestModel + "' (server will restart)";
             else

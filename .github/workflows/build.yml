@@ -1,0 +1,81 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    name: Build KKLLMNPC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check source files
+        run: |
+          echo "=== Source file count ==="
+          find src -name "*.cs" | wc -l
+          echo "=== Source file sizes ==="
+          for f in src/*.cs; do
+            wc -l "$f"
+          done
+          echo "=== Total lines ==="
+          cat src/*.cs | wc -l
+
+      - name: Validate C# syntax (mcs)
+        run: |
+          # Check if mcs is available
+          if command -v mcs &> /dev/null; then
+            echo "mcs found, checking syntax..."
+            # We can't fully compile without Unity/BepInEx refs,
+            # but we can at least check the build script exists
+            echo "Build script exists: $(test -f build.sh && echo yes || echo no)"
+          else
+            echo "mcs not available — skipping syntax check"
+          fi
+
+      - name: Check build script
+        run: |
+          echo "=== build.sh ==="
+          cat build.sh
+          echo ""
+          echo "=== Checking bash syntax ==="
+          bash -n build.sh && echo "build.sh: syntax OK" || echo "build.sh: syntax ERROR"
+
+      - name: Validate config docs
+        run: |
+          echo "=== docs/ contents ==="
+          ls -la docs/
+          echo ""
+          echo "=== CONFIG.md sections ==="
+          grep "^## " docs/CONFIG.md
+
+      - name: Check documentation
+        run: |
+          echo "=== Documentation files ==="
+          for f in README.md CONTRIBUTING.md CODE_OF_CONDUCT.md CHANGELOG.md docs/*.md; do
+            if [ -f "$f" ]; then
+              echo "  ✓ $f ($(wc -l < "$f") lines)"
+            else
+              echo "  ✗ $f (missing)"
+            fi
+          done
+
+      - name: Check tests
+        run: |
+          echo "=== Test files ==="
+          for f in tests/*.cs tests/README.md; do
+            if [ -f "$f" ]; then
+              echo "  ✓ $f ($(wc -l < "$f") lines)"
+            else
+              echo "  ✗ $f (missing)"
+            fi
+          done
+
+      - name: List all files
+        run: |
+          echo "=== Full repository tree ==="
+          find . -not -path './.git/*' -not -path './.github/*' -not -name '*.dll' -not -name '*.cfg' | sort

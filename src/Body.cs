@@ -47,7 +47,7 @@ namespace KKLLMNPC
                     else _dickIn.Remove(listener);
                 }
             }
-            catch (Exception) { }
+            catch (Exception e) { Logger.LogDebug($"NotifyDickIn error: {e.Message}"); }
         }
 
         private void NotifyDickTick(KKPenetratorListener listener, string hole, float dist)
@@ -70,7 +70,7 @@ namespace KKLLMNPC
                     st.lastT = Time.unscaledTime;
                 }
             }
-            catch (Exception) { }
+            catch (Exception e) { Logger.LogDebug($"NotifyDickTick error: {e.Message}"); }
         }
 
         private string DickInInfo()
@@ -299,7 +299,7 @@ namespace KKLLMNPC
         {
             if (!_bodySwapHooked) return;
             try { BrainSwapperMachine.bodySwapped -= OnBodySwap; }
-            catch (Exception) { }
+            catch (Exception e) { Logger.LogDebug($"TryUnhookBodySwap error: {e.Message}"); }
             _bodySwapHooked = false;
         }
 
@@ -424,7 +424,7 @@ namespace KKLLMNPC
                 }
                 return string.Join(", ", parts.ToArray());
             }
-            catch (Exception) { return null; }
+            catch (Exception e) { Logger.LogDebug($"DescribeContents: {e.Message}"); return null; }
         }
 
         // Drain queued reagent events as a list of strings, clearing them.

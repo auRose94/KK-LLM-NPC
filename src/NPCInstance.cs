@@ -203,7 +203,7 @@ namespace KKLLMNPC
         private float _yawOffsetDeg;
         private float _pitchDeg;
         private float _yawDeg;
-        private readonly object _stateLock = new object();
+        private readonly ReaderWriterLockSlim _stateLock = new ReaderWriterLockSlim();
         private float _lastBumpTime = -99f;
         private string _bumpInfo;
         private int _lastDoorTried;
@@ -228,6 +228,7 @@ namespace KKLLMNPC
         // Resolved tier: "small", "medium", "large". Auto-detection upgrades
         // from small→medium once we see the model produce valid JSON twice in a row.
         private string _resolvedTier;
+        private readonly object _tierLock = new object(); // guards _resolvedTier writes
         private int _consecutiveValidJson;
         private bool IsSmallModel { get { EnsureTierResolved(); return _resolvedTier == "small"; } }
         private bool IsLargeModel { get { EnsureTierResolved(); return _resolvedTier == "large"; } }
@@ -235,25 +236,29 @@ namespace KKLLMNPC
         private void EnsureTierResolved()
         {
             if (_resolvedTier != null) return;
-            string raw = _cfgModelTier != null ? (_cfgModelTier.Value ?? "auto").ToLowerInvariant().Trim() : "auto";
-            if (raw == "small" || raw == "medium" || raw == "large")
+            lock (_tierLock)
             {
-                _resolvedTier = raw;
-                Logger.LogInfo("[" + MyName() + "] model tier set to '" + raw + "' (manual config)");
-                return;
-            }
+                if (_resolvedTier != null) return; // double-check after lock
+                string raw = _cfgModelTier != null ? (_cfgModelTier.Value ?? "auto").ToLowerInvariant().Trim() : "auto";
+                if (raw == "small" || raw == "medium" || raw == "large")
+                {
+                    _resolvedTier = raw;
+                    Logger.LogInfo("[" + MyName() + "] model tier set to '" + raw + "' (manual config)");
+                    return;
+                }
 
-            // auto: use probe results if available, else default to small
-            if (ModelProbe.DetectedTier != null)
-            {
-                _resolvedTier = ModelProbe.DetectedTier;
-                Logger.LogInfo("[" + MyName() + "] model tier resolved to '" + _resolvedTier + "' from probe ("
-                    + (ModelProbe.DetectedModelName ?? "?") + ", " + ModelProbe.DetectedParameters + " params)");
-            }
-            else
-            {
-                _resolvedTier = "small";
-                Logger.LogInfo("[" + MyName() + "] model tier defaulting to 'small' (no probe data — server offline?)");
+                // auto: use probe results if available, else default to small
+                if (ModelProbe.DetectedTier != null)
+                {
+                    _resolvedTier = ModelProbe.DetectedTier;
+                    Logger.LogInfo("[" + MyName() + "] model tier resolved to '" + _resolvedTier + "' from probe ("
+                        + (ModelProbe.DetectedModelName ?? "?") + ", " + ModelProbe.DetectedParameters + " params)");
+                }
+                else
+                {
+                    _resolvedTier = "small";
+                    Logger.LogInfo("[" + MyName() + "] model tier defaulting to 'small' (no probe data — server offline?)");
+                }
             }
         }
 
@@ -318,6 +323,12 @@ namespace KKLLMNPC
         // Constants.
         private const float WalkProbeRange = 4.0f;
         private const float InteractRange = 2.6f;
+        // Reusable constants to avoid magic numbers scattered across the codebase.
+        internal const int MaxResponseSize = 512 * 1024;  // 512KB max HTTP response
+        internal const int ColliderBufferSize = 32;
+        internal const float VisionHungTimeout = 120f;    // 2 minutes
+        internal const int ProbeRetries = 3;
+        internal const int ProbeRetryDelayMs = 1000;
 
         // ------------------------------------------------------------------
         // constructor
@@ -401,6 +412,7 @@ namespace KKLLMNPC
         {
             _running = false;
             try { TeardownBody(); } catch (Exception) { }
+            try { CleanupVisionResources(); } catch (Exception) { }
             try
             {
                 var t = _llmThread;
@@ -419,6 +431,16 @@ namespace KKLLMNPC
 
         internal bool IsThreadAlive => _running && _llmThread != null && _llmThread.IsAlive;
 
+        // Force-restart the LLM thread (no cooldown) — used by the overlay kill-switch.
+        internal void ForceRestartThread()
+        {
+            if (_running && (_llmThread == null || !_llmThread.IsAlive))
+            {
+                _llmThread = new Thread(LLMLoop) { IsBackground = true, Name = "KKLLMNPC-LLM-" + (_npcName ?? "??") };
+                _llmThread.Start();
+            }
+        }
+
         internal void MaybeRestartThread()
         {
             if (!_running || (_llmThread != null && _llmThread.IsAlive)) return;
@@ -432,6 +454,58 @@ namespace KKLLMNPC
                     _llmThread.Start();
                 }
                 catch (Exception e) { Logger.LogError("relaunch: " + e); }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Vision resource cleanup (called from Stop())
+        // ------------------------------------------------------------------
+        private void CleanupVisionResources()
+        {
+            try
+            {
+                if (_cam != null)
+                {
+                    Destroy(_cam);
+                    _cam = null;
+                }
+                if (_camR != null)
+                {
+                    Destroy(_camR);
+                    _camR = null;
+                }
+                if (_rt != null)
+                {
+                    _rt.Release();
+                    Destroy(_rt);
+                    _rt = null;
+                }
+                if (_rtR != null)
+                {
+                    _rtR.Release();
+                    Destroy(_rtR);
+                    _rtR = null;
+                }
+                if (_texPoolL != null)
+                {
+                    Destroy(_texPoolL);
+                    _texPoolL = null;
+                }
+                if (_texPoolR != null)
+                {
+                    Destroy(_texPoolR);
+                    _texPoolR = null;
+                }
+                if (_texPoolStereo != null)
+                {
+                    Destroy(_texPoolStereo);
+                    _texPoolStereo = null;
+                }
+                Logger.LogInfo("[" + MyName() + "] vision resources cleaned up.");
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("[" + MyName() + "] cleanup vision resources: " + e.Message);
             }
         }
 
@@ -494,7 +568,9 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         internal void ClearLogs()
         {
-            lock (_stateLock) { _moveLocalZ = 0f; _moveJump = false; _moveUntilTime = 0f; _yawOffsetDeg = 0f; }
+            _stateLock.EnterWriteLock();
+            try { _moveLocalZ = 0f; _moveJump = false; _moveUntilTime = 0f; _yawOffsetDeg = 0f; }
+            finally { _stateLock.ExitWriteLock(); }
             lock (_history) { _history.Clear(); }
             lock (_thoughtHistory) { _thoughtHistory.Clear(); }
             lock (_facts) { _facts.Clear(); }
@@ -532,6 +608,23 @@ namespace KKLLMNPC
         private string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
         private static bool IsAlive(UnityEngine.Object o) => o != null;
+
+        // Internal accessors for the overlay (partial class on LLMNPCPlugin).
+        internal bool IsAliveObj(UnityEngine.Object o) => IsAlive(o);
+        internal string GetMyName() => MyName();
+        internal string GetRecentPlayerChat() => RecentPlayerChat();
+
+        // Field accessors for overlay debug display.
+        internal bool Running => _running;
+        internal void SetRunning(bool v) { _running = v; }
+        internal UnityEngine.Object KoboldObj => _kobold;
+        internal bool VisionBusy => _visionBusy;
+        internal string BlockedInfo => _blockedInfo;
+        internal string BumpInfo => _bumpInfo;
+        internal float YawDeg => _yawDeg;
+        internal float PitchDeg => _pitchDeg;
+        internal string LastThought => _lastThought;
+        internal string LastAction => _lastAction;
 
         private static float MoveAngleTowards(float current, float target, float maxDelta)
         {

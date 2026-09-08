@@ -115,6 +115,7 @@ namespace KKLLMNPC
         }
 
         // Minimal recursive-descent parser returning Dictionary/List/primitives.
+        // Enhanced with parse position tracking for better error reporting.
         private const int MaxDepth = 64;
         // Recover whatever the model sent. Tolerant of markdown fences, truncation,
         // truncated strings, doubled-encoded JSON inside JSON. Returns null on garbage.
@@ -122,7 +123,22 @@ namespace KKLLMNPC
         {
             if (string.IsNullOrEmpty(text)) return null;
             int i = 0, depth = 0;
-            return ParseValue(text, ref i, ref depth);
+            try
+            {
+                return ParseValue(text, ref i, ref depth);
+            }
+            catch (Exception e)
+            {
+                // Report parse position so we know where the model went wrong.
+                int line = 1, col = i;
+                for (int j = 0; j < i && j < text.Length; j++)
+                {
+                    if (text[j] == '\n') { line++; col = 1; }
+                    else col++;
+                }
+                LLMNPCPlugin.Log?.LogWarning($"Json.Parse error at line {line}, col {col}: {e.Message} (char '{(i < text.Length ? text[i] : 'E')}')");
+                return null;
+            }
         }
         private static void SkipWs(string s, ref int i) { while (i < s.Length && char.IsWhiteSpace(s[i])) i++; }
         private static object ParseValue(string s, ref int i, ref int depth)

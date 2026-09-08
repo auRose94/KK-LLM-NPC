@@ -72,7 +72,7 @@ namespace KKLLMNPC
                 }
                 return false;
             }
-            catch (Exception) { return false; }
+            catch (Exception e) { Logger.LogDebug($"MaybeOpenDoorAhead error: {e.Message}"); return false; }
         }
 
         // ------------------------------------------------------------------
@@ -114,13 +114,15 @@ namespace KKLLMNPC
                     }
                     _ambientStimPrev = stim;
                 }
-                catch (Exception) { }
+                catch (Exception e) { Logger.LogDebug($"MaybeAmbientComment: {e.Message}"); }
             }
         }
 
         // Slow-burn horniness (main thread). Climbs only while the body is getting
         // NO stimulation — any ongoing play (game stim, station, penetration)
         // holds it; a climax (stim swinging from high to ~0) spends it.
+        // Thread-safe: written on main thread (FixedUpdate), read on LLM thread.
+        // volatile float is NOT atomic on all platforms; use lock for safety.
         private void UpdateHorniness(float dt)
         {
             if (!IsAlive(_kobold)) return;
@@ -131,16 +133,16 @@ namespace KKLLMNPC
 
                 if (_hornyPrevStim >= 0.8f && stim < 0.3f)
                 {
-                    _horny = 0.05f; // climax spent the built-up need
+                    lock (_stateLock) { _horny = 0.05f; }
                     _hornyPrevStim = stim;
                     return;
                 }
 
                 bool driven = stim >= 0.15f || IsInAnimationStation() || IsPenetrated() || IsDickInside();
-                if (!driven) _horny = Mathf.Min(1f, _horny + (rate / 60f) * dt);
+                if (!driven) lock (_stateLock) { _horny = Mathf.Min(1f, _horny + (rate / 60f) * dt); }
                 _hornyPrevStim = stim;
             }
-            catch (Exception) { }
+            catch (Exception e) { Logger.LogDebug($"UpdateHorniness: {e.Message}"); }
         }
 
         // Say a short ambient line: bubble + console, no chat-window spam.

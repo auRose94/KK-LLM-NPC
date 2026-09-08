@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Text;
+using System.Threading;
 
 namespace KKLLMNPC
 {
@@ -36,6 +37,8 @@ namespace KKLLMNPC
         ///   1. /model          (KoboldCpp-specific — has parameter count + context)
         ///   2. /v1/models      (OpenAI-standard — has model name)
         /// Results are stored in Detected* fields for NPCInstance to use.
+        /// Retries each HTTP call up to 3 times with 1s delay to handle startup race
+        /// conditions (server not ready yet is common with LM Studio).
         /// </summary>
         internal static void Probe(string endpoint, string apiKey)
         {
@@ -55,11 +58,31 @@ namespace KKLLMNPC
                 if (string.IsNullOrEmpty(baseUrl)) { DetectedError = "empty endpoint"; return; }
                 BaseUrl = baseUrl;
 
+                // Retry each probe up to 3 times to handle startup race conditions
+                const int probeRetries = 3;
+                const int probeDelayMs = 1000;
+
                 // 1. Try KoboldCpp /model endpoint (richest info)
-                TryKoboldModel(baseUrl, apiKey);
+                bool koboldOk = false;
+                for (int attempt = 0; attempt < probeRetries; attempt++)
+                {
+                    TryKoboldModel(baseUrl, apiKey);
+                    if (DetectedModelName != null || DetectedContextLength > 0) { koboldOk = true; break; }
+                    if (attempt < probeRetries - 1)
+                        LLMNPCPlugin.Log?.LogInfo("ModelProbe: /model probe attempt " + (attempt + 1) + "/" + probeRetries + ", retrying...");
+                    Thread.Sleep(probeDelayMs);
+                }
 
                 // 2. Try OpenAI /v1/models (at least gives us the model name)
-                TryOpenAIModels(baseUrl, apiKey);
+                bool openAiOk = false;
+                for (int attempt = 0; attempt < probeRetries; attempt++)
+                {
+                    TryOpenAIModels(baseUrl, apiKey);
+                    if (DetectedModelName != null || AvailableModels.Count > 0) { openAiOk = true; break; }
+                    if (attempt < probeRetries - 1)
+                        LLMNPCPlugin.Log?.LogInfo("ModelProbe: /v1/models probe attempt " + (attempt + 1) + "/" + probeRetries + ", retrying...");
+                    Thread.Sleep(probeDelayMs);
+                }
 
                 // 3. If no models found at all, warn clearly
                 if (DetectedModelName == null && AvailableModels.Count == 0)
@@ -72,8 +95,13 @@ namespace KKLLMNPC
                 // 4. Classify from whatever we gathered
                 ClassifyFromDetected();
 
-                // 5. Discover server capabilities
-                DiscoverServerCapabilities(baseUrl, apiKey);
+                // 5. Discover server capabilities (also retry)
+                for (int attempt = 0; attempt < probeRetries; attempt++)
+                {
+                    DiscoverServerCapabilities(baseUrl, apiKey);
+                    if (AdminAvailable || !string.IsNullOrEmpty(BaseUrl)) break;
+                    if (attempt < probeRetries - 1) Thread.Sleep(probeDelayMs);
+                }
             }
             catch (Exception e)
             {
@@ -257,7 +285,7 @@ namespace KKLLMNPC
                         LLMNPCPlugin.Log?.LogInfo("ModelProbe: true context length = " + TrueContextLength);
                 }
             }
-            catch (Exception) { }
+            catch (Exception e) { LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/extra/true_max_context_length: " + e.Message); }
 
             // Try /v1/models to list all available models
             try
@@ -314,7 +342,7 @@ namespace KKLLMNPC
                     }
                 }
             }
-            catch (Exception) { }
+            catch (Exception e) { LLMNPCPlugin.Log?.LogInfo("ModelProbe /v1/models: " + e.Message); }
         }
 
         // ------------------------------------------------------------------
@@ -377,7 +405,7 @@ namespace KKLLMNPC
                     }
                 }
             }
-            catch (Exception) { }
+            catch (Exception e) { LLMNPCPlugin.Log?.LogInfo("ModelProbe /config/max_context_length: " + e.Message); }
             return TrueContextLength > 0 ? TrueContextLength : DetectedContextLength;
         }
 

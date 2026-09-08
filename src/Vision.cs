@@ -31,15 +31,16 @@ namespace KKLLMNPC
             if (_visionBusy)
             {
                 // Reset a wedged vision flag (hung HTTP, etc.) after 2 minutes.
-                if (Time.unscaledTime - _visionStartTime > 120f) _visionBusy = false; else return;
+                if (Time.unscaledTime - _visionStartTime > VisionHungTimeout) _visionBusy = false; else return;
             }
             if (_tick - _lastVisionTick < Math.Max(1, _cfgVisionEvery.Value)) return;
             if (!IsAlive(_kobold) || !IsAlive(_cam)) return;
             _visionBusy = true;
             _visionStartTime = Time.unscaledTime;
             _lastVisionTick = _tick;
-            var t = new Thread(VisionWorker) { IsBackground = true, Name = "KKLLMNPC-Vision" };
-            t.Start();
+            // Use Task.Run (thread pool) instead of new Thread to avoid thread
+            // exhaustion under heavy load (multiple NPCs, vision on, commentary on).
+            System.Threading.Tasks.Task.Run(() => VisionWorker());
         }
 
         // Background caption worker: render on main thread, caption on its own
@@ -89,7 +90,7 @@ namespace KKLLMNPC
                                 RememberFact(l);
                         }
                     }
-                    catch (Exception) { }
+                    catch (Exception e) { Logger.LogDebug($"vision fact remember: {e.Message}"); }
 
                     // Parse steering hint "go:<deg>:<reason>" out of the caption.
                     _visionSteer = null;
@@ -137,9 +138,9 @@ namespace KKLLMNPC
                 try
                 {
                     var files = new DirectoryInfo(dir).GetFiles("v*.jpg").OrderBy(f => f.Name).ToList();
-                    while (files.Count > 40) { try { files[0].Delete(); } catch (Exception) { } files.RemoveAt(0); }
+                    while (files.Count > 40) { try { files[0].Delete(); } catch (Exception e) { Logger.LogDebug($"vision frame cleanup: {e.Message}"); } files.RemoveAt(0); }
                 }
-                catch (Exception) { }
+                catch (Exception e) { Logger.LogDebug($"vision frame cleanup: {e.Message}"); }
             }
             catch (Exception e) { Logger.LogWarning("vision dump: " + e.Message); }
         }

@@ -22,12 +22,29 @@ using Photon.Realtime;
 namespace KKLLMNPC
 {
     [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.0.0")]
-    public class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
+    public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
         internal new BepInEx.Logging.ManualLogSource Logger => base.Logger;
         // Static logger accessible from other classes (e.g. ModelProbe).
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
+
+        // Derive a suffix from the DLL name (e.g. "KKLLMNPC2.dll" → "2").
+        internal static string InstanceSuffix
+        {
+            get
+            {
+                try
+                {
+                    var asm = typeof(LLMNPCPlugin).Assembly;
+                    var name = asm.GetName().Name; // e.g. "KKLLMNPC" or "KKLLMNPC2"
+                    if (name == null || name == "KKLLMNPC") return "";
+                    var digit = name.Substring("KKLLMNPC".Length);
+                    return digit;
+                }
+                catch { return ""; }
+            }
+        }
         // Shared across all loaded copies: kobolds currently driven by an LLM.
         // Lock on this object before mutating; IsClaimedByAnyLLM also locks here.
         internal static readonly HashSet<int> ClaimedKobolds = new HashSet<int>();
@@ -35,6 +52,12 @@ namespace KKLLMNPC
         {
             lock (ClaimedKobolds) { return ClaimedKobolds.Contains(koboldInstanceId); }
         }
+
+        // Thread pool semaphore — caps concurrent background work (vision, commentary,
+        // ask, plan steps) to prevent thread pool starvation under heavy load.
+        // Max 4 concurrent workers: 1 vision + 1 commentary + 1 ask + 1 plan.
+        internal static readonly System.Threading.SemaphoreSlim BackgroundWorkSemaphore =
+            new System.Threading.SemaphoreSlim(4, 4);
 
         // ---- config ----
         internal ConfigEntry<string> _cfgEndpoint;
@@ -99,6 +122,9 @@ namespace KKLLMNPC
         // ---- shared runtime state ----
         private SynchronizationContext _mainContext;
         internal volatile bool _mainReady;
+
+        // Current NPC instance being controlled by this plugin (for the overlay).
+        internal NPCInstance _currentInstance;
         private int _mainThreadId = -1;
         private volatile bool _running;
 
@@ -262,8 +288,21 @@ namespace KKLLMNPC
                 {
                     var npc = new NPCInstance(this);
                     _instances.Add(npc);
-                    npc.Start();
+                    Logger.LogInfo("KKLLMNPC: instance " + _instances.Count + " created.");
                 }
+            }
+
+            // Wire the first instance as the active one for the overlay.
+            if (_instances.Count > 0)
+            {
+                _currentInstance = _instances[0];
+                InitOverlay();
+            }
+
+            lock (_instancesLock)
+            {
+                foreach (var npc in _instances)
+                    npc.Start();
             }
             Logger.LogInfo("KKLLMNPC: started " + max + " NPC instance(s). Waiting for kobolds to possess.");
         }
