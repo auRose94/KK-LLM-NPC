@@ -58,7 +58,7 @@ namespace KKLLMNPC
         private void OnGUI()
         {
             // Hotkey to toggle, only when in-game.
-            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.F7)
+            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.F6)
             {
 
                 _overlayVisible = !_overlayVisible;

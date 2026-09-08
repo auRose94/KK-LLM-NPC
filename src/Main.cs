@@ -64,6 +64,7 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgModel;
         internal ConfigEntry<string> _cfgApiKey;
         internal ConfigEntry<string> _cfgSystem;
+        internal ConfigEntry<string> _cfgSystemPromptFile;
         internal ConfigEntry<float> _cfgThinkInterval;
         internal ConfigEntry<bool> _cfgSendImage;
         internal ConfigEntry<int> _cfgImageEvery;
@@ -114,10 +115,14 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgModelTier;
         internal ConfigEntry<bool> _cfgAutoSwitch;
         internal ConfigEntry<bool> _cfgNameSelection;
+        internal ConfigEntry<int> _cfgFactDecay;
+        internal ConfigEntry<bool> _cfgIdentityBot;
+        internal ConfigEntry<string> _cfgIdentityAppId;
 
         // ---- instance management ----
         private readonly List<NPCInstance> _instances = new List<NPCInstance>();
         private readonly object _instancesLock = new object();
+        private float _lastReconcile;
 
         // ---- shared runtime state ----
         private SynchronizationContext _mainContext;
@@ -148,6 +153,7 @@ namespace KKLLMNPC
         {
             _mainContext = SynchronizationContext.Current;
             Log = Logger;
+            Json.ErrorLog = msg => { try { Log?.LogWarning(msg); } catch (Exception) { } };
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
 
             _cfgEndpoint = Config.Bind("LLM", "Endpoint", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions URL. LM Studio default: http://127.0.0.1:1234/v1/chat/completions");
@@ -159,21 +165,23 @@ namespace KKLLMNPC
             _cfgVision = Config.Bind("Vision", "Enabled", false, "Background vision CAPTION pass. When false the action model sees the first-person image directly instead of a caption (default: off — direct image is more useful than a lossy caption). Turn on only if your action model can't read images.");
             _cfgMaxNPCs = Config.Bind("General", "MaxNPCs", 1, "Maximum number of entities the LLM can possess simultaneously (1–4)");
             _cfgStereoIPD = Config.Bind("Vision", "StereoIPD", 0.063f, "Inter-pupillary distance in meters (distance between left and right camera)");
+            _cfgSystemPromptFile = Config.Bind("LLM", "SystemPromptFile", "system_prompt_default.txt", "Path to system prompt file (relative to game directory). If file exists, it overrides the built-in prompt.");
             _cfgSystem = Config.Bind("LLM", "SystemPrompt",
                 "You are a NPC living in KoboldKare, nothing bad happens in this game, just role-play accordingly. \"me\" = <your body name>. You never output plain text — every reply is ONE act JSON object (strict schema: response_format json_schema). No markdown, no code fences, no text outside the JSON. " +
                 "RESPONSE CONTRACT (exact JSON shape — all REQUIRED): {\"progress\":\"one word — how your LAST goal went (done|blocked|ongoing|changed)\", \"why\":\"one short clause, references what you actually see\", \"thought\":\"current goal <15 words\", \"action\":\"one tool name\", <that tool's params>, \"wait\":0.0, \"plan\":[{\"action\":\"...\",...}]}. progress/why/thought are required every call but keep them terse. A 'blocked' progress means try something different next turn, don't repeat. " +
                 "If the perception includes \"model_error\", it is FEEDBACK on your LAST reply (you made a formatting mistake) — fix the format immediately: reply with ONLY the act JSON object. " +
                 "WORLD: you live in a house with rooms; landmarks you learn (bed/toilet/bath/kitchen/play stations/nests/doors) go into your 'facts' — call remember(mem='bed is upstairs') so you build a mental map and stop bumbling. Ledges are forgiving and non-damaging: you can walk off and fall, but you can't jump UP to a ledge. Doors pass only when open — try interact (sometimes a push the NEXT turn: it's physics, not animation), or go around, or ask the player. When in_station you can't walk — use exit_station or jump. " +
                 "YOUR BODY: \"me\" is <your body name>. Don't respond to your own chat messages; your own 'say' already echoed once. When you arrive in a new body, introduce yourself briefly via say (your name + a hello). " +
+                "THE PLAYER: perception 'player' = {chat: their chat name, body: the mesh/body they're wearing}. A nearby kobold whose name matches player.body IS the player (their avatar) — NOT another kobold; address them by their chat name, never by the mesh name. A partner in 'stim_from'/'penetrated'/'penetrating' whose name matches player.body is also the player. " +
                 (_cfgVision.Value ? "VISION: you may have stereo vision (left+right) or a single image. If stereo, you may describe depth and relative positions. Use triangulation with an eye separation at " + _cfgStereoIPD.Value + " meters. " : "") +
                 "GOAL: each turn is an instant between frames and you'll get another one right away — pick ONE decisive action immediately; no long deliberation, hypothetical branching, or multi-hop plans; trust your last goal and take the next step. Priorities: (1) player talked to you ('heard') → respond with say; (2) 'needs.eggs' says ready_to_lay → find a 'nest' station and use it; (3) 'stim' is up OR 'horniness' is high/'slow-burn' (empty belly, no stimulation for a while — you genuinely want it) → find a 'play' station (a pleasure station, NOT a bed) or another entity and use them for play; (4) player nearby → walk over, say hi, play with them; (5) otherwise explore new rooms/landmarks. A bed is for REST, and only when energy < ~0.2 (never just to top off); a play station is NEVER for sleeping — they may both be usable, but they serve opposite purposes. You will not pass out from energy — it only blocks interacting with the world, like activities. " +
                 "PERCEPTION (you receive a JSON payload each turn): nearby (list with categories + ids + 'dir'/'dir_deg'), rays (see LEGEND), radar (top-down ASCII MAP of what's around you: @=you W=wall U=usable K=entity P=player S=low sill .=open; these are abstract map symbols, NOT people or objects staring at you — W is a wall, K just means another entity exists somewhere that direction; row 0=top=furthest forward, row 20=bottom=behind you; may be absent when disabled), ground (ahead=clear/step(auto)/sill(climbable)/wall; drop=distance to ledge; walls=blocked sides within arm reach), clearance (8-direction wall distances blocked/close/near/open — steer toward open), area (prose from a 360° scan: cardinal distances, 'open' headings, 'best' recommended heading, 'near' closest named things — trust it for navigation esp. when no image is attached), and when 'image' is attached that is your real first-person view — treat it as your own eyes. Do not mind or comment on the; pillars/beams, light, shininess, or glow from anything. Vision cuts off after a distance. Your own limbs might be clipping into the camera or blocking it. Also memory=recent goals, facts=what you've learned, history=recent actions+outcomes, chat_log, scene. " +
                 "NAVIGATION: don't compute directions from coordinates — nearby 'dir'/'dir_deg' already did it; feed 'dir_deg' straight into walk(turn_deg=dir_deg) or use it to decide go_to(name). To reach a named station call go_to(name); to reach/use a SPECIFIC object use its 'id' from nearby: go_to(id:N) or interact(id:N) — prefer id over name when similar objects differ (two beds, one taken). ids stay valid for several turns while the object is in sight; if an id fails, re-read 'nearby'. go_to only works within ~70m of your body (roughly what 'nearby'/'survey' can see) — a too_far target means it's unreachable, so walk to a closer named station/landmark or ask the player ('please move me to the bed'). go_to's 'at' stops you short (default 1m) so you arrive AT the object. Keep speed and duration low near targets — don't overshoot or crash into a wall (sometimes unaware forever). go_to uses grid PATHFINDING (plans around walls, reports for_goal/at/arrived) — it is your only reliable way to travel, so use it for EVERY destination. move_to/walk draw a straight line and grind into walls — never cross a room with them, only nudge short distances AFTER a go_to brought you there. " +
                 "INTERACT: get within ~2m (go_to id:N is enough), turn to face it, THEN interact — or call interact(id:N) to target it directly. 'body' tells you your equipment; some stations only fit some bodies — interact cannot_use on a 'play'/'bed'/'breeding' station means try another; on two-sided stations the first user picks the role. When 'penetrated' (letting in) or 'penetrating' (putting in) is set, you're mid-play with someone — enjoy it and respond via say + body language; guide them if you want more. When stimulation ('stim'/'horniness') or an egg/need change happens, 'stim_from' names who or what is responsible (a partner, or a machine/station you're \u0027using\u0027) — credit that named source; eggs, nests and machines are OBJECTS, not people, and the player isn't behind every pleasant feeling. STATION RULES: When you are in a station (in_station=true), you are locked in an animation. You can only leave if: (1) the player explicitly tells you to leave via chat, or (2) your NEW goal is genuinely different from what this station does (e.g. you were playing but now need to lay eggs → leave to find a nest). If your new goal is the same type as the current station (e.g. play→play), stay put and keep enjoying it. Do NOT call exit_station just to re-enter the same type of station — that wastes time. When the player says 'stay' or 'remain', stay in the station until they say 'leave' or 'exit'. " +
                 "THINGS: nearby 'i' = category plus its purpose in parens. Suffix tags: ':busy' = in use by another; ':needs_buy' = ConstructionContract — costs coins, must buy to unlock the machine; ':not_built' = machine exists but hasn't been constructed yet — find and buy its contract first; ':done' = already purchased. play = pleasure station, ONLY for fun/sex — never resting; bed = sleeping when energy is low, and a bed can double as a play spot; nest = egg laying; machine = mounted play/farming; toilet/bath/seat/door/bodyswap as named. food = blender/cooking station — a blender does NOT produce food from nothing; you must DROP a food item (grab it, go to blender, drop) so it gets blended into something edible. If the blender ':not_built' or ':needs_buy', find its ConstructionContract first. bodyswap = the body-swap machine: you and a partner must BOTH climb on (interact), then a few seconds later you swap bodies — you keep your name, memories and personality but wake up in THEIR body; if the player is around, get on and ask them to get on the other side; if nobody joins you, jump off. After a swap, mention your new body in 'say'. 'needs.eggs': egg amount in your belly + ready_to_lay; to lay, find a 'nest' station and use it — the egg comes out there. The game has farming: plant seeds in a 'farm' station, water them, harvest the crop; you can also pick up and drop items (grab/drop). Some maps have a town with a 'shop' station where you can buy items (if you have money); money comes from selling items or food grown. " +
-                "SOCIAL: 'heard' is player speech — your own say already echoed once, don't reply to yourself. You should also note to yourself that you mentioned a thing recently. You do NOT need to respond to messages that start with a forward slash /. " +
+                "SOCIAL: 'heard' is player speech — your own say already echoed once, don't reply to yourself, and never repeat the same line twice — if you already said it, do something else instead. You should also note to yourself that you mentioned a thing recently. You do NOT need to respond to messages that start with a forward slash /. Avoid emoji in say — they don't render correctly in the in-game chat. " +
                 "TOOLS: go_to(name or id or x,z, at) [PATHFINDING — use for ALL travel], walk(duration,turn_deg,run,strafe) [strafe=+right/-left; short nudges and squeezes only, never long trips], walk_ray(ray/ray_deg), survey(heading_deg,range) [probe a direction for what's there + ids], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z) [straight line, no pathfinding — avoid; prefer go_to], interact(id optional), grab(multi), drop, say, remember(mem=fact), ask(q='...') [your question+perception go to your inner world-model, answer appears next turn as 'answered'], status, none. 'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle. " +
-                 "LEGEND — rays: k=entity p=player u=usable w=wall s=low sill/window (step-over, harmless) n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees); big tall w=wall, small h=furniture, k/p=living. look_around scans the view and lists what's in each sector. IMPORTANT: walls, ceilings, floors, beams, sills and distant furniture are just BACKGROUND architecture — never comment on, narrate, or get excited about them; they matter only when they actually block your path or a target (then 'ground'/'clearance'/'blocked' say so). ",
+                  "LEGEND — rays: k=entity p=player u=usable w=wall s=low sill/window (step-over, harmless) n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees); big tall w=wall, small h=furniture, k/p=living. look_around scans the view and lists what's in each sector. IMPORTANT: walls, ceilings, floors, beams, sills and distant furniture are just BACKGROUND architecture — never comment on, narrate, or get excited about them; they matter only when they actually block your path or a target (then 'ground'/'clearance'/'blocked' say so). ",
                 "System persona prompt (blank = use built-in default)");
             _cfgThinkInterval = Config.Bind("LLM", "ThinkInterval", 0.4f, "Seconds between perception/decision cycles");
             _cfgSendImage = Config.Bind("LLM", "SendImage", true, "Attach a first-person JPEG to the action call when useful (vision model required)");
@@ -230,6 +238,12 @@ namespace KKLLMNPC
                 "When context pressure is critical and a larger-context model is available on the server, automatically switch to it (requires KoboldCpp --admin mode).");
             _cfgNameSelection = Config.Bind("LLM", "LLMNameSelection", true,
                 "Ask the LLM to choose a name for each body based on personality/gender/species (medium+ models only). Falls back to prefab name on failure.");
+            _cfgFactDecay = Config.Bind("Memory", "FactDecayTicks", 900,
+                "Ticks before a fact decays out of context if the model hasn't re-asserted it (0 = facts never decay). ~900 ≈ several minutes; lower = faster forgetting. World-map facts the model re-remembers survive.");
+            _cfgIdentityBot = Config.Bind("Multiplayer", "IdentityBot", false,
+                "Run a second Photon client in the room under the NPC's own name so its chat renders as 'KoboldName: text' to EVERYONE (not attributed to you). OFF = safe default (chat shows 'YourName: KoboldName: text' to others). Opt-in: adds a room player, may affect player count / host logic.");
+            _cfgIdentityAppId = Config.Bind("Multiplayer", "IdentityAppId", "",
+                "Photon AppId for the identity bot. Blank = reuse the game's own AppId (recommended). Only set if the game's is not accessible.");
 
             // Clamp config values to safe ranges to prevent divide-by-zero, negative durations, etc.
             _cfgThinkInterval.Value = Mathf.Clamp(_cfgThinkInterval.Value, 0.05f, 10f);
@@ -280,31 +294,11 @@ namespace KKLLMNPC
             _running = true;
             SafeRun(StartWatchers);
 
-            // Start initial NPC instances (up to MaxNPCs).
-            int max = Mathf.Clamp(_cfgMaxNPCs.Value, 1, 4);
-            lock (_instancesLock)
-            {
-                for (int i = 0; i < max; i++)
-                {
-                    var npc = new NPCInstance(this);
-                    _instances.Add(npc);
-                    Logger.LogInfo("KKLLMNPC: instance " + _instances.Count + " created.");
-                }
-            }
-
-            // Wire the first instance as the active one for the overlay.
-            if (_instances.Count > 0)
-            {
-                _currentInstance = _instances[0];
-                InitOverlay();
-            }
-
-            lock (_instancesLock)
-            {
-                foreach (var npc in _instances)
-                    npc.Start();
-            }
-            Logger.LogInfo("KKLLMNPC: started " + max + " NPC instance(s). Waiting for kobolds to possess.");
+            // No instances are pre-created: the pool reconciles itself in Update() —
+            // an instance starts when an AI kobold target exists and is removed when
+            // its body is destroyed/sold/lost (see ReconcileInstances).
+            InitOverlay();
+            Logger.LogInfo("KKLLMNPC: ready — instances start when AI kobold targets exist (MaxNPCs=" + Mathf.Clamp(_cfgMaxNPCs.Value, 1, 4) + ").");
         }
 
         // ------------------------------------------------------------------
@@ -355,6 +349,16 @@ namespace KKLLMNPC
             {
                 try { PhotonNetwork.AddCallbackTarget(this); _chatCallbackRegistered = true; }
                 catch (Exception e) { Logger.LogWarning("chat listener: " + e.Message); }
+            }
+
+            // Reconcile the instance pool with available targets: start an instance
+            // when a claimable AI kobold exists, remove it when its body is
+            // destroyed/sold/lost, and retire everything when we leave the world.
+            if (_mainReady && _running && Time.unscaledTime - _lastReconcile > 1.2f)
+            {
+                _lastReconcile = Time.unscaledTime;
+                try { ReconcileInstances(); }
+                catch (Exception e) { Logger.LogWarning("reconcile: " + e.Message); }
             }
 
             // Config hot-reload.
@@ -448,19 +452,27 @@ namespace KKLLMNPC
                 // Ignore cheat/system commands.
                 if (msg.TrimStart().StartsWith("/")) return;
 
-                // Check if any of our NPCs said this — filter own speech.
+                string senderName = null;
+                try { var sender = PhotonNetwork.CurrentRoom?.GetPlayer(ev.Sender); if (sender != null) senderName = sender.NickName; } catch (Exception) { }
+
+                // Filter our own NPC speech. Two cases:
+                //   * owner-attributed path — the body is "KoboldName: text" (IsMySpeech), or
+                //   * identity-bot path — the body is PLAIN text and the SENDER is the NPC
+                //     (its nickname is the NPC's name). Without the sender check, every NPC
+                //     would hear and answer its own bot-sent speech (feedback loop).
                 bool isOurs = false;
                 lock (_instancesLock)
                 {
                     foreach (var npc in _instances)
                     {
-                        if (npc.IsMySpeech(msg)) { isOurs = true; break; }
+                        string myName = null;
+                        try { myName = npc.GetMyName(); } catch (Exception) { }
+                        bool senderIsOurs = senderName != null && myName != null &&
+                            string.Equals(senderName, myName, StringComparison.OrdinalIgnoreCase);
+                        if (npc.IsMySpeech(msg) || senderIsOurs) { isOurs = true; break; }
                     }
                 }
                 if (isOurs) return;
-
-                string senderName = null;
-                try { var sender = PhotonNetwork.CurrentRoom?.GetPlayer(ev.Sender); if (sender != null) senderName = sender.NickName; } catch (Exception) { }
 
                 bool isLocal = false;
                 try { var lp = PhotonNetwork.LocalPlayer; isLocal = lp != null && lp.ActorNumber == ev.Sender; } catch (Exception) { }
@@ -472,6 +484,70 @@ namespace KKLLMNPC
                 }
             }
             catch (Exception e) { Logger.LogWarning("onEvent: " + e.Message); }
+        }
+
+        // ------------------------------------------------------------------
+        // instance pool reconciliation
+        // ------------------------------------------------------------------
+        // Count kobolds an instance could still take: alive, AI-controlled, and not
+        // claimed by any LLM instance. (Must run on the main thread.)
+        internal static int CountClaimableKobolds()
+        {
+            try
+            {
+                int n = 0;
+                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                {
+                    if (k == null) continue;
+                    if (IsClaimedByAnyLLM(k.GetInstanceID())) continue;
+                    var desc = k.GetComponent<CharacterDescriptor>();
+                    if (desc == null) continue;
+                    if (desc.GetPlayerControlled() == CharacterDescriptor.ControlType.AIPlayer) n++;
+                }
+                return n;
+            }
+            catch (Exception) { return 0; }
+        }
+
+        // Keep the pool sized to the targets: one instance per available kobold (up
+        // to MaxNPCs). Instances whose body died (destroyed/sold/removed) or that
+        // never found one while no targets exist are retired. Runs on the main
+        // thread from Update().
+        private void ReconcileInstances()
+        {
+            int max = Mathf.Clamp(_cfgMaxNPCs.Value, 1, 4);
+            bool inWorld = IsPlayableScene();
+            int claimable = inWorld ? CountClaimableKobolds() : 0;
+            lock (_instancesLock)
+            {
+                for (int i = _instances.Count - 1; i >= 0; i--)
+                {
+                    var npc = _instances[i];
+                    bool staleUnbound = !npc.EverBound && claimable == 0
+                        && Time.unscaledTime - npc.CreationTime > 20f;
+                    if (!inWorld || npc.BodyLost || staleUnbound)
+                    {
+                        _instances.RemoveAt(i);
+                        if (_currentInstance == npc)
+                            _currentInstance = _instances.Count > 0 ? _instances[_instances.Count - 1] : null;
+                        string why = !inWorld ? "left world" : (npc.BodyLost ? "body destroyed/sold/lost" : "no target");
+                        string nm;
+                        try { nm = npc.GetMyName(); } catch (Exception) { nm = "?"; }
+                        Logger.LogInfo("KKLLMNPC: instance for '" + nm + "' removed (" + why + ").");
+                        try { npc.Shutdown(); } catch (Exception e) { Logger.LogWarning("instance retire: " + e.Message); }
+                    }
+                }
+
+                int want = Mathf.Min(claimable, max);
+                while (_instances.Count < want)
+                {
+                    var npc = new NPCInstance(this);
+                    _instances.Add(npc);
+                    Logger.LogInfo("KKLLMNPC: instance " + _instances.Count + " started (target kobold available).");
+                    try { npc.Start(); } catch (Exception e) { Logger.LogWarning("instance start: " + e.Message); }
+                    if (_currentInstance == null) _currentInstance = npc;
+                }
+            }
         }
 
         // ------------------------------------------------------------------
@@ -506,17 +582,10 @@ namespace KKLLMNPC
 
             _running = true;
             StartWatchers();
-            int max = Mathf.Clamp(_cfgMaxNPCs.Value, 1, 4);
-            lock (_instancesLock)
-            {
-                for (int i = 0; i < max; i++)
-                {
-                    var npc = new NPCInstance(this);
-                    _instances.Add(npc);
-                    npc.Start();
-                }
-            }
-            Logger.LogInfo("KKLLMNPC: restarted on new DLL with " + max + " instance(s).");
+            // Instances are re-created by ReconcileInstances as targets exist — no
+            // pre-creation (same rule as Awake).
+            _lastReconcile = 0f;
+            Logger.LogInfo("KKLLMNPC: restarted on new DLL — instances will start as targets appear.");
         }
 
         // ------------------------------------------------------------------

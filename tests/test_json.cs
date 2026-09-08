@@ -182,8 +182,33 @@ namespace KKLLMNPC.Tests
             if (obj.S("y") != "hello") throw new Exception("S(y) failed");
             if (!obj.B("z")) throw new Exception("B(z) failed");
             if (obj.F("missing", 99f) != 99f) throw new Exception("F(missing) default failed");
-            if (obj.Has("x")) throw new Exception("Has(x) should be true");
+            if (!obj.Has("x")) throw new Exception("Has(x) should be true");
             if (obj.Has("missing")) throw new Exception("Has(missing) should be false");
+        }
+
+        // Run every test above, print a summary, return the failure count (0 = pass).
+        // This is the standalone entry point (see tests/test_json_standalone.cs shim).
+        public static int RunAll()
+        {
+            var all = new System.Action[]
+            {
+                TestParseNull, TestParseTrue, TestParseFalse, TestParseInt, TestParseFloat,
+                TestParseString, TestParseEmptyObject, TestParseObject, TestParseEmptyArray,
+                TestParseArray, TestParseNested, TestParseTruncated, TestParseWhitespace,
+                TestWriteNull, TestWriteString, TestWriteBool, TestWriteFloat,
+                TestWriteAnonymous, TestWriteDictionary, TestWriteList, TestRoundTrip,
+                TestJsonObjAccessors,
+            };
+            int passed = 0, failed = 0;
+            Console.WriteLine("=== KKLLMNPC Json tests ===");
+            foreach (var test in all)
+            {
+                string name = test.Method.Name;
+                try { test(); Console.WriteLine("  PASS " + name); passed++; }
+                catch (Exception e) { Console.WriteLine("  FAIL " + name + ": " + e.Message); failed++; }
+            }
+            Console.WriteLine("\n" + passed + " passed, " + failed + " failed");
+            return failed;
         }
     }
 }

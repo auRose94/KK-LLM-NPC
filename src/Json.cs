@@ -10,13 +10,8 @@ using System.Net;
 using System.Reflection;
 using System.Text;
 using System.Threading;
-using BepInEx;
-using BepInEx.Configuration;
-using UnityEngine;
-using UnityEngine.Rendering;
-using UnityEngine.SceneManagement;
-using Photon.Pun;
-using Photon.Realtime;
+// NOTE: this file deliberately has no Unity/BepInEx/Photon usings — it stays
+// dependency-free so tests/ can compile it standalone (see tests/README.md).
 
 namespace KKLLMNPC
 {
@@ -28,6 +23,9 @@ namespace KKLLMNPC
     // ----------------------------------------------------------------------
     internal static class Json
     {
+        // Parse-error reporting sink (set by the plugin at startup). Null in standalone tests.
+        public static System.Action<string> ErrorLog;
+
         // Serialize anything we pass to/from the LLM: dictionaries, lists, anonymous
         // types (via reflection on public properties), primitives. NaN/Infinity → null.
         public static string Write(object v)
@@ -136,7 +134,10 @@ namespace KKLLMNPC
                     if (text[j] == '\n') { line++; col = 1; }
                     else col++;
                 }
-                LLMNPCPlugin.Log?.LogWarning($"Json.Parse error at line {line}, col {col}: {e.Message} (char '{(i < text.Length ? text[i] : 'E')}')");
+                // Pluggable error sink (wired to the plugin logger in Main.cs) so this file
+                // stays compilable standalone for tests — null outside the plugin.
+                if (ErrorLog != null)
+                    try { ErrorLog($"Json.Parse error at line {line}, col {col}: {e.Message} (char '{(i < text.Length ? text[i] : 'E')}')"); } catch (Exception) { }
                 return null;
             }
         }

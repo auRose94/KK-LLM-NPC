@@ -191,6 +191,10 @@ namespace KKLLMNPC
 
             result["ok"] = true;
             result["me"] = MyName();
+            // The human player: chat name + the body/mesh they're wearing. A nearby
+            // kobold named after that body IS the player (their avatar), not another
+            // kobold — the model otherwise can't connect "AbsolB" to "Rosemary".
+            result["player"] = PlayerIdentity();
             // Session clock: elapsed time since this NPC instance started.
             float sessionElapsed = Time.unscaledTime - _sessionStartTime;
             int eh = (int)(sessionElapsed / 3600f);
@@ -240,6 +244,11 @@ namespace KKLLMNPC
             result["heard"] = RecentPlayerChat();
             result["asked"] = _pendingQuestion;
             result["answered"] = _answerBusy ? null : _lastAnswer;
+            // Goal machine: the persistent goal ("bigger thinking") + repetition guard.
+            // This is what the model works toward instead of re-deriving a goal each turn.
+            result["goal"] = GoalPerception();
+            string nudge = RepetitionNudge();
+            if (nudge != null) result["nudge"] = nudge;
             result["grabbed"] = _kobold.grabbed;
             result["rays"] = rays;
             var nearby = DescribeNearby();
@@ -353,6 +362,35 @@ namespace KKLLMNPC
                 return desc != null && desc.GetPlayerControlled() == CharacterDescriptor.ControlType.LocalPlayer;
             }
             catch (Exception) { return false; }
+        }
+
+        // The local player's chat name (Photon nickname), or null if not in a room.
+        internal static string PlayerChatName()
+        {
+            try
+            {
+                var lp = PhotonNetwork.LocalPlayer;
+                if (lp != null && !string.IsNullOrEmpty(lp.NickName)) return lp.NickName;
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        // The player's identity for perception: their chat name plus the body/mesh
+        // they're currently wearing, so the model can recognize the player's avatar
+        // kobold (named after the mesh prefab) as THE player.
+        private object PlayerIdentity()
+        {
+            try
+            {
+                string chat = PlayerChatName();
+                string body = null;
+                if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
+                    body = CleanName(pp.kobold.name);
+                if (chat == null && body == null) return null;
+                return new { chat, body };
+            }
+            catch (Exception) { return null; }
         }
 
         // What's underfoot / ahead at floor level: ground distance, whether we're
@@ -723,7 +761,8 @@ namespace KKLLMNPC
                     Vector3 d = c.transform.position - _kobold.transform.position;
                     string label = k != null ? "kobold" : "usable";
                     string nm = k != null ? k.name : u.name;
-                    if (k != null && IsPlayerKobold(k)) { label = "player"; sawPlayer = true; }
+                    bool isPlayer = k != null && IsPlayerKobold(k);
+                    if (isPlayer) { label = "player"; sawPlayer = true; nm = CleanName(nm); }
                     string hrel = d.y > 0.5f ? "above" : d.y < -0.5f ? "below" : "level";
 
                     // Bounds + world position + facing so the model can plan around it
@@ -811,6 +850,11 @@ namespace KKLLMNPC
                         ["f"] = F(bfacing),
                     };
                     if (stateNote != null) entry["note"] = stateNote;
+                    if (isPlayer)
+                    {
+                        string chat = PlayerChatName();
+                        entry["who"] = "the player" + (chat != null ? " — chat name: " + chat : "") + " (their avatar; mesh name: " + nm + ")";
+                    }
                     list.Add(entry);
                     if (list.Count >= 8) break;
                 }

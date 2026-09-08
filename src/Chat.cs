@@ -76,6 +76,19 @@ namespace KKLLMNPC
                 catch (Exception) { return "[]"; }
                 if (string.IsNullOrEmpty(output)) return "[]";
 
+                // Only feed what happened AFTER this NPC awoke. The log grows by
+                // appending, so strip the baseline snapshot we took at body-acquire.
+                // If the log was reset (no longer starts with the baseline), the baseline
+                // is stale — treat the whole current log as fresh from now on.
+                if (!string.IsNullOrEmpty(_chatBaseline))
+                {
+                    if (output.StartsWith(_chatBaseline, StringComparison.Ordinal))
+                        output = output.Substring(_chatBaseline.Length);
+                    else
+                        _chatBaseline = null;
+                }
+                if (string.IsNullOrEmpty(output)) return "[]";
+
                 var lines = new System.Collections.Generic.List<string>();
                 string myName = MyName();
                 foreach (var raw in output.Split('\n'))
@@ -141,9 +154,26 @@ namespace KKLLMNPC
         // and a local echo so the player sees their own window too.
         private object ToolSay(JsonObj p)
         {
-            string text = p.S("text", "");
+            // The act schema names the parameter 'say', but salvage paths and some
+            // models use 'text' or 'message' — accept all three.
+            string text = p.S("say", "");
+            if (text.Length == 0) text = p.S("text", "");
+            if (text.Length == 0) text = p.S("message", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
             text = Sanitize(text);
+            // Repeat suppression: small models emit the exact same line several turns
+            // in a row, spamming the in-game chat window with duplicates. The line was
+            // already delivered once, so acknowledge it and nudge the model onward.
+            lock (_sayLock)
+            {
+                if (Time.unscaledTime - _lastSayTime < 15f && string.Equals(_lastSayText, text, StringComparison.Ordinal))
+                {
+                    Logger.LogInfo("[NPC] say suppressed (repeat within 15s): " + text);
+                    return new { ok = true, said = text, note = "you already said this line — don't repeat it; do something else" };
+                }
+                _lastSayText = text;
+                _lastSayTime = Time.unscaledTime;
+            }
             string who = _kobold != null ? CleanName(_kobold.name) : "NPC";
             Logger.LogInfo("[NPC] " + who + ": " + text); // always visible in the console/log
             RunOnMainThreadAsync(() =>
@@ -165,33 +195,53 @@ namespace KKLLMNPC
                     }
                     catch (Exception e) { Logger.LogWarning("say bubble: " + e.Message); }
 
-                    // 2) The real chat window: same Photon event the ChatPanel raises,
-                    // so it lands in everyone's chat history. The receiver renders it as
-                    // "<sender nickname>: <message>" — and since we own the kobold's
-                    // PhotonView, the sender is YOUR username. So we prefix the kobold's
-                    // name in the message text itself so chat reads clearly.
+                    // 2) The real chat window, attributed to the NPC. Two paths:
+                    //    a) Identity bot (opt-in): the NPC has its own room player, so its
+                    //       event renders "KoboldName: text" to everyone. We send the PLAIN
+                    //       text (no prefix) and do NOT locally echo (we'd receive the bot's
+                    //       event and the game renders it — echoing would double it).
+                    //    b) Fallback (default): send over the owner's connection with the
+                    //       kobold name prefixed in the body, and locally echo (we don't
+                    //       receive our own event). Renders "OwnerName: KoboldName: text" to
+                    //       others, "KoboldName: text" locally.
                     try
                     {
                         string senderName = MyName();
-                        string chatText = senderName + ": " + text;
-                        if (PhotonNetwork.InRoom)
+                        bool botSent = false;
+                        if (_cfgIdentityBot != null && _cfgIdentityBot.Value)
                         {
-                            var opts = new Photon.Realtime.RaiseEventOptions
-                            {
-                                CachingOption = Photon.Realtime.EventCaching.DoNotCache,
-                                Receivers = Photon.Realtime.ReceiverGroup.Others, // everyone else
-                            };
-                            bool sent = PhotonNetwork.RaiseEvent(
-                                NetworkManager.CustomChatEvent,
-                                chatText.TrimEnd(),
-                                opts,
-                                ExitGames.Client.Photon.SendOptions.SendReliable);
-                            if (!sent) Logger.LogWarning("say: RaiseEvent returned false");
+                            EnsureIdentityBot();
+                            if (_identityBot != null && _identityBot.InRoom)
+                                botSent = _identityBot.SendChat(text);
                         }
-                        // Local echo: we won't receive our own event, so push it into the
-                        // chat log directly the same way NetworkManager.OnEvent does.
-                        try { CheatsProcessor.AppendText(chatText + "\n"); } catch (Exception e) { Logger.LogWarning("say local echo: " + e.Message); }
-                        if (!PhotonNetwork.InRoom) Logger.LogInfo("say (offline, not in a room): " + text);
+                        if (botSent)
+                        {
+                            // Owner client receives the bot's event → the game renders
+                            // "KoboldName: text". No local echo (would double it).
+                        }
+                        else
+                        {
+                            // Fallback: owner-attributed, body-prefixed.
+                            string chatText = senderName + ": " + text;
+                            if (PhotonNetwork.InRoom)
+                            {
+                                var opts = new Photon.Realtime.RaiseEventOptions
+                                {
+                                    CachingOption = Photon.Realtime.EventCaching.DoNotCache,
+                                    Receivers = Photon.Realtime.ReceiverGroup.Others, // everyone else
+                                };
+                                bool sent = PhotonNetwork.RaiseEvent(
+                                    NetworkManager.CustomChatEvent,
+                                    chatText.TrimEnd(),
+                                    opts,
+                                    ExitGames.Client.Photon.SendOptions.SendReliable);
+                                if (!sent) Logger.LogWarning("say: RaiseEvent returned false");
+                            }
+                            // Local echo: we won't receive our own event, so push it into the
+                            // chat log directly the same way NetworkManager.OnEvent does.
+                            try { CheatsProcessor.AppendText(chatText + "\n"); } catch (Exception e) { Logger.LogWarning("say local echo: " + e.Message); }
+                            if (!PhotonNetwork.InRoom) Logger.LogInfo("say (offline, not in a room): " + text);
+                        }
                     }
                     catch (Exception e) { Logger.LogWarning("say chat: " + e.Message); }
                 }

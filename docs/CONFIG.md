@@ -9,7 +9,8 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `Endpoint` | `http://127.0.0.1:11434/v1/chat/completions` | — | OpenAI-compatible chat completions URL. LM Studio default: `http://127.0.0.1:1234/v1/chat/completions` |
 | `Model` | `local-model` | — | Model name to request. LM Studio: use the exact model name from the Developer tab. KoboldCpp: `local-model` works. |
 | `ApiKey` | *(empty)* | — | Bearer token (may be empty for local servers) |
-| `SystemPrompt` | *(built-in)* | — | Override the default system prompt. Leave blank to use the built-in default. |
+| `SystemPrompt` | *(built-in)* | — | Override the default system prompt. A customized value always wins; otherwise `SystemPromptFile` is used if readable. |
+| `SystemPromptFile` | `system_prompt_default.txt` | — | Path to the full system prompt (relative to game dir, plugin dir, or CWD). Overrides the built-in prompt; ships in this repo. |
 | `ThinkInterval` | `0.4` | 0.05–10s | Seconds between perception/decision cycles |
 | `MaxTokens` | `1024` | 64–32768 | Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON) |
 | `Temperature` | `0.3` | 0–2 | Sampling temperature (lower = faster, more deterministic) |
@@ -82,6 +83,19 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 |-----|---------|-------|---------|
 | `HornyClimbPerMin` | `5` | 0–60/min | How fast the slow-burn horniness rises while the body gets NO stimulation (0.0-1.0 scale per minute) |
 | `HornyBaseline` | `0.08` | 0–1 | Starting horniness when the NPC takes a body |
+
+## [Memory] — Facts & Forgetting
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `FactDecayTicks` | `900` | 0–… | Ticks before a fact decays out of context if the model hasn't re-asserted it. Re-`remember`ing a fact (same category prefix) refreshes its age, so actively-used facts outlive scratch notes. 0 = facts never decay. |
+
+## [Multiplayer] — NPC Room Identity
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `IdentityBot` | `false` | Run a second Photon client in the room under the NPC's own name so its chat renders as `KoboldName: text` to everyone (not attributed to the plugin owner). Opt-in: adds a room player, may affect player count / host logic. Off (default) = owner-attributed chat. |
+| `IdentityAppId` | *(empty)* | Photon AppId for the identity bot. Blank = reuse the game's own AppId (recommended). |
 
 ## [General] — Global
 

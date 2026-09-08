@@ -5,19 +5,21 @@ of core algorithms and can be compiled with any C# test framework.
 
 ## Files
 
-- `test_json.cs` — Tests for `Json.cs` (parser + writer)
-- `test_json_standalone.cs` — Standalone Json tests (no Unity/BepInEx deps)
+- `test_json.cs` — Tests for `Json.cs` (parser + writer); `JsonTests.RunAll()` runs them
+- `test_json_standalone.cs` — entry-point shim (`Main`) that runs `JsonTests.RunAll()`;
+  keeps the standalone build dependency-free
 - `test_pathfinding.cs` — Tests for `Pathfinding.cs` (A*, grid sampling)
 - `test_contextmanager.cs` — Tests for `ContextManager.cs` (compaction logic)
 
 ## Running
 
-### Option 1: Standalone Json tests (no dependencies)
+### Option 1: Standalone Json tests (no dependencies, runs the real `src/Json.cs`)
 
 ```bash
-cd tests
-mcs -target:library -out:test_runner.exe test_json_standalone.cs
+# from the repo root
+mcs -target:exe -out:test_runner.exe tests/test_json.cs tests/test_json_standalone.cs src/Json.cs
 mono test_runner.exe
+# exit code = number of failed tests (0 = all pass)
 ```
 
 ### Option 2: NUnit (for full tests with Unity refs)
@@ -49,7 +51,7 @@ to catch parser failures in the wild.
 
 | Module | Parser Tests | Writer Tests | Integration |
 |--------|-------------|-------------|-------------|
-| `Json.cs` | ✅ Specification documented | ✅ Specification documented | ✅ Runtime |
+| `Json.cs` | ✅ Runs standalone (Option 1) | ✅ Runs standalone (Option 1) | ✅ Runtime |
 | `Pathfinding.cs` | ⚠️ Skeleton (requires NPCInstance) | — | ✅ Runtime |
 | `ContextManager.cs` | ✅ Logic verified | — | ✅ Runtime |
 

@@ -278,6 +278,9 @@ namespace KKLLMNPC
                         // Log state transitions so we can see *where* it's idle.
                         if (lastState != "no_scene") { lastState = "no_scene"; Logger.LogInfo("KKLLMNPC: waiting for a playable scene (player not spawned yet / wrong map)."); }
                         if (_kobold != null) try { RunOnMainThread(() => { TeardownBody(); return true; }, 5000); } catch (Exception) { }
+                        // We left the world with a body (or already lost it): the body
+                        // is gone for good — the reconciler retires this instance.
+                        if (_everBound) BodyLost = true;
                         Thread.Sleep(2000);
                         continue;
                     }
@@ -285,7 +288,13 @@ namespace KKLLMNPC
                     bool have = (bool)RunOnMainThread(() => EnsureBody(), 8000);
                     if (!have)
                     {
-                        if (lastState != "no_body") { lastState = "no_body"; Logger.LogInfo("KKLLMNPC: in scene but no unoccupied AI kobold within AutoFindRange to possess."); }
+                        if (lastState != "no_body")
+                        {
+                            lastState = "no_body";
+                            Logger.LogInfo(BodyLost
+                                ? "KKLLMNPC: body was lost — instance pending removal."
+                                : "KKLLMNPC: in scene but no unoccupied AI kobold within AutoFindRange to possess.");
+                        }
                         Thread.Sleep(2000);
                         continue;
                     }
@@ -395,11 +404,81 @@ namespace KKLLMNPC
             }
         }
 
+        // Resolve the base system prompt. Precedence:
+        //   1. an explicitly-set SystemPrompt config value (the user wrote one — respect it),
+        //   2. the SystemPromptFile (documented to override the built-in; the full prompt
+        //      lives there),
+        //   3. the built-in default.
+        // File is searched relative to the game dir, the plugin dir, and the CWD.
+        private string ResolveSystemPromptBase()
+        {
+            // 1) Explicit user config wins: if SystemPrompt was customized (differs from the
+            //    built-in default), respect it.
+            try
+            {
+                if (_cfgSystem != null)
+                {
+                    string v = _cfgSystem.Value;
+                    object def = _cfgSystem.DefaultValue;
+                    if (!string.IsNullOrWhiteSpace(v) && !object.Equals(v, def)) return v;
+                }
+            }
+            catch (Exception) { }
+            // 2) Prompt file (the real source of truth for the full prompt).
+            string file = _cfgSystemPromptFile != null ? (_cfgSystemPromptFile.Value ?? "").Trim() : "";
+            if (file.Length > 0)
+            {
+                string content = TryReadPromptFile(file);
+                if (content != null) return content;
+            }
+            // 3) Built-in default.
+            return Val(_cfgSystem);
+        }
+
+        private static string TryReadPromptFile(string file)
+        {
+            try
+            {
+                var bases = new System.Collections.Generic.List<string>();
+                try
+                {
+                    string data = UnityEngine.Application.dataPath;
+                    if (!string.IsNullOrEmpty(data))
+                    {
+                        string gameDir = System.IO.Path.GetDirectoryName(data);
+                        if (!string.IsNullOrEmpty(gameDir)) bases.Add(gameDir);
+                    }
+                }
+                catch (Exception) { }
+                try { string asm = System.IO.Path.GetDirectoryName(typeof(NPCInstance).Assembly.Location); if (!string.IsNullOrEmpty(asm)) bases.Add(asm); } catch (Exception) { }
+                try { string cwd = System.IO.Directory.GetCurrentDirectory(); if (!string.IsNullOrEmpty(cwd)) bases.Add(cwd); } catch (Exception) { }
+
+                // Absolute path as-is, then each base dir.
+                var candidates = new System.Collections.Generic.List<string>();
+                candidates.Add(file);
+                foreach (var b in bases) candidates.Add(System.IO.Path.Combine(b, file));
+                foreach (var c in candidates)
+                {
+                    try
+                    {
+                        if (System.IO.File.Exists(c))
+                        {
+                            string txt = System.IO.File.ReadAllText(c);
+                            if (!string.IsNullOrWhiteSpace(txt)) return txt;
+                        }
+                    }
+                    catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
         // The configured system prompt, plus the derived body persona (personality,
         // gender, pronouns) so every turn the model is reminded of WHO it is.
         private string SystemPromptWithPersona()
         {
-            string base_ = Val(_cfgSystem);
+            string base_ = ResolveSystemPromptBase();
             if (string.IsNullOrEmpty(_persona)) return base_;
             return base_ + "\n" + _persona;
         }
@@ -408,7 +487,7 @@ namespace KKLLMNPC
         // without overwhelming the context window or instruction-following capacity.
         private string CompactSystemPrompt()
         {
-            string base_ = Val(_cfgSystem);
+            string base_ = ResolveSystemPromptBase();
             // If the user already wrote a custom prompt, respect it.
             if (base_ != null && base_.Length > 200 && !base_.Contains("RESPONSE CONTRACT")) return base_;
             string vision = "";
@@ -416,11 +495,12 @@ namespace KKLLMNPC
                 vision = " You have stereo vision. Eye separation: " + (_cfgStereoIPD != null ? _cfgStereoIPD.Value.ToString() : "0.063") + "m.";
             string persona = !string.IsNullOrEmpty(_persona) ? "\n" + _persona : "";
             return "You are an NPC in KoboldKare. Reply with ONE JSON object only. No markdown, no prose, no explanation." + vision + persona +
-                "\nJSON shape: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<short>\",\"thought\":\"<goal>\",\"action\":\"<tool>\",...tool params...,\"plan\":[{\"action\":\"...\",...}]}" +
-                "\nTools: go_to(name|id|x,z,at) walk(duration,turn_deg) walk_ray(ray) survey look_around look(yaw,pitch) jump exit_station crouch move_to interact(id) grab drop say remember(mem) ask(q) status stop none" +
+                "\nJSON shape: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<short>\",\"thought\":\"<next step>\",\"action\":\"<tool>\",...tool params...,\"plan\":[{\"action\":\"...\",...}]}" +
+                "\nTools: go_to(name|id|x,z,at) walk(duration,turn_deg) walk_ray(ray) survey look_around look(yaw,pitch) jump exit_station crouch move_to interact(id) grab drop say remember(mem) forget(mem) set_goal(goal) complete_goal(note) drop_goal(reason) ask(q) status stop none" +
                 "\nRules: progress/why/thought required. action must be a tool name. Use go_to for ALL travel. Use id from nearby for specific objects. Keep plan steps ≤4. 'say' posts to chat." +
+                "\nGOAL: you have ONE stored goal (perception 'goal'). set_goal ONCE, then each turn take the next step; complete_goal when done; drop_goal to abandon. Don't re-declare it. If 'nudge' appears, change what you do." +
                 "\nPriorities: (1) player talked → say, (2) eggs ready → nest, (3) horny → play station, (4) player nearby → walk+say, (5) explore." +
-                "\nPerception has: nearby (objects+ids+dir), rays, ground, area, facts, history, chat_log." +
+                "\nPerception has: nearby (objects+ids+dir), rays, ground, area, facts, history, chat_log, goal." +
                 "\nIf perception has 'model_error', fix your JSON format. Never repeat the same failed action." +
                 "\nStation rules: When in_station=true, stay unless your NEW goal differs from the station type. Player 'stay' = stay until they say 'leave'." +
                 "\nNearby tags: ':busy'=in use, ':needs_buy'=must buy contract first, ':not_built'=machine not constructed yet, ':done'=already bought." +
@@ -741,6 +821,7 @@ namespace KKLLMNPC
 
             _lastThought = args.S("thought", _lastThought);
             PushThought(_lastThought);
+            NoteThought(_lastThought); // repetition guard (goal machine)
             // Track the self-assessment too, so progress notes become visible history.
             string progress = args.S("progress", "");
             string why = args.S("why", "");
@@ -1129,6 +1210,10 @@ namespace KKLLMNPC
                 case "remember":
                 case "ask":
                 case "look_around":
+                case "set_goal":
+                case "complete_goal":
+                case "drop_goal":
+                case "forget":
                 case "none": return true;
                 default: return false;
             }
@@ -1193,7 +1278,7 @@ namespace KKLLMNPC
             if (aliases.TryGetValue(s, out alias)) return alias;
             // Substring containment: "go" in a blob → go_to, "walk" in a blob → walk, etc.
             // Order matters: check longer matches first to avoid "go" matching before "go_to".
-            string[] ordered = new[] { "exit_station", "look_around", "walk_ray", "go_to", "move_to", "interact", "remember", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
+            string[] ordered = new[] { "complete_goal", "set_goal", "drop_goal", "exit_station", "look_around", "walk_ray", "go_to", "move_to", "interact", "remember", "forget", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
             foreach (var tool in ordered)
                 if (s.Contains(tool)) return tool;
             // Prefix match: first 3+ chars of a known tool.
@@ -1231,6 +1316,10 @@ namespace KKLLMNPC
                 case "remember":
                 case "ask":
                 case "look_around":
+                case "set_goal":
+                case "complete_goal":
+                case "drop_goal":
+                case "forget":
                 case "none": return true;
                 default: return false;
             }
@@ -1486,6 +1575,10 @@ namespace KKLLMNPC
                     case "go_to": return ToolGoTo(p);
                     case "survey": return ToolSurvey(p);
                     case "remember": return ToolRemember(p);
+                    case "forget": return ToolForget(p);
+                    case "set_goal": return ToolSetGoal(p);
+                    case "complete_goal": return ToolCompleteGoal(p);
+                    case "drop_goal": return ToolDropGoal(p);
                     case "ask": return ToolAsk(p);
                     case "look_around": return ToolLookAround(p);
                     case "stop": return ToolStop();
@@ -1502,7 +1595,7 @@ namespace KKLLMNPC
                     case "none": return new { ok = true };
                     default:
                         // Model was asked for act= but produced a legacy/unknown name.
-                        SetModelError("Invalid action '" + name + "'. Valid actions: walk, walk_ray, go_to, survey, look_around, look, jump, exit_station, crouch, move_to, interact, grab, drop, say, remember, ask, stop, status, none.");
+                        SetModelError("Invalid action '" + name + "'. Valid actions: walk, walk_ray, go_to, survey, look_around, look, jump, exit_station, crouch, move_to, interact, grab, drop, say, remember, forget, set_goal, complete_goal, drop_goal, ask, stop, status, none.");
                         Logger.LogWarning("unknown action: " + name);
                         return new { ok = false, reason = "unknown_tool", tool = name };
                 }

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Goal machine** — `set_goal` / `complete_goal` / `drop_goal` tools with a persistent goal in perception (`goal` block + `nudge` when stuck); a thought-repetition guard for models that ignore the tools; completing/dropping a goal sheds its scratch facts (`src/GoalMachine.cs`)
+- **`forget` tool** — drop a fact by category, text, or substring (no argument = drop the oldest fact); the explicit half of forgetting
+- **Fact decay** — `Memory.FactDecayTicks` (default 900; 0 = off): facts the model hasn't re-asserted age out of context; re-`remember`ing refreshes a fact's age; cap eviction now removes the oldest fact
+- **Chat baseline** — the game chat log is snapshotted when the NPC acquires its body; `chat_log` only feeds lines added after that, so the NPC never "reads" pre-spawn conversation
+- **NPC room identity (opt-in)** — `Multiplayer.IdentityBot` + `IdentityAppId`: a second Photon client joins the room under the NPC's name so its chat renders `KoboldName: text` to everyone; auto-falls back to owner-attributed chat whenever the bot is down (`src/IdentityBot.cs`)
+- **`LLM.SystemPromptFile`** — full system prompt from a file (resolved relative to game dir, plugin dir, or CWD) overriding the built-in; `system_prompt_default.txt` ships in the repo
 - **SafeHttp utility** — retry wrapper with exponential backoff (3 attempts, 1s/2s/4s delays), proper resource disposal, and TLS validation for all LLM HTTP calls
 - **Constants.cs** — named constants for all magic numbers (HTTP timeouts, perception ranges, movement values, etc.) — replaces scattered literals throughout the codebase
 - **Thread pool semaphore** — caps concurrent `Task.Run` calls to prevent thread pool starvation under heavy multi-NPC load
@@ -22,12 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Improved README** — complete config table with ranges, Windows build instructions, architecture doc links
 
 ### Changed
+- **Own-speech filtering** — `Main.cs` now also matches on the sender's nickname, so a bot-attributed chat line (identity-bot path) isn't heard back by the sending NPC (no feedback loop)
+- **System prompt resolution** — explicit `SystemPrompt` > `SystemPromptFile` > built-in; the full prompt now lives in `system_prompt_default.txt` and the compact small-model prompt includes the goal tools
 - **Config duplication eliminated** — config entries are now bound in one place (`Main.cs`) and read via a shared config accessor, removing the duplicate field copies in `NPCInstance.cs`
 - **HTTP resource management** — `HttpWebRequest` streams are now properly disposed via `using` blocks and `SafeHttp`'s finally blocks, preventing connection pool exhaustion
 - **Magic numbers replaced** — all magic numbers (timeouts, ranges, thresholds) replaced with named constants in `Constants.cs`
 - **Vision hung timeout** — reduced from 2 minutes to a configurable value with logging
 
 ### Fixed
+- **Goal flapping** — `set_goal` now refuses a goal that was dropped/completed within the recent window (the `recently_dropped` ring is enforced, not just displayed), so weaker models can't loop set→drop→set
+- **Fact-shed safety** — `ShedFactsForGoal` no longer wipes a world-map fact (e.g. `nest: upstairs`) when a goal shares its category prefix; a fact is only shed if the goal is category-tagged AND shares ≥2 significant words with it
+- **Identity-bot staleness** — the bot now restarts when the game's room changes (it used to stay bound to the old room and chat into it), recovers after exhausting its reconnect budget (rate-limited restart instead of giving up forever), and `Stop()` no longer blocks the game's main thread for up to 1s
+- **Standalone Json tests** — `tests/test_json_standalone.cs` `Main` called test methods that didn't exist, so the documented no-deps test path never compiled; it now delegates to `JsonTests.RunAll()`, which exercises the real `src/Json.cs` (22 tests). `Json.cs` no longer references `LLMNPCPlugin` (parse-error logging moved to a pluggable `Json.ErrorLog` sink wired in `Main.cs`)
+- **Inverted test assertion** — `test_json.cs` asserted `Has("x")` should be false (message said "should be true"); corrected
 - **HTTP connection leaks** — `HttpWebRequest.GetRequestStream()` is now always disposed in a `using` block, even when `GetResponse()` throws
 - **Silent exception swallowing** — removed 15+ bare `catch (Exception) { }` blocks across Senses.cs, Movement.cs, Body.cs, Vision.cs, and Tools.cs
 - **Door toggle-fluttering** — `MaybeOpenDoorAhead` cooldown now uses a named constant (`Consts.DoorCooldown`) for clarity

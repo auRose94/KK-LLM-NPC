@@ -96,6 +96,20 @@ namespace KKLLMNPC
         {
             if (_kobold != null && IsAlive(_kobold)) return true;
             if (_kobold != null) TeardownBody(); // possessed body was destroyed
+            if (_everBound)
+            {
+                // We already had a body and it's gone (destroyed / sold / removed).
+                // This instance does NOT re-possess a different kobold — the NPC's
+                // identity dies with its body. The plugin retires us on its next
+                // reconcile pass; a fresh instance starts if a target appears.
+                if (!_bodyLostLogged)
+                {
+                    _bodyLostLogged = true;
+                    Logger.LogInfo("KKLLMNPC: body for '" + (_npcName ?? "?") + "' was destroyed/sold/lost — instance will be removed.");
+                }
+                BodyLost = true;
+                return false;
+            }
             try
             {
                 var playerPos = Vector3.zero;
@@ -123,12 +137,25 @@ namespace KKLLMNPC
                 }
                 if (best == null)
                 {
-                    Logger.LogInfo($"KKLLMNPC: no AI kobold found (total={total} ai={ai} claimed={claimed} player={playerControlled}).");
+                    // Throttled: this runs every tick of every unbound instance — without
+                    // a limit it floods the log while the pool waits for a target.
+                    if (Time.unscaledTime - _lastNoBodyLog > 10f)
+                    {
+                        _lastNoBodyLog = Time.unscaledTime;
+                        Logger.LogInfo($"KKLLMNPC: no AI kobold found (total={total} ai={ai} claimed={claimed} player={playerControlled}).");
+                    }
                     return false;
                 }
                 if (bestD > _cfgAutoFindRange.Value)
                     Logger.LogInfo($"KKLLMNPC: nearest AI kobold is {F(bestD)}m (AutoFindRange={_cfgAutoFindRange.Value}m) — possessing anyway.");
                 Possess(best);
+                if (!ReferenceEquals(_kobold, best))
+                {
+                    // Lost the claim race to another instance (or the body died between
+                    // selection and possession) — don't pretend we have a body.
+                    Logger.LogInfo("KKLLMNPC: claim lost (another instance took '" + best.name + "').");
+                    return false;
+                }
                 return true;
             }
             catch (Exception e) { Logger.LogError("EnsureBody: " + e); return false; }
@@ -160,10 +187,18 @@ namespace KKLLMNPC
         {
             _kobold = target;
             _currentKoboldId = target.GetInstanceID();
+            _everBound = true;
             if (!reuseIdentity)
             {
                 _npcName = PickName(target);   // default: use prefab name
                 _persona = BuildPersona();     // personality + gender + pronouns from the body
+                // "Awake" moment: mark the chat log so we only read what happens from now
+                // on — not the conversation other players had before this NPC existed.
+                try { _chatBaseline = CheatsProcessor.GetOutput() ?? ""; } catch (Exception) { _chatBaseline = ""; }
+                // If the room-identity feature is enabled and we're in a room, bring up the
+                // NPC's own Photon identity early so it's joined before the NPC starts talking.
+                // No-op unless Multiplayer.IdentityBot is on and we're in a room.
+                try { EnsureIdentityBot(); } catch (Exception) { }
 
                 // Ask the LLM to choose a fitting name based on the body's traits.
                 if (_cfgNameSelection != null && _cfgNameSelection.Value && _persona != null)
@@ -917,7 +952,9 @@ namespace KKLLMNPC
         }
 
         // Name a penetration partner: the owning kobold's clean name if it's a kobold,
-        // else fall back to the appendage/hole name we already recorded.
+        // else fall back to the appendage/hole name we already recorded. If the partner
+        // is the human player's avatar (a mesh-named body, e.g. "AbsolB"), name them by
+        // their chat name so the model doesn't treat the player as a separate kobold.
         private string PartnerName(Transform src, string fallback)
         {
             try
@@ -925,6 +962,11 @@ namespace KKLLMNPC
                 if (src == null) return fallback;
                 var kb = src.GetComponentInParent<Kobold>();
                 if (kb == null) return fallback;
+                if (IsPlayerKobold(kb))
+                {
+                    string chat = PlayerChatName();
+                    return !string.IsNullOrEmpty(chat) ? chat + " (the player)" : "the player";
+                }
                 return CleanName(kb.name);
             }
             catch (Exception) { return fallback; }

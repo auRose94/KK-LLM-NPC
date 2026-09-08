@@ -35,6 +35,7 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgModel;
         internal ConfigEntry<string> _cfgApiKey;
         internal ConfigEntry<string> _cfgSystem;
+        internal ConfigEntry<string> _cfgSystemPromptFile;
         internal ConfigEntry<float> _cfgThinkInterval;
         internal ConfigEntry<bool> _cfgSendImage;
         internal ConfigEntry<int> _cfgImageEvery;
@@ -84,10 +85,27 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgModelTier;
         internal ConfigEntry<bool> _cfgAutoSwitch;
         internal ConfigEntry<bool> _cfgNameSelection;
+        internal ConfigEntry<int> _cfgFactDecay;
+        internal ConfigEntry<bool> _cfgIdentityBot;
+        internal ConfigEntry<string> _cfgIdentityAppId;
 
         // ---- runtime state ----
         private Thread _llmThread;
         private volatile bool _running;
+
+        // Lifecycle: Time.unscaledTime when the plugin created this instance (the
+        // pool reconciler uses it to retire unbound instances that never found a
+        // target). Set from the constructor (main thread).
+        internal float CreationTime;
+        // True once this instance has possessed a body. After that, losing the body
+        // (destroyed/sold/removed) retires the instance instead of re-possessing a
+        // different kobold — the identity dies with the body.
+        private bool _everBound;
+        internal bool EverBound => _everBound;
+        // Set when a bound body is gone (or we left the world): the plugin's
+        // reconciler retires this instance on its next pass.
+        internal volatile bool BodyLost;
+        private bool _bodyLostLogged;
 
         // The possessed body + its drivable parts.
         private int _currentKoboldId = -1;
@@ -104,6 +122,7 @@ namespace KKLLMNPC
         private PhotonView _photonView;
         private float _lastOwnershipTry;
         private float _lastRelaunchTry;
+        private float _lastNoBodyLog = -99f;
 
         // Current go_to destination.
         private Vector3? _navTarget;
@@ -139,6 +158,15 @@ namespace KKLLMNPC
         private string _playerChat;
         private float _playerChatTime;
         private string _lastDeliveredChat;
+        // The game chat log as it read at the moment this NPC acquired its body ("awoke").
+        // chat_log only ever feeds lines added AFTER this point, so the NPC doesn't
+        // "read" the conversation that happened before it existed.
+        private string _chatBaseline;
+        // Repeat suppression for say: small models emit the exact same line several
+        // turns in a row, spamming the in-game chat window with duplicates.
+        private string _lastSayText;
+        private float _lastSayTime = -99f;
+        private readonly object _sayLock = new object();
 
         // Reagent / belly awareness.
         private readonly Queue<string> _reagentEvents = new Queue<string>();
@@ -152,8 +180,12 @@ namespace KKLLMNPC
         private readonly LinkedList<string> _thoughtHistory = new LinkedList<string>();
         private const int ThoughtHistoryLen = 6;
 
-        // Long-term facts.
-        private readonly List<string> _facts = new List<string>();
+        // Long-term facts. Each fact carries the tick it was (re)remembered so we can
+        // decay stale ones — the "forgetting" half of memory. Re-remembering a fact
+        // (same category prefix) refreshes its age, so important facts the model keeps
+        // asserting naturally outlive scratch notes.
+        private sealed class FactRec { public string Text; public int Tick; }
+        private readonly List<FactRec> _facts = new List<FactRec>();
         private const int FactCap = 24;
 
         // Penetration awareness.
@@ -187,6 +219,10 @@ namespace KKLLMNPC
 
         // Dynamic context manager — tracks token pressure and applies compaction.
         private ContextManager _ctxMgr;
+
+        // Optional second Photon client that gives the NPC its own room identity
+        // (Multiplayer.IdentityBot, opt-in). Null until first needed.
+        private NpcIdentityBot _identityBot;
 
         // Movement (LLM thread writes, FixedUpdate applies).
         private float _moveLocalZ;
@@ -338,12 +374,14 @@ namespace KKLLMNPC
             if (plugin == null) throw new ArgumentNullException(nameof(plugin));
             Plugin = plugin;
             Logger = plugin.Logger;
+            try { CreationTime = Time.unscaledTime; } catch (Exception) { CreationTime = 0f; }
 
             // Copy config entries so existing field-name references in partial class files just work.
             _cfgEndpoint = plugin._cfgEndpoint;
             _cfgModel = plugin._cfgModel;
             _cfgApiKey = plugin._cfgApiKey;
             _cfgSystem = plugin._cfgSystem;
+            _cfgSystemPromptFile = plugin._cfgSystemPromptFile;
             _cfgThinkInterval = plugin._cfgThinkInterval;
             _cfgSendImage = plugin._cfgSendImage;
             _cfgImageEvery = plugin._cfgImageEvery;
@@ -393,6 +431,9 @@ namespace KKLLMNPC
             _cfgModelTier = plugin._cfgModelTier;
             _cfgAutoSwitch = plugin._cfgAutoSwitch;
             _cfgNameSelection = plugin._cfgNameSelection;
+            _cfgFactDecay = plugin._cfgFactDecay;
+            _cfgIdentityBot = plugin._cfgIdentityBot;
+            _cfgIdentityAppId = plugin._cfgIdentityAppId;
         }
 
         // ------------------------------------------------------------------
@@ -411,6 +452,7 @@ namespace KKLLMNPC
         internal void Stop()
         {
             _running = false;
+            try { StopIdentityBot(); } catch (Exception) { }
             try { TeardownBody(); } catch (Exception) { }
             try { CleanupVisionResources(); } catch (Exception) { }
             try
@@ -425,7 +467,22 @@ namespace KKLLMNPC
                     }
                 }
             }
-            catch (Exception) { }
+             catch (Exception) { }
+            _llmThread = null;
+        }
+
+        // Retire this instance (its body was destroyed/sold/lost, or it never found
+        // one). Like Stop() but WITHOUT joining the LLM thread: the reconciler calls
+        // this from the main thread, and the LLM thread may be parked in a
+        // RunOnMainThread call that can only complete after this returns — joining
+        // it here would deadlock. The loop notices _running==false and exits on its
+        // own (it's a background thread; the object is dropped afterwards).
+        internal void Shutdown()
+        {
+            _running = false;
+            try { StopIdentityBot(); } catch (Exception) { }
+            try { TeardownBody(); } catch (Exception) { }
+            try { CleanupVisionResources(); } catch (Exception) { }
             _llmThread = null;
         }
 
@@ -575,7 +632,13 @@ namespace KKLLMNPC
             lock (_thoughtHistory) { _thoughtHistory.Clear(); }
             lock (_facts) { _facts.Clear(); }
             _lastThought = "just woke up"; _lastAction = "none"; _tick = 0; _blockedInfo = null; _modelError = null;
-            _playerChat = null; _lastDeliveredChat = null;
+            _playerChat = null; _lastDeliveredChat = null; _chatBaseline = null;
+            BodyLost = false; _bodyLostLogged = false;
+            lock (_goalLock)
+            {
+                _goal = null; _goalTick = -1; _goalRepeats = 0; _goalProgress = "";
+                _recentlyDropped.Clear(); _lastThoughtText = null; _thoughtRepeat = 0;
+            }
             _stationPurpose = null; _stationEntryThought = null; _stationEntryTime = 0f; _stayInStation = false;
             _targetIdByInst.Clear();
             _targetRefByInst.Clear();
@@ -584,7 +647,47 @@ namespace KKLLMNPC
             _lastBellySummary = "";
             _cachedPerception = null;
             _lastFullPerceptionTick = -999;
+            // World reload may mean a new room — drop the identity bot so it re-joins fresh.
+            if (_identityBot != null) { try { _identityBot.Stop(); } catch (Exception) { } _identityBot = null; }
             try { Logger.LogInfo("KKLLMNPC: world reloaded — cleared NPC logs/memory."); } catch (Exception) { }
+        }
+
+        // ------------------------------------------------------------------
+        // NPC room identity (opt-in): lazily bring up the second Photon client so the
+        // NPC's chat is attributed to the NPC, not the owner. No-op unless enabled and
+        // the game is in a room.
+        // ------------------------------------------------------------------
+        internal void EnsureIdentityBot()
+        {
+            if (_cfgIdentityBot == null || !_cfgIdentityBot.Value) return;
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
+                string roomName = PhotonNetwork.CurrentRoom.Name;
+                if (string.IsNullOrEmpty(roomName)) return;
+                if (_identityBot != null)
+                {
+                    if (_identityBot.RoomName != roomName)
+                    {
+                        // Room changed (rejoin / new room) — the bot is bound to a stale room;
+                        // restart it fresh instead of letting it keep chatting into the old one.
+                        try { _identityBot.Stop(); } catch (Exception) { }
+                        _identityBot = null;
+                    }
+                    else if (_identityBot.InRoom) return; // healthy for this room
+                }
+                if (_identityBot == null) _identityBot = new NpcIdentityBot(this);
+                _identityBot.EnsureStarted(roomName, MyName());
+            }
+            catch (Exception e) { try { Logger.LogWarning("identity bot: " + e.Message); } catch (Exception) { } }
+        }
+
+        // Stop the identity bot (teardown). Safe to call repeatedly.
+        internal void StopIdentityBot()
+        {
+            if (_identityBot == null) return;
+            try { _identityBot.Stop(); } catch (Exception) { }
+            _identityBot = null;
         }
 
         // ------------------------------------------------------------------
@@ -766,25 +869,39 @@ namespace KKLLMNPC
 
         private string FactsJson()
         {
+            // Decay window in ticks (0 = off). Stale facts that the model hasn't
+            // re-asserted fall out of context, so finished business stops lingering.
+            int decay = _cfgFactDecay != null ? _cfgFactDecay.Value : 0;
             lock (_facts)
             {
+                // Age out stale facts first (forgetting), then cap by recency.
+                if (decay > 0)
+                {
+                    for (int i = _facts.Count - 1; i >= 0; i--)
+                        if (_tick - _facts[i].Tick > decay) _facts.RemoveAt(i);
+                }
                 if (_facts.Count == 0) return "[]";
                 int cap = MaxFacts;
                 // At compaction level 3+, merge facts with the same category prefix.
-                List<string> source = _facts;
+                List<FactRec> source = _facts;
                 if (_ctxMgr != null && _ctxMgr.CompactionLevel >= 3)
-                    source = ContextManager.MergeFacts(_facts);
-                // Take the most recent `cap` facts.
+                {
+                    var mergedTexts = ContextManager.MergeFacts(_facts.ConvertAll(f => f.Text));
+                    source = new List<FactRec>();
+                    for (int i = 0; i < mergedTexts.Count; i++)
+                        source.Add(new FactRec { Text = mergedTexts[i], Tick = _tick });
+                }
+                // Most recent first, take `cap`.
+                var ordered = new List<FactRec>(source);
+                ordered.Sort((a, b) => b.Tick.CompareTo(a.Tick));
+                if (ordered.Count > cap) ordered = ordered.GetRange(0, cap);
                 var sb = new StringBuilder("[");
                 bool first = true;
-                int skip = Math.Max(0, source.Count - cap);
-                int i = 0;
-                foreach (var f in source)
+                foreach (var f in ordered)
                 {
-                    if (i++ < skip) continue;
                     if (!first) sb.Append(',');
                     first = false;
-                    sb.Append(Json.Write(f));
+                    sb.Append(Json.Write(f.Text));
                 }
                 sb.Append(']');
                 return sb.ToString();
@@ -797,13 +914,21 @@ namespace KKLLMNPC
             string f = Sanitize(fact.Trim());
             lock (_facts)
             {
-                // Deduplicate: replace if same prefix (category) already known.
+                // Deduplicate: replace if same prefix (category) already known, and
+                // refresh its age so an actively-used fact doesn't decay out.
                 string prefix = f.Split(':')[0];
                 for (int i = 0; i < _facts.Count; i++)
-                    if (_facts[i].Split(':')[0] == prefix) { _facts[i] = f; return; }
-                _facts.Add(f);
-                // Hard cap — but prefer keeping recent facts over old ones.
-                while (_facts.Count > FactCap) _facts.RemoveAt(0);
+                    if (_facts[i].Text.Split(':')[0] == prefix)
+                    { _facts[i].Text = f; _facts[i].Tick = _tick; return; }
+                _facts.Add(new FactRec { Text = f, Tick = _tick });
+                // Hard cap — evict the OLDEST (by age) so recents survive.
+                while (_facts.Count > FactCap)
+                {
+                    int oldest = 0;
+                    for (int i = 1; i < _facts.Count; i++)
+                        if (_facts[i].Tick < _facts[oldest].Tick) oldest = i;
+                    _facts.RemoveAt(oldest);
+                }
             }
         }
 

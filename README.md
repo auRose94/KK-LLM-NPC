@@ -25,12 +25,15 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 - **State** — in-station, being penetrated (depth/hole/thrust per penetrator), penetrating someone.
 - **Reagent events** — drank/sprayed/metabolized ("drank Water 5ml") when the belly changes.
 - **Player chat** — what you typed into the game chat; it answers.
-- **History** — its last 10 actions with outcomes, recent goals, and a growing `facts` list it can extend via `remember`.
+- **History** — its last 10 actions with outcomes, recent goals, and a `facts` list it extends via
+  `remember` and prunes via `forget` (stale facts also decay out over time).
 
 It then emits one structured `act` per tick (via JSON-schema response_format; works on any
 model, not just tool-calling ones), with an optional `plan[]` to chain up to 8 steps:
 `walk` / `walk_ray` / `go_to` (name → closest matching station!) / `jump` / `look` /
-`look_around` / `interact` / `crouch` / `grab` / `drop` / `say` / `ask` / `interact` / `exit_station`.
+`look_around` / `interact` / `crouch` / `grab` / `drop` / `say` / `ask` / `interact` / `exit_station`,
+plus the goal machine: `set_goal` / `complete_goal` / `drop_goal` (one persistent goal,
+not re-derived each turn) and `forget` (drop a fact from memory).
 
 Two NPCs in the same game see each other as regular `kobold`s in `nearby` and react to
 each other's chat bubbles.
@@ -48,9 +51,18 @@ each other's chat bubbles.
 - **Body awareness** — knows which station it can use (`interact` reports `cannot_use` with reason),
   locks gaze on its partner during intimacy, moans on stimulation, gets out of stations via
   `jump` / `exit_station` (the game's own "cancel" path).
-- **Reagent/egg awareness** — detects drinks, sprays, pumps, and egg readiness; seeks a nest to lay.
-- **Asks itself questions** (`ask` tool) — answers land next tick and auto-remember as facts.
-- **Distinct name per body** (from the kobold's own name + instance suffix), says it in chat.
+ - **Reagent/egg awareness** — detects drinks, sprays, pumps, and egg readiness; seeks a nest to lay.
+ - **Asks itself questions** (`ask` tool) — answers land next tick and auto-remember as facts.
+ - **Persistent goal** (`set_goal` / `complete_goal` / `drop_goal`) — one stored goal drives every
+   tick instead of re-deliberating; a repetition guard nudges it out of stuck loops, and finishing
+   a goal sheds its scratch facts.
+ - **Forgetting** — stale facts decay out of context (`FactDecayTicks`) and `forget` drops them on
+   demand, so finished business stops lingering.
+ - **Hears only post-spawn chat** — a baseline is captured when the NPC wakes, so it never
+   "reads" the conversation other players had before it existed.
+ - **Distinct name per body** (from the kobold's own name + instance suffix), says it in chat.
+ - **Attributed chat** (opt-in) — a second Photon client makes its chat render as `KoboldName: text`
+   to everyone, not attributed to the plugin owner.
 
 ```bash
 ./build.sh 
@@ -70,7 +82,8 @@ Drop `KKLLMNPC.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
 | `Endpoint` | `http://127.0.0.1:11434/v1/chat/completions` | OpenAI-compatible chat completions URL |
 | `Model` | `local-model` | model name |
 | `ApiKey` | empty | bearer token |
-| `SystemPrompt` | built-in | persona; blank = use built-in |
+| `SystemPrompt` | built-in | persona; a customized value always wins |
+| `SystemPromptFile` | `system_prompt_default.txt` | path to a full system prompt (game dir, plugin dir, or CWD). Overrides the built-in unless `SystemPrompt` is customized; ships in this repo |
 | `ThinkInterval` | 0.4 | seconds between ticks |
 | `MaxTokens` | 640 | response cap (reasoning models need the headroom) |
 | `Temperature` | 0.3 | sampler temp |
@@ -145,6 +158,19 @@ All blank = use `[LLM]` config.
 | --- | --- | --- | --- |
 | `HornyClimbPerMin` | 5 | 0–60/min | Slow-burn horniness rise rate per minute |
 | `HornyBaseline` | 0.08 | 0–1 | Starting horniness when the NPC takes a body |
+
+### `[Memory]` — facts & forgetting
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `FactDecayTicks` | 900 | Ticks before a fact decays out of context if not re-asserted (0 = never decay). Re-`remember`ing a fact refreshes its age, so actively-used facts outlive scratch notes. |
+
+### `[Multiplayer]` — NPC room identity
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `IdentityBot` | false | Run a second Photon client in the room under the NPC's own name so its chat renders as `KoboldName: text` to everyone (opt-in: adds a room player, may affect player count / host logic). Off = chat is owner-attributed. |
+| `IdentityAppId` | blank | Photon AppId for the identity bot. Blank = reuse the game's own AppId (recommended). |
 
 ### `[General]` — global
 

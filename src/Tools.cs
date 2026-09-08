@@ -403,6 +403,44 @@ namespace KKLLMNPC
             return new { ok = true, remembered = fact.Trim(), facts = _facts.Count };
         }
 
+        // Forget a fact: drop the fact whose category prefix (or text) matches. This is the
+        // explicit half of forgetting — the model decides something is no longer relevant.
+        // Accepts a category ("map"), a full fact, or a substring.
+        private object ToolForget(JsonObj p)
+        {
+            string what = p.S("mem", p.S("fact", p.S("what", "")));
+            if (string.IsNullOrWhiteSpace(what))
+            {
+                // No argument: forget the oldest scratch fact (least useful).
+                lock (_facts)
+                {
+                    if (_facts.Count == 0) return new { ok = false, reason = "no_facts" };
+                    int oldest = 0;
+                    for (int i = 1; i < _facts.Count; i++)
+                        if (_facts[i].Tick < _facts[oldest].Tick) oldest = i;
+                    string oldestText = _facts[oldest].Text;
+                    _facts.RemoveAt(oldest);
+                    PushHistory("forget", oldestText);
+                    return new { ok = true, forgotten = oldestText, facts = _facts.Count };
+                }
+            }
+            what = what.Trim();
+            int removedCount = 0;
+            var removed = new List<string>();
+            lock (_facts)
+            {
+                for (int i = _facts.Count - 1; i >= 0; i--)
+                {
+                    string f = _facts[i].Text;
+                    if (f == what || f.Split(':')[0] == what || f.IndexOf(what, StringComparison.OrdinalIgnoreCase) >= 0)
+                    { removed.Add(f); _facts.RemoveAt(i); removedCount++; }
+                }
+            }
+            if (removedCount == 0) return new { ok = false, reason = "not_found", tried = what };
+            PushHistory("forget", removed[0] + (removedCount > 1 ? " +" + (removedCount - 1) : ""));
+            return new { ok = true, forgotten = removed[0], count = removedCount, facts = _facts.Count };
+        }
+
         private object ToolStop()
         {
             StopMove();

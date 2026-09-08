@@ -73,6 +73,9 @@ if [ "$COMPILER" = "mcs" ]; then
       -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
       -r:"$MGMT/KoboldKare.ISavable.dll"
     cp KKLLMNPC.dll "$KDIR/BepInEx/plugins/KKLLMNPC.dll"
+    # Ship the system-prompt file next to the DLL (LLM.SystemPromptFile default is
+    # resolved relative to the plugin dir). Optional — built-in prompt is the fallback.
+    [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
     printf 'Built with mcs and deployed %s\n' "$KDIR/BepInEx/plugins/KKLLMNPC.dll"
 elif [ "$COMPILER" = "dotnet" ]; then
     # .NET SDK path — requires a .csproj (create one if missing)
@@ -112,6 +115,7 @@ PROJ
         echo "Created KKLLMNPC.csproj (edit to match your assembly paths)."
     fi
     dotnet build -c Release -o "$KDIR/BepInEx/plugins/"
+    [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
     echo "Built with dotnet and deployed to $KDIR/BepInEx/plugins/"
 else
     echo "ERROR: Unknown compiler '$COMPILER'" >&2
