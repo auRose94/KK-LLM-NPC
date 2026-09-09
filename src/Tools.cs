@@ -26,30 +26,26 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // tool commands (invoked via the LLM tool-call loop)
         // ------------------------------------------------------------------
-        private object ToolMoveTo(JsonObj p)
-        {
-            if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
-            float x = p.F("x"), y = p.F("y"), z = p.F("z");
-            Vector3 target = new Vector3(x, y, z);
-            Vector3 toT = target - _kobold.transform.position;
-            float dist = toT.magnitude;
-            // Set nav target — FixedUpdateSafe handles smooth turning and arrival braking.
-            _navTarget = target;
-            _navTargetName = null;
-            float dur = Mathf.Clamp(dist / 2f, 0.3f, 8f);
-            SetMove(1f, 0f, false, 0f, dur, p.B("run", false));
-            return new { ok = true, dist = F(dist), walked_for = F(dur) };
-        }
-
+        // One movement primitive besides go_to: a bounded burst in the body's current
+        // heading — nudges, squeezes, strafes, and the jump (which also exits a
+        // station, the way the old standalone jump tool did). Long travel is go_to.
         private object ToolWalk(JsonObj p)
         {
             float speed = p.F("speed", 1f);
-            float strafe = p.F("strafe", 0f);         // NEW: right=+/left=-, -1..1
+            float strafe = p.F("strafe", 0f);         // right=+/left=-, -1..1
             bool jump = p.B("jump", false);
             float turn = p.F("turn_deg", 0f);
+            // walk_ray leftovers: ray_deg is a camera-relative heading delta.
+            float rd = p.F("ray_deg", float.NaN);
+            if (!float.IsNaN(rd)) turn += Mathf.Clamp(rd, -180f, 180f);
             // Default a 2s burst so a forgotten duration can't make it walk forever.
             float dur = Mathf.Clamp(p.F("duration", 2f), 0.1f, 8f);
             bool run = p.B("run", false); // default: walk
+            // Jump out of a station first — jumping is how players get out.
+            if (jump && IsInAnimationStation())
+            {
+                try { ToolExitStation(); } catch (Exception) { }
+            }
             if (_photonView != null && !_photonView.IsMine && PhotonNetwork.InRoom)
             {
                 try
@@ -66,38 +62,30 @@ namespace KKLLMNPC
             return new { ok = true, speed, jump, turn_deg = turn, duration = dur, run };
         }
 
-        // Steer+walk toward one of the raycast fan directions the model can see.
-        // The rays share the vision camera's yaw basis, so a ray index (or signed
-        // degrees left/right of center) maps directly onto a camera-relative heading.
-        // Camera-relative steering: pick one of the raycast fan rays by index (left→right
-        // -1=center) or signed degrees left/right of camera center, and walk there.
-        private object ToolWalkRay(JsonObj p)
+        // FOLLOW MODE: the body stays within a band of the host player (steering is
+        // driven in FixedUpdateSafe) while the model keeps thinking/talking/acting.
+        // follow(on:false) releases it to free movement.
+        private object ToolFollow(JsonObj p)
         {
-            float speed = p.F("speed", 1f);
-            float dur = Mathf.Clamp(p.F("duration", 2f), 0.1f, 8f);
-            bool jump = p.B("jump", false);
-            bool run = p.B("run", false); // default: walk
-            float yawOut;
-            lock (_stateLock)
+            bool on = p.Has("on") ? p.B("on", true) : p.B("follow", true);
+            _followMode = on;
+            if (on)
             {
-                float deltaDeg = 0f;
-                float rd = p.F("ray_deg", float.NaN);
-                if (!float.IsNaN(rd)) deltaDeg = Mathf.Clamp(rd, -90f, 90f);
-                else
+                // Following means leaving whatever station we're locked in.
+                if (IsInAnimationStation())
                 {
-                    float idx = p.F("ray", -1f);
-                    int n = Mathf.Max(2, _cfgRayCount.Value);
-                    float fov = _cam != null ? _cam.fieldOfView : 90f;
-                    if (idx < 0f) idx = (n - 1) * 0.5f; // center
-                    float t = Mathf.Clamp(idx, 0f, n - 1) / (n - 1);
-                    deltaDeg = Mathf.Lerp(-fov * 0.5f, fov * 0.5f, t);
+                    try { ToolExitStation(); } catch (Exception) { }
                 }
-                // Rays inherit camera pitch+yaw; we steer the whole body to that yaw.
-                _yawDeg = Mathf.Repeat(_yawDeg + deltaDeg, 360f); // immediate for scan — no smooth needed
-                yawOut = _yawDeg;
+                _followLastPath = -99f;
             }
-            SetMove(speed, p.F("strafe", 0f), jump, 0f, dur, run);
-            return new { ok = true, yaw = F(yawOut), dur = F(dur), run };
+            else
+            {
+                StopMove();
+                lock (_stateLock) { _path = null; _pathIdx = 0; _pathGoalSet = false; }
+            }
+            Logger.LogInfo("[" + MyName() + "] follow mode " + (on ? "ON (staying near the player)" : "off"));
+            return new { ok = true, follow = on,
+                note = on ? "you now stay near the player while you keep acting; call follow(on:false) when done" : "follow off — free movement again" };
         }
 
         private object ToolLookAround(JsonObj p)
@@ -280,9 +268,25 @@ namespace KKLLMNPC
 
             // No chasing phantom targets across a huge map: beyond our reachable
             // A* window a straight-line/wall-grind "walk" is worse than a refusal.
-            float maxReach = (_cfgPathSpan != null ? _cfgPathSpan.Value : 20f) * 2f + 30f;
+            // With the shared full-scene map ready (and both points in bounds) the
+            // whole scene is routable — stairs, ramps, other floors included.
+            bool mapCovers = false;
+            try { mapCovers = WorldMap.Ready && WorldMap.InBounds(_kobold.transform.position) && WorldMap.InBounds(target); } catch (Exception) { }
+            float maxReach = mapCovers ? 99999f : (_cfgPathSpan != null ? _cfgPathSpan.Value : 20f) * 2f + 30f;
             if (fullDist > maxReach + at)
                 return new { ok = false, reason = "too_far", name = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), note = "in range of ~" + F(maxReach) + "m only — pick something from 'nearby'/'survey' or ask the player to take you" };
+
+            // Nest gate: a nest physically can't be used until the belly is full
+            // (OvipositionSpot rule: egg > 5ml). The model used to camp nests with
+            // an empty belly — hard-refuse the travel itself, not just the interact.
+            string destCls = ClassifyUsable(name).ToLowerInvariant();
+            if (destCls == "nest")
+            {
+                bool ready = true; float vol = 0f;
+                try { vol = GetEggVolume(_kobold); ready = IsReadyToLayEgg(_kobold); } catch (Exception) { }
+                if (!ready)
+                    return new { ok = false, reason = "belly_not_full", name = _navTargetName, id = hasId ? p.S("id") : (object)null, dist = F(fullDist), eggs = F(vol), note = "a nest WON'T work with a belly of " + F(vol) + "ml (needs >5ml). Do NOT seek a nest until needs.eggs says READY_TO_LAY — play, explore or keep company instead" };
+            }
             float stopAt = Mathf.Max(0f, fullDist - at);
             float yaw = Mathf.Atan2(to.x, to.z) * 57.29578f;
             lock (_stateLock) { _yawDeg = yaw; }
@@ -290,7 +294,7 @@ namespace KKLLMNPC
             {
                 var arrive = _kobold.transform.position + to.normalized * stopAt;
                 List<Vector3> path = null;
-                if (_cfgPathEnabled.Value && stopAt > 1.5f)
+                if (stopAt > 1.5f)
                 {
                     // Reuse an active path to ~the same place instead of replanning
                     // every think tick (planning is physics-heavy, main-thread).
@@ -315,11 +319,20 @@ namespace KKLLMNPC
                         SetMove(1f, 0f, false, 0f, Mathf.Clamp(stopAt / 2f, 0.3f, 12f), p.B("run", false));
                         return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "continuing path; re-issue go_to to replan" };
                     }
-                    try
+                    // 1) Shared full-scene map: routes the WHOLE scene (stairs, ramps,
+                    //    stacked floors, any distance in bounds) — the fix for stations
+                    //    that are "too far" for the local window grid.
+                    if (WorldMap.Ready)
                     {
-                        path = (List<Vector3>)RunOnMainThread(() => FindPath(_kobold.transform.position, arrive), 8000);
+                        try { path = (List<Vector3>)RunOnMainThread(() => WorldMap.FindPathSmoothed(_kobold.transform.position, arrive), 20000); }
+                        catch (Exception e) { Logger.LogWarning("world-map path: " + e.Message); }
                     }
-                    catch (Exception e) { Logger.LogWarning("pathfind: " + e.Message); }
+                    // 2) Local window A* (map building, or points outside map bounds).
+                    if (path == null && _cfgPathEnabled.Value)
+                    {
+                        try { path = (List<Vector3>)RunOnMainThread(() => FindPath(_kobold.transform.position, arrive), 12000); }
+                        catch (Exception e) { Logger.LogWarning("pathfind: " + e.Message); }
+                    }
                 }
                 if (path != null && path.Count >= 2)
                 {
@@ -353,7 +366,7 @@ namespace KKLLMNPC
         {
             if (!IsAlive(_kobold)) return null;
             string needle = name.ToLowerInvariant();
-            // The player.
+            // The host player.
             if (needle.Contains("player") || needle.Contains("me") || needle.Contains("you"))
             {
                 try
@@ -363,6 +376,25 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
             }
+            // Another player by their chat name (or their avatar mesh name) — resolves
+            // to their kobold body, so go_to(name='Yipper') reaches that player.
+            try
+            {
+                object at = RunOnMainThread(() =>
+                {
+                    foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                    {
+                        if (k == null || k == _kobold) continue;
+                        string nick = KoboldOwnerNick(k);
+                        if (nick == null) continue;
+                        if (nick.ToLowerInvariant() == needle || CleanName(k.name).ToLowerInvariant() == needle)
+                            return k.transform.position;
+                    }
+                    return null;
+                }, 5000);
+                if (at != null) return (Vector3)at;
+            }
+            catch (Exception) { }
             // Best matching GenericUsable (bed/toilet/tub/seat/door/swap...) in range.
             GenericUsable best = null; float bestD = float.MaxValue;
             try
@@ -490,15 +522,19 @@ namespace KKLLMNPC
             return new { ok = true, yaw = F(_yawDeg), pitch = F(_pitchDeg) };
         }
 
+        // Legacy alias: jump is now a parameter of walk (the model-facing tool set is
+        // go_to + walk + stop — one way to travel, one way to nudge).
         private object ToolJump()
         {
             // If locked in an animation station, jumping is how players get out —
             // do that first so "jump" behaves the way the model/player expects.
             if (IsInAnimationStation()) return ToolExitStation();
-
-            lock (_stateLock) { _moveJump = true; }
-            RunOnMainThreadAsync(() => { if (_controller != null) _controller.inputJump = true; });
-            return new { ok = true };
+            return ToolWalk(new JsonObj(new Dictionary<string, object>
+            {
+                ["jump"] = true,
+                ["speed"] = 0f,
+                ["duration"] = 0.4f,
+            }));
         }
 
         // Interact with a usable machine/object. The game's User component only
@@ -543,6 +579,16 @@ namespace KKLLMNPC
                 lock (_stateLock) { _yawDeg = Mathf.Repeat(yaw, 360f); _pitchDeg = pitch; }
                 _lastBigTurnTime = Time.unscaledTime; // make next tick attach a fresh image
 
+                // Nest gate (again, at use-time): empty belly can't lay — don't let
+                // the model grind a nest that will refuse it every turn.
+                if (ClassifyUsable(CleanName(target.name)).ToLowerInvariant() == "nest")
+                {
+                    float vol = 0f; bool ready = true;
+                    try { vol = GetEggVolume(_kobold); ready = IsReadyToLayEgg(_kobold); } catch (Exception) { }
+                    if (!ready)
+                        return new { ok = false, reason = "belly_not_full", name = CleanName(target.name), dist = F(dist), eggs = F(vol),
+                            note = "a nest needs a FULL belly (>5ml egg); you have " + F(vol) + "ml — it will not work. Stop seeking nests until needs.eggs says READY_TO_LAY" };
+                }
                 if (!target.CanUse(_kobold)) return new { ok = false, reason = "cannot_use", name = CleanName(target.name), hint = "maybe busy/occupied or wrong state", dist = F(dist) };
                 try { target.LocalUse(_kobold); }
                 catch (Exception e) { Logger.LogWarning("use: " + e.Message); return new { ok = false, reason = "use_failed", name = CleanName(target.name) }; }

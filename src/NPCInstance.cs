@@ -138,6 +138,16 @@ namespace KKLLMNPC
         // (the path is still valid — the body opens it on arrival).
         internal bool _pathDoorBlocked;
 
+        // FOLLOW MODE: stay within a band of the host player while the mind keeps
+        // working. Player can trigger it by saying "follow"; the model can call
+        // follow(on:true/false). Steering lives in FixedUpdateSafe (Movement.cs).
+        internal volatile bool _followMode;
+        internal float _followDist = -1f;
+        internal float _followLastPath = -99f;
+
+        // Set once FinalizeIdentity() has run (LLM-thread name selection + registry).
+        internal bool _identityFinalized;
+
         // Stable per-session ids for nearby targets.
         private readonly Dictionary<int, int> _targetIdByInst = new Dictionary<int, int>();
         private readonly Dictionary<int, WeakReference> _targetRefByInst = new Dictionary<int, WeakReference>();
@@ -605,6 +615,28 @@ namespace KKLLMNPC
                         _stationPurpose = null;
                         _stationEntryThought = null;
                         Logger.LogInfo("[" + MyName() + "] player asked to leave station.");
+                    }
+                }
+
+                // FOLLOW: a state, not a tool call — the body stays near the host
+                // while the model keeps thinking/talking. "follow me to the nest"
+                // (the exact line from the field log) must also work.
+                else if (lower.StartsWith("follow"))
+                {
+                    if (!_followMode)
+                    {
+                        _followMode = true;
+                        _followLastPath = -99f;
+                        Logger.LogInfo("[" + MyName() + "] player said '" + msg.Trim() + "' — follow mode ON (staying near the player)");
+                    }
+                }
+                else if (lower.StartsWith("stop following") || lower.StartsWith("don't follow")
+                    || lower.StartsWith("dont follow") || lower.StartsWith("release") || lower == "free")
+                {
+                    if (_followMode)
+                    {
+                        _followMode = false;
+                        Logger.LogInfo("[" + MyName() + "] player said '" + msg.Trim() + "' — follow mode OFF");
                     }
                 }
             }

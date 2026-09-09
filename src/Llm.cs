@@ -178,25 +178,105 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // Name selection: ask the LLM to pick a fitting name for the body.
         // ------------------------------------------------------------------
+        // MANDATORY identity resolution — runs on the LLM thread (NEVER the main
+        // thread: the HTTP call used to block the 8s main-thread context and starve
+        // the other instances, which is the 'main thread timeout' storm in the
+        // field log). Every tier gets a name (small models included — strict
+        // one-token prompt), the name is unique across agents AND players (same
+        // avatar model used to produce two NPCs with the same prefab name), and
+        // player chat names are reserved first so no NPC can impersonate the host.
+        internal void FinalizeIdentity()
+        {
+            if (_identityFinalized || _kobold == null) return;
+
+            string baseName = MyName();
+            if (string.IsNullOrEmpty(baseName)) return;
+
+            try { NameRegistry.MarkTaken(PlayerChatName()); } catch (Exception) { }
+            try
+            {
+                // Room.Players is Dictionary<int,Player> in this PUN2 build.
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
+                    foreach (var kv in PhotonNetwork.CurrentRoom.Players)
+                        if (kv.Value != null) NameRegistry.MarkTaken(kv.Value.NickName);
+            }
+            catch (Exception) { }
+
+            string finalName = null;
+            if (_cfgNameSelection != null && _cfgNameSelection.Value)
+            {
+                string gender = "unknown";
+                string species = baseName;
+                string traits = "a kobold in a house setting";
+                try
+                {
+                    gender = InferGender();
+                    species = SpeciesForm(baseName);
+                    if (_kobold.bellyContainer != null) traits += " can drink/eat";
+                }
+                catch (Exception) { }
+
+                for (int attempt = 1; attempt <= 3 && finalName == null; attempt++)
+                {
+                    string chosen = null;
+                    try { chosen = ChooseNameWithLLM(gender, species, traits); }
+                    catch (Exception e) { Logger.LogWarning("name selection attempt " + attempt + " failed: " + e.Message); }
+                    if (string.IsNullOrEmpty(chosen)) continue;
+                    if (NameRegistry.TryReserve(chosen))
+                    {
+                        finalName = chosen;
+                        Logger.LogInfo("KKLLMNPC: LLM name accepted: '" + chosen + "'");
+                    }
+                    else
+                        Logger.LogInfo("KKLLMNPC: name '" + chosen + "' already taken by another agent/player — re-rolling");
+                }
+            }
+            if (finalName == null)
+            {
+                string hint = LLMNPCPlugin.InstanceSuffix.Length > 0 ? LLMNPCPlugin.InstanceSuffix : null;
+                finalName = NameRegistry.Unique(baseName, hint);
+                Logger.LogInfo("KKLLMNPC: name selection: unique fallback '" + finalName + "' (LLM unavailable, name collision, or disabled)");
+            }
+
+            if (!string.Equals(finalName, _npcName, StringComparison.Ordinal))
+            {
+                _npcName = finalName;
+                _persona = BuildPersona();
+            }
+            // Identity bot AFTER the final name so chat attribution is right from
+            // the NPC's very first line. Main thread (Photon).
+            try { RunOnMainThread(() => { EnsureIdentityBot(); return true; }, 5000); }
+            catch (Exception e) { Logger.LogWarning("identity bot: " + e.Message); }
+
+            _identityFinalized = true;
+            Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'" + (_persona != null ? " — " + _persona : ""));
+        }
+
         // Sends a one-shot prompt with the body's gender, species, and personality
-        // traits, asks for a single name.  Falls back to the prefab name on failure.
+        // traits, asks for a single name. Runs for EVERY model tier (small models
+        // get a strict one-token prompt) — a name is mandatory before the NPC acts,
+        // and two agents on the same avatar model must never share one. Returns null
+        // when the endpoint fails; the caller re-rolls or falls back to a unique tag.
         internal string ChooseNameWithLLM(string gender, string species, string traits)
         {
-            if (string.IsNullOrEmpty(Val(_cfgEndpoint)) || IsSmallModel)
+            if (string.IsNullOrEmpty(Val(_cfgEndpoint)))
             {
-                // Small models are bad at creative naming — skip the LLM call.
-                Logger.LogInfo("[" + MyName() + "] name selection: skipped (small model or no endpoint)");
+                Logger.LogInfo("[" + MyName() + "] name selection: no endpoint configured — using fallback name");
                 return null;
             }
 
             try
             {
-                string prompt = "You are naming a character in a kobold-themed game. " +
+                // Keep small models honest: one word out, taken names listed so a
+                // second agent on the same model doesn't re-pick its sibling's name.
+                string taken = "";
+                try { taken = NameRegistry.TakenList(); } catch (Exception) { }
+                string prompt = "Name one kobold character. " +
                     "Gender: " + (gender ?? "unknown") + ". " +
                     "Species: " + (species ?? "kobold") + ". " +
                     "Personality: " + (traits ?? "unknown") + ". " +
-                    "Pick ONE short name (2-10 characters, no spaces, no punctuation). " +
-                    "Reply with ONLY the name. Nothing else.";
+                    (taken.Length > 0 ? "These names are TAKEN, do not use them: " + taken + ". " : "") +
+                    "Reply with ONE name only: 2-12 letters or digits, no spaces, no punctuation, no explanation.";
 
                 var payload = new Dictionary<string, object>
                 {
@@ -216,7 +296,7 @@ namespace KKLLMNPC
                 req.ContentType = "application/json";
                 if (!string.IsNullOrEmpty(_cfgApiKey.Value))
                     req.Headers["Authorization"] = "Bearer " + _cfgApiKey.Value;
-                req.Timeout = 15000; req.ReadWriteTimeout = 15000;
+                req.Timeout = 25000; req.ReadWriteTimeout = 25000;
                 byte[] bytes = System.Text.Encoding.UTF8.GetBytes(body);
                 req.ContentLength = bytes.Length;
                 using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
@@ -298,6 +378,12 @@ namespace KKLLMNPC
                         Thread.Sleep(2000);
                         continue;
                     }
+
+                    // Name is MANDATORY before the first act — but resolved HERE on
+                    // this (LLM) thread, never on the main thread (the HTTP call
+                    // used to blow the 8s main-thread context and starve the other
+                    // instances — the 'main thread timeout' storm in the field log).
+                    try { FinalizeIdentity(); } catch (Exception e) { Logger.LogWarning("identity: " + e.Message); }
 
                     if (lastState != "running") { lastState = "running"; Logger.LogInfo("KKLLMNPC: loop active."); }
 
@@ -496,13 +582,16 @@ namespace KKLLMNPC
             string persona = !string.IsNullOrEmpty(_persona) ? "\n" + _persona : "";
             return "You are an NPC in KoboldKare. Reply with ONE JSON object only. No markdown, no prose, no explanation." + vision + persona +
                 "\nJSON shape: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<short>\",\"thought\":\"<next step>\",\"action\":\"<tool>\",...tool params...,\"plan\":[{\"action\":\"...\",...}]}" +
-                "\nTools: go_to(name|id|x,z,at) walk(duration,turn_deg) walk_ray(ray) survey look_around look(yaw,pitch) jump exit_station crouch move_to interact(id) grab drop say remember(mem) forget(mem) set_goal(goal) complete_goal(note) drop_goal(reason) ask(q) status stop none" +
-                "\nRules: progress/why/thought required. action must be a tool name. Use go_to for ALL travel. Use id from nearby for specific objects. Keep plan steps ≤4. 'say' posts to chat." +
+                "\nTools: go_to(name|id,at) walk(duration,turn_deg,jump) follow(on) survey look_around look(yaw,pitch) exit_station crouch interact(id) grab drop say remember(mem) forget(mem) set_goal(goal) complete_goal(note) drop_goal(reason) ask(q) status stop none" +
+                "\nRules: progress/why/thought required. action must be a tool name. Use go_to for ALL travel (it routes 3D: stairs/ramps/floors, whole scene). walk = short nudge only. Use id from nearby for specific objects. Keep plan steps ≤4. 'say' posts to chat." +
                 "\nGOAL: you have ONE stored goal (perception 'goal'). set_goal ONCE, then each turn take the next step; complete_goal when done; drop_goal to abandon. Don't re-declare it. If 'nudge' appears, change what you do." +
-                "\nPriorities: (1) player talked → say, (2) eggs ready → nest, (3) horny → play station, (4) player nearby → walk+say, (5) explore." +
-                "\nPerception has: nearby (objects+ids+dir), rays, ground, area, facts, history, chat_log, goal." +
+                "\nPriorities: (1) player talked → say, (2) needs.eggs says READY_TO_LAY → nest (with an empty belly a nest CANNOT work — never seek one then), (3) horny → play station, (4) player nearby → go_to+say, (5) explore." +
+                "\nStations: play = pleasure ONLY (never sleeping); bed = REST ONLY (never play); nest = eggs ONLY when belly full. 'stations' lists every station in the scene (kind+distance+heading)." +
+                "\nPeople: perception 'player' = YOUR player (chat name). 'people' = OTHER players in the room with chat name + body — talk to them by chat name, and go_to(name) reaches them. Never use a player's name as your own." +
+                "\nFollowing: player asks to follow → follow(on:true) (stay near them, keep acting); follow(on:false) releases." +
+                "\nPerception has: nearby (objects+ids+dir), people, stations, map (building/ready), rays, ground, area, facts, history, chat_log, goal." +
                 "\nIf perception has 'model_error', fix your JSON format. Never repeat the same failed action." +
-                "\nStation rules: When in_station=true, stay unless your NEW goal differs from the station type. Player 'stay' = stay until they say 'leave'." +
+                "\nStation rules: When in_station=true, stay unless your NEW goal differs from the station type. Player 'stay' = stay until they say 'leave'. exit_station or walk(jump) leaves a station." +
                 "\nNearby tags: ':busy'=in use, ':needs_buy'=must buy contract first, ':not_built'=machine not constructed yet, ':done'=already bought." +
                 "\nFood: blenders don't make food from nothing — drop a food item into it. If ':not_built', find its ConstructionContract first." +
                 "\nCompaction: if 'compaction' appears in perception, your context is being compressed — be extra terse, use fewer facts, shorter thoughts.";
@@ -1012,7 +1101,7 @@ namespace KKLLMNPC
                              : null;
                     }
                     // Single action like {"walk": {"speed":1}} — treat first known key as action.
-                    foreach (var k in new[] { "walk", "walk_ray", "go_to", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status" })
+                    foreach (var k in new[] { "go_to", "walk", "follow", "walk_ray", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status" })
                         if (parsed.ContainsKey(k))
                         {
                             var inner = new Dictionary<string, object> { ["action"] = k, ["thought"] = "implicit" };
@@ -1124,7 +1213,7 @@ namespace KKLLMNPC
             // action from a known tool key when no explicit action line was present.
             if (action == null)
             {
-                string[] knownTools = new[] { "say", "go_to", "walk", "walk_ray", "survey", "remember", "ask", "look_around", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "status", "none" };
+                string[] knownTools = new[] { "say", "go_to", "walk", "follow", "walk_ray", "survey", "remember", "ask", "look_around", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "status", "none" };
                 foreach (var k in knownTools)
                 {
                     string v;
@@ -1187,7 +1276,8 @@ namespace KKLLMNPC
             return new JsonObj(d);
         }
 
-        // True if the lowercased string is one of the tools the model can call.
+        // True if the lowercased string is one of the tools the model can call
+        // (legacy aliases jump/move_to/walk_ray included — RunTool maps them).
         private bool IsKnownToolWord(string key)
         {
             switch (key)
@@ -1195,6 +1285,7 @@ namespace KKLLMNPC
                 case "walk":
                 case "walk_ray":
                 case "go_to":
+                case "follow":
                 case "survey":
                 case "stop":
                 case "look":
@@ -1273,12 +1364,16 @@ namespace KKLLMNPC
                 ["mov_to"] = "move_to",
                 ["moveo"] = "move_to",
                 ["look_aound"] = "look_around",
+                ["folow"] = "follow",
+                ["follows"] = "follow",
+                ["folo"] = "follow",
+                ["follw"] = "follow",
             };
             string alias;
             if (aliases.TryGetValue(s, out alias)) return alias;
             // Substring containment: "go" in a blob → go_to, "walk" in a blob → walk, etc.
             // Order matters: check longer matches first to avoid "go" matching before "go_to".
-            string[] ordered = new[] { "complete_goal", "set_goal", "drop_goal", "exit_station", "look_around", "walk_ray", "go_to", "move_to", "interact", "remember", "forget", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
+            string[] ordered = new[] { "complete_goal", "set_goal", "drop_goal", "exit_station", "look_around", "walk_ray", "go_to", "follow", "move_to", "interact", "remember", "forget", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
             foreach (var tool in ordered)
                 if (s.Contains(tool)) return tool;
             // Prefix match: first 3+ chars of a known tool.
@@ -1301,6 +1396,7 @@ namespace KKLLMNPC
                 case "walk":
                 case "walk_ray":
                 case "go_to":
+                case "follow":
                 case "survey":
                 case "stop":
                 case "look":
@@ -1474,7 +1570,7 @@ namespace KKLLMNPC
             if (string.IsNullOrEmpty(text)) return null;
             string lower = text.ToLowerInvariant();
             // Try each known tool and see if it appears in the text with args.
-            string[] tools = new[] { "go_to", "walk_ray", "walk", "survey", "interact", "move_to", "look_around", "look", "remember", "say", "ask", "jump", "exit_station", "crouch", "grab", "drop", "stop", "status", "none" };
+            string[] tools = new[] { "go_to", "walk", "follow", "walk_ray", "survey", "interact", "move_to", "look_around", "look", "remember", "say", "ask", "jump", "exit_station", "crouch", "grab", "drop", "stop", "status", "none" };
             foreach (var tool in tools)
             {
                 // Look for "tool(args...)" pattern.
@@ -1571,8 +1667,9 @@ namespace KKLLMNPC
                 switch (name)
                 {
                     case "walk": return ToolWalk(p);
-                    case "walk_ray": return ToolWalkRay(p);
+                    case "walk_ray": return ToolWalk(p); // legacy alias — walk now takes turn_deg/ray_deg
                     case "go_to": return ToolGoTo(p);
+                    case "follow": return ToolFollow(p);
                     case "survey": return ToolSurvey(p);
                     case "remember": return ToolRemember(p);
                     case "forget": return ToolForget(p);
@@ -1583,10 +1680,10 @@ namespace KKLLMNPC
                     case "look_around": return ToolLookAround(p);
                     case "stop": return ToolStop();
                     case "look": return ToolLook(p);
-                    case "jump": return ToolJump();
+                    case "jump": return ToolJump(); // legacy alias — walk(jump=true)
                     case "exit_station": return ToolExitStation();
                     case "crouch": return ToolCrouch(p);
-                    case "move_to": return ToolMoveTo(p);
+                    case "move_to": return ToolGoTo(p); // legacy alias — go_to plans the route
                     case "interact": return ToolInteract(p);
                     case "grab": return ToolGrab(p);
                     case "drop": return ToolDrop();
@@ -1595,7 +1692,7 @@ namespace KKLLMNPC
                     case "none": return new { ok = true };
                     default:
                         // Model was asked for act= but produced a legacy/unknown name.
-                        SetModelError("Invalid action '" + name + "'. Valid actions: walk, walk_ray, go_to, survey, look_around, look, jump, exit_station, crouch, move_to, interact, grab, drop, say, remember, forget, set_goal, complete_goal, drop_goal, ask, stop, status, none.");
+                        SetModelError("Invalid action '" + name + "'. Valid actions: go_to, walk, follow, stop, survey, look_around, look, exit_station, crouch, interact, grab, drop, say, remember, forget, set_goal, complete_goal, drop_goal, ask, status, none.");
                         Logger.LogWarning("unknown action: " + name);
                         return new { ok = false, reason = "unknown_tool", tool = name };
                 }
@@ -1656,9 +1753,9 @@ namespace KKLLMNPC
                 // ACTION FIRST: reasoning models burn tokens on "thought" and can
                 // truncate before emitting the action. Emitting action (and the
                 // movement/say params) first means even a truncated call still acts.
-                ["action"] = new Dictionary<string, object> { ["type"] = "string", ["enum"] = new object[] { "walk", "walk_ray", "go_to", "survey", "remember", "ask", "look_around", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status", "none" } },
+                ["action"] = new Dictionary<string, object> { ["type"] = "string", ["enum"] = new object[] { "go_to", "walk", "follow", "stop", "survey", "remember", "ask", "look_around", "look", "exit_station", "crouch", "interact", "grab", "drop", "say", "status", "none" } },
                 ["say"] = Str("say", "optional <10 words — posts to the real in-game chat window AND a speech bubble"),
-                ["name"] = Str("name", "go_to: place to reach by name — 'bed' 'toilet' 'bath' 'sex' 'seat' 'door' 'bodyswap' 'player' or any usable's name"),
+                ["name"] = Str("name", "go_to: place to reach by name — 'bed' 'toilet' 'bath' 'nest' 'sex' 'seat' 'door' 'bodyswap', a PLAYER'S chat name (host or from 'people'), or any usable's name"),
                 ["id"] = Num("id", "go_to/interact: the numeric 'id' of a specific object from your 'nearby' or survey result — use this to target an exact object instead of matching by name (e.g. go_to id:3, interact id:2)"),
                 ["at"] = Num("at", "go_to: stop this many meters SHORT of the target (default 1 — so you reach the object, not bump it; 0 = go right up to it)"),
                 ["heading_deg"] = Num("heading_deg", "survey: absolute world yaw to look toward (omit = your current facing)"),
@@ -1669,14 +1766,11 @@ namespace KKLLMNPC
                 ["speed"] = Num("speed", "walk forward -1..1"),
                 ["strafe"] = Num("strafe", "walk sideways: +1=right, -1=left, -1..1 (for tight maneuvers, doorways, squeezing past furniture)"),
                 ["duration"] = Num("duration", "walk: seconds to keep going, 0.1..8 (default 2, then auto-stop)"),
-                ["turn_deg"] = Num("turn_deg", "walk/look deg turn (+right/-left); nearby.dir tells you which way"),
+                ["turn_deg"] = Num("turn_deg", "walk: degrees to turn first (+right/-left); nearby.dir tells you which way"),
+                ["jump"] = Bool("jump", "walk: also jump (hops down ledges / over small gaps; also exits a station if you're in one)"),
+                ["on"] = Bool("on", "follow: true = stay near the host player while you keep acting, false = release"),
                 ["yaw_deg"] = Num("yaw_deg", "look abs yaw"),
                 ["pitch_deg"] = Num("pitch_deg", "look abs pitch"),
-                ["ray"] = Num("ray", "walk_ray: ray index 0..N-1 across your view, or -1=center"),
-                ["ray_deg"] = Num("ray_deg", "walk_ray: signed degrees left(-)/right(+) of camera center"),
-                ["x"] = Num("x", "move_to x"),
-                ["y"] = Num("y", "move_to y"),
-                ["z"] = Num("z", "move_to z"),
                 ["sweep"] = Num("sweep", "look_around: degrees to sweep around (default 120)"),
             };
         }

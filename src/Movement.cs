@@ -224,6 +224,80 @@ namespace KKLLMNPC
             float turn; bool jump; float crouch; float until;
             lock (_stateLock) { turn = _yawOffsetDeg; jump = _moveJump; crouch = _crouch; _yawOffsetDeg = 0f; until = _moveUntilTime; }
 
+            // FOLLOW MODE: stay within a band of the host player while the mind keeps
+            // working — the state the player can request ("follow me") and the model
+            // can call (follow(on:true)). Overrides go_to navigation; speech/look/
+            // interact still work. Re-paths via the shared world map when ready.
+            if (_followMode)
+            {
+                bool haveP = false;
+                Vector3 ppos = Vector3.zero;
+                try
+                {
+                    if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
+                    {
+                        ppos = pp.kobold.transform.position;
+                        haveP = true;
+                    }
+                }
+                catch (Exception) { }
+
+                if (haveP)
+                {
+                    Vector3 toP = ppos - _kobold.transform.position; toP.y = 0f;
+                    float dp = toP.magnitude;
+                    _followDist = dp;
+                    if (dp > 1.8f)
+                    {
+                        bool needPath;
+                        lock (_stateLock)
+                        {
+                            needPath = _path == null || _pathIdx >= _path.Count - 1
+                                || Time.unscaledTime - _followLastPath > 1.5f
+                                || (Vector3.Distance(_pathGoal, new Vector3(ppos.x, 0f, ppos.z)) > 2f);
+                        }
+                        if (needPath && !IsInAnimationStation())
+                        {
+                            List<Vector3> fpath = null;
+                            if (WorldMap.Ready)
+                            {
+                                try { fpath = WorldMap.FindPathSmoothed(_kobold.transform.position, ppos); }
+                                catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
+                            }
+                            if (fpath == null && _cfgPathEnabled.Value)
+                            {
+                                try { fpath = FindPath(_kobold.transform.position, ppos); }
+                                catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
+                            }
+                            lock (_stateLock)
+                            {
+                                if (fpath != null && fpath.Count >= 2)
+                                {
+                                    _path = fpath; _pathIdx = 0;
+                                    _pathGoal = new Vector3(ppos.x, 0f, ppos.z);
+                                    _pathGoalSet = true;
+                                    _followLastPath = Time.unscaledTime;
+                                }
+                                else
+                                {
+                                    _path = null; _pathIdx = 0; _pathGoalSet = false;
+                                    _navTarget = ppos; // straight-line steer fallback
+                                }
+                            }
+                        }
+                    }
+                    else if (dp < 1.0f)
+                    {
+                        StopMove();
+                        lock (_stateLock) { _path = null; _pathIdx = 0; _pathGoalSet = false; }
+                    }
+                }
+                else
+                {
+                    StopMove();
+                }
+            }
+
             // If a go_to target is active, steer toward it; clear it once we're close.
             if (_navTarget.HasValue)
             {
@@ -367,9 +441,10 @@ namespace KKLLMNPC
                         }
                     }
                 }
-                // LEDGE GUARD: only hard-stop on a *big* drop. Small drops (<=1.6m)
-                // are fine to hop down — and if the model is jumping, it's choosing
-                // to go over on purpose. Report the drop height so it can decide.
+                // LEDGE GUARD: only hard-stop on a drop beyond LedgeDropHardStop
+                // (the planner never routes through bigger falls). Drops above
+                // LedgeDropSoftWarning are walkable but reported so the model knows
+                // — and if it's jumping, it's choosing to go over on purpose.
                 if (fwdOut > 0.01f && _blockedInfo == null)
                 {
                     Vector3 aheadDown = _kobold.transform.position + dir * 0.8f + Vector3.up * 0.5f;
@@ -377,13 +452,13 @@ namespace KKLLMNPC
                     float drop = Physics.Raycast(aheadDown, Vector3.down, out lhit, 8f, ~0, QueryTriggerInteraction.Ignore)
                         ? lhit.distance - 0.5f : 8f;
                     _ledgeDrop = drop > 0.5f ? drop : (float?)null; // expose to perception
-                    if (drop > 2.6f && !jump)   // big fall → stop
+                    if (drop > Consts.LedgeDropHardStop && !jump)   // big fall → stop
                     {
                         fwdOut = 0f;
                         _blockedInfo = "big drop ahead (" + F(drop) + "m); stopped";
                         _needImageAfterBump = true;
                     }
-                    else if (drop > 0.7f && drop <= 2.6f && !jump)
+                    else if (drop > Consts.LedgeDropSoftWarning && drop <= Consts.LedgeDropHardStop && !jump)
                         _blockedInfo = "ledge " + F(drop) + "m — you can walk off or jump down";
                     // jump=true or small drop → let it proceed (controller handles fall).
                 }

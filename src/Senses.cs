@@ -217,13 +217,24 @@ namespace KKLLMNPC
             result["ground"] = ground;
             result["clearance"] = clearance;
             result["vis_go"] = _visionSteer != null ? _visionSteer.deg.ToString("0") + "deg (" + _visionSteer.reason + ")" : null;
+            float eggVol = 0f; bool eggReady = false;
+            try { eggVol = GetEggVolume(_kobold); eggReady = IsReadyToLayEgg(_kobold); } catch (Exception) { }
             result["needs"] = new
             {
                 energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
                 horniness = HorninessText(),
-                eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
+                // Egg need is ONLY real when the belly is full (game rule: nest needs
+                // egg > 5ml). With an empty belly the nest can't work — the model used
+                // to chase nests with 0ml, so state it explicitly both ways.
+                eggs = eggReady
+                    ? F(eggVol) + "ml READY_TO_LAY — belly full, find a nest now"
+                    : F(eggVol) + "ml belly not full — a nest WON'T work yet; seek a nest ONLY when it says READY_TO_LAY",
                 crouch = F(_crouch),
             };
+            // Shared full-scene walk map state (all agents): building %, or ready.
+            try { result["map"] = WorldMap.StatusText(); } catch (Exception) { }
+            // Follow state (if active the body stays near the host player).
+            result["follow"] = new { on = _followMode, player_d = (_followMode && _followDist >= 0f) ? F(_followDist) : null };
             result["consumed"] = DrainReagentEvents();
             result["in_station"] = IsInAnimationStation();
             bool inStn = IsInAnimationStation();
@@ -253,6 +264,15 @@ namespace KKLLMNPC
             result["rays"] = rays;
             var nearby = DescribeNearby();
             result["nearby"] = nearby;
+            // Other players in the room: chat name + body mesh + where they are, so the
+            // model can recognize and address them (and go_to their name) without
+            // mistaking them for the host player or for wild kobolds.
+            var people = DescribePeople();
+            if (people.Count > 0) result["people"] = people;
+            // Scene-wide station map (beds/nests/play stations/doors...) even when
+            // rays can't see them — the model's "map" of stations in this world.
+            var stations = DescribeStations();
+            if (stations.Count > 0) result["stations"] = stations;
             string areaTxt = SpatialLayout();
             result["area"] = areaTxt;
             // Visionless fallback: the caption pass never runs (Vision.Enabled=false),
@@ -362,6 +382,34 @@ namespace KKLLMNPC
                 return desc != null && desc.GetPlayerControlled() == CharacterDescriptor.ControlType.LocalPlayer;
             }
             catch (Exception) { return false; }
+        }
+
+        // The chat name of the PLAYER who owns this kobold body, or null for wild/AI
+        // bodies and our own NPC bodies. PUN2 keeps the owning PhotonPlayer on the
+        // body's PhotonView: the host player's body is owned by LocalPlayer, and a
+        // remote player's body stays owned by THEIR PhotonPlayer — that's how we map
+        // "Yipper" (chat) to the "AbsolB" body (mesh) without confusing the host.
+        internal static string KoboldOwnerNick(Kobold k)
+        {
+            try
+            {
+                if (k == null) return null;
+                if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold == k)
+                    return PlayerChatName();
+                var pv = k.GetComponent<PhotonView>();
+                if (pv == null || pv.Owner == null) return null;
+                try
+                {
+                    var local = PhotonNetwork.LocalPlayer;
+                    if (local != null && pv.Owner.ActorNumber == local.ActorNumber) return null; // NPC/host body
+                }
+                catch (Exception) { }
+                string nick = pv.Owner.NickName;
+                if (string.IsNullOrEmpty(nick)) return null;
+                nick = new string(nick.Where(c => c >= 32 && c < 127).ToArray()).Trim();
+                return nick.Length > 0 ? nick : null;
+            }
+            catch (Exception) { return null; }
         }
 
         // The local player's chat name (Photon nickname), or null if not in a room.
@@ -690,14 +738,16 @@ namespace KKLLMNPC
         {
             if (string.IsNullOrEmpty(name)) return "usable";
             string s = name.ToLowerInvariant();
-            if (s.Contains("breeding") || s.Contains("threeway") || s.Contains("mount")
-                || s.Contains("actionstation") || s.Contains("play") || s.Contains("sex")
-                || s.Contains("erotic")) return "play";
+            if (s.Contains("breeding") || s.Contains("breed") || s.Contains("threeway") || s.Contains("threesome")
+                || s.Contains("mount") || s.Contains("ride") || s.Contains("actionstation")
+                || s.Contains("play") || s.Contains("sex") || s.Contains("erotic")
+                || s.Contains("rockstation")) return "play";
             if (s.Contains("bed") || s.Contains("sleep") || s.Contains("cot")
                 || s.Contains("mattress") || s.Contains("nap") || s.Contains("rest")) return "bed";
             if (s.Contains("toilet") || s.Contains("potty") || s.Contains("bathroom")) return "toilet";
             if (s.Contains("tub") || s.Contains("bath") || s.Contains("shower")) return "bath";
-            if (s.Contains("laying") || s.Contains("ovip") || s.Contains("nest") || s.Contains("egg")) return "nest";
+            // "ovi" catches OvipositionSpot/OviSpot (egg-laying station).
+            if (s.Contains("laying") || s.Contains("ovip") || s.Contains("ovi") || s.Contains("nest") || s.Contains("egg")) return "nest";
             if (s.Contains("kitchen") || s.Contains("stove") || s.Contains("blender") || s.Contains("food") || s.Contains("cook")) return "food";
             if (s.Contains("swap") || s.Contains("possess") || s.Contains("body")) return "bodyswap";
             if (s.Contains("door") || s.Contains("gate")) return "door";
@@ -713,9 +763,9 @@ namespace KKLLMNPC
         {
             switch (kind)
             {
-                case "play": return "pleasure station";
-                case "bed": return "resting - can also be used for play";
-                case "nest": return "egg laying";
+                case "play": return "pleasure station — play/sex ONLY, never for resting";
+                case "bed": return "rest/sleep ONLY — NOT a play station";
+                case "nest": return "egg laying (only works when belly is full: egg > 5ml)";
                 case "machine": return "mounted play/farming";
                 case "toilet": return "relief";
                 case "bath": return "clean";
@@ -853,7 +903,13 @@ namespace KKLLMNPC
                     if (isPlayer)
                     {
                         string chat = PlayerChatName();
-                        entry["who"] = "the player" + (chat != null ? " — chat name: " + chat : "") + " (their avatar; mesh name: " + nm + ")";
+                        entry["who"] = "the HOST player" + (chat != null ? " — chat name: " + chat : "") + " (their avatar; mesh name: " + nm + ")";
+                    }
+                    else if (k != null)
+                    {
+                        string owner = KoboldOwnerNick(k);
+                        if (owner != null)
+                            entry["who"] = "another PLAYER — chat name: " + owner + " (their avatar; mesh name: " + nm + ") — address them as " + owner;
                     }
                     list.Add(entry);
                     if (list.Count >= 8) break;
@@ -876,6 +932,106 @@ namespace KKLLMNPC
                     Logger.LogInfo("KKLLMNPC: noticed player, greeting.");
                 }
             }
+            return list;
+        }
+
+        // Other players in the room (host + remote), each with their chat name, the
+        // body/mesh they wear, and their distance/bearing. Distinct from 'player'
+        // (host only) so the model never merges them.
+        private List<object> DescribePeople()
+        {
+            var list = new List<object>();
+            if (!IsAlive(_kobold)) return list;
+            try
+            {
+                string hostName = null;
+                try { if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null) hostName = pp.kobold.name; } catch (Exception) { }
+                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                {
+                    if (k == null || k == _kobold) continue;
+                    string nick = KoboldOwnerNick(k);
+                    if (string.IsNullOrEmpty(nick)) continue; // wild/AI body or another NPC
+                    Vector3 d = k.transform.position - _kobold.transform.position;
+                    bool isHost = hostName != null && string.Equals(k.name, hostName, StringComparison.Ordinal);
+                    var entry = new Dictionary<string, object>
+                    {
+                        ["name"] = nick,
+                        ["body"] = CleanName(k.name),
+                        ["d"] = F(d.magnitude),
+                        ["dir"] = RelBearing(d),
+                        ["dir_deg"] = F(RelBearingDeg(d)),
+                        ["who"] = isHost ? "the HOST player (your player)" : "another player in the room (their avatar; mesh " + CleanName(k.name) + ")",
+                    };
+                    list.Add(entry);
+                    if (list.Count >= 8) break;
+                }
+            }
+            catch (Exception e) { Logger.LogWarning("people: " + e.Message); }
+            return list;
+        }
+
+        // Every station/usable in the scene, classified with purpose and distance —
+        // the model's station map. Cached ~5s (FindObjectsOfType is a scene-wide find)
+        // and shared by all instances.
+        private static List<GenericUsable> _stationCache;
+        private static float _stationCacheTime = -99f;
+        private static readonly object _stationLock = new object();
+
+        private static List<GenericUsable> StationList()
+        {
+            lock (_stationLock)
+            {
+                if (_stationCache == null || Time.unscaledTime - _stationCacheTime > 5f)
+                {
+                    _stationCache = new List<GenericUsable>();
+                    try
+                    {
+                        foreach (var u in UnityEngine.Object.FindObjectsOfType<GenericUsable>())
+                            if (u != null) _stationCache.Add(u);
+                    }
+                    catch (Exception) { }
+                    _stationCacheTime = Time.unscaledTime;
+                }
+                return _stationCache;
+            }
+        }
+
+        private List<object> DescribeStations()
+        {
+            var list = new List<object>();
+            if (!IsAlive(_kobold)) return list;
+            try
+            {
+                Vector3 pos = _kobold.transform.position;
+                var items = new List<System.Tuple<float, Dictionary<string, object>>>();
+                foreach (var u in StationList())
+                {
+                    if (u == null || u.transform == null) continue;
+                    string nm = CleanName(u.name);
+                    if (nm.Length == 0) continue;
+                    string kind = ClassifyUsable(nm);
+                    bool canUse = true;
+                    try { canUse = u.CanUse(_kobold); } catch (Exception) { }
+                    Vector3 p = u.transform.position;
+                    Vector3 d = p - pos;
+                    var entry = new Dictionary<string, object>
+                    {
+                        ["n"] = nm,
+                        ["i"] = kind + (canUse ? "" : ":busy") + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : ""),
+                        ["d"] = F(d.magnitude),
+                        ["dir"] = RelBearing(d),
+                        ["h"] = d.y > 1f ? "above" : (d.y < -1f ? "below" : "level"),
+                        ["x"] = F(p.x),
+                        ["y"] = F(p.y),
+                        ["z"] = F(p.z),
+                    };
+                    items.Add(System.Tuple.Create(d.magnitude, entry));
+                }
+                items.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+                int cap = 16;
+                for (int i = 0; i < items.Count && i < cap; i++) list.Add(items[i].Item2);
+            }
+            catch (Exception e) { Logger.LogWarning("stations: " + e.Message); }
             return list;
         }
 

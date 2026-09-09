@@ -5,9 +5,10 @@
 // downward ray for up to MaxLayers DISTINCT floor elevations (stairs, ramps,
 // stacked floors, basements/attics). A* connects two adjacent cells only when
 // the target floor is not higher than the current one by more than ClimbStep —
-// climbing above that is forbidden, while dropping DOWN any distance is allowed
-// (walking off a ledge is fine and non-damaging). Up-steps cost a little extra
-// so the search prefers to stay on one level. Waypoints carry each cell's real
+// climbing above that is forbidden. Dropping DOWN is allowed up to MaxDrop
+// (a walkable ledge; the body hard-stops on bigger falls, so the planner must
+// not route through them). Up-steps cost a little extra so the search prefers
+// to stay on one level. Waypoints carry each cell's real
 // ground height, so paths genuinely rise, fall and cross floors with the level.
 // If the exact goal cell is unwalkable, a small near-miss ring is searched for
 // the nearest passable cell so the path still ends at the goal's front door.
@@ -82,7 +83,6 @@ namespace KKLLMNPC
 
             var a = new Astar(cols, rows, gc, gl, grid);
             a.Expand(sx, szz, sl);
-            _pathDoorBlocked = a.CrossedDoor;
             int[] nodes;
             if (!a.Build(out nodes))
             {
@@ -90,6 +90,14 @@ namespace KKLLMNPC
                 return null;
             }
             if (nodes.Length < 1) return null;
+
+            // The door warning reflects the route actually chosen, not door cells
+            // the search merely considered while exploring alternatives.
+            _pathDoorBlocked = false;
+            for (int i = 0; i < nodes.Length; i++)
+            {
+                if (grid.IsDoorNode(nodes[i])) { _pathDoorBlocked = true; break; }
+            }
 
             var way = new List<Vector3>();
             way.Add(start); // start the path at the actual body position
@@ -124,11 +132,11 @@ namespace KKLLMNPC
         }
 
         // Chest-height line-of-sight between two waypoints, each orbited at its own
-        // floor height + 0.75m so sloped/ramped segments stay above the ground.
+        // floor height + PathRayHeightOffset so sloped/ramped segments stay clear.
         private bool RayClear(Vector3 a, Vector3 b)
         {
-            Vector3 p = new Vector3(a.x, a.y + 0.75f, a.z);
-            Vector3 q = new Vector3(b.x, b.y + 0.75f, b.z);
+            Vector3 p = new Vector3(a.x, a.y + Consts.PathRayHeightOffset, a.z);
+            Vector3 q = new Vector3(b.x, b.y + Consts.PathRayHeightOffset, b.z);
             Vector3 dir = q - p;
             float dist = dir.magnitude;
             if (dist < 0.01f) return true;
@@ -196,10 +204,14 @@ namespace KKLLMNPC
     // Layered walkability grid (physics hops are memoized per cell). Each cell
     // caches up to MaxLayers distinct floor elevations with their clearance flag,
     // discovered by one downward multi-hit ray per cell.
-    internal class PathGridState
+    internal class PathGridState : ILayerGrid
     {
-        public const int MaxLayers = 4;
-        public const float ClimbStep = 0.5f;
+        public const int MaxLayers = Consts.PathMaxLayers;
+        public int MaxLayerCount() { return MaxLayers; }
+        public const float ClimbStep = Consts.PathClimbStep;
+        // Largest drop the body will walk off (Movement's ledge guard hard-stops
+        // beyond this) — the planner must not route through bigger drops.
+        public const float MaxDrop = Consts.LedgeDropHardStop;
         // Cell clearance: 1 = open floor, 2 = solid obstacle, 3 = a CLOSED door
         // here (walkable in the planner but strongly penalized — the body opens it
         // on arrival via Movement.MaybeOpenDoorAhead). An open door's panel is not
@@ -268,6 +280,8 @@ namespace KKLLMNPC
                 RaycastHit h = _rayHits[i];
                 if (h.collider == null) continue;
                 if (_npc.IsOwnCollider(h.collider)) continue;
+                // Bodies move — never treat any kobold (ours or another's) as floor.
+                if (h.collider.GetComponentInParent<Kobold>() != null) continue;
                 if (h.normal.y < 0.35f) continue; // wall / near-vertical side, not a floor
                 if (h.point.y < _refY - 8f || h.point.y > _refY + 12f) continue;
                 var u = h.collider.GetComponent<GenericUsable>() ?? h.collider.GetComponentInParent<GenericUsable>();
@@ -294,7 +308,7 @@ namespace KKLLMNPC
                 float fh = _layHs[l];
                 int b = Node(ci, l);
                 _h[b] = fh;
-                int n = Physics.OverlapSphereNonAlloc(new Vector3(cx, fh + 0.75f, cz), 0.32f,
+                int n = Physics.OverlapSphereNonAlloc(new Vector3(cx, fh + Consts.PathRayHeightOffset, cz), 0.32f,
                     _npc._pathColliderBuf, ~0, QueryTriggerInteraction.Ignore);
                 bool clear = true;
                 bool doorOnly = false;
@@ -302,6 +316,8 @@ namespace KKLLMNPC
                 {
                     var c = _npc._pathColliderBuf[k];
                     if (c == null || _npc.IsOwnCollider(c)) continue;
+                    // Bodies move — other kobolds aren't static obstacles.
+                    if (c.GetComponentInParent<Kobold>() != null) continue;
                     var u = c.GetComponent<GenericUsable>() ?? c.GetComponentInParent<GenericUsable>();
                     if (u != null && NPCInstance.ClassifyUsable(NPCInstance.CleanName(u.name)).Contains("door"))
                     {
@@ -349,9 +365,9 @@ namespace KKLLMNPC
             return best;
         }
 
-        // Layer in a neighboring cell reachable from a given floor: walkable and
-        // not more than ClimbStep ABOVE us (dropping down is always allowed).
-        // Picks the closest-in-height layer. Returns index or -1.
+        // Layer in a neighboring cell reachable from a given floor: walkable, not
+        // more than ClimbStep ABOVE us, and no bigger a DROP than MaxDrop (the body
+        // hard-stops on larger falls). Picks the closest-in-height layer. -1 if none.
         public int BestLayer(int ci, float floorA)
         {
             SampleCell(ci);
@@ -362,6 +378,7 @@ namespace KKLLMNPC
                 if (!Passable(_ok[b])) continue; // closed doors count as walkable here
                 float dy = _h[b] - floorA;
                 if (dy > ClimbStep + 0.001f) continue; // too tall to step up
+                if (dy < -MaxDrop) continue; // too big a drop to walk off
                 float d = Abs(dy);
                 if (d < bd) { bd = d; best = l; }
             }
@@ -382,8 +399,26 @@ namespace KKLLMNPC
         private static float Abs(float v) { return v < 0f ? -v : v; }
     }
 
+    // Layered walkability grid abstraction shared by the per-query local grid
+    // (PathGridState) and the full-scene shared map (WorldMapGrid). A* only needs
+    // these reads, so one solver serves both.
+    internal interface ILayerGrid
+    {
+        int Cols();
+        int Rows();
+        int MaxLayerCount();
+        int CellX(int ci);
+        int CellZ(int ci);
+        int Ci(int x, int z);
+        int Node(int ci, int l);
+        float H(int ci, int l);
+        int LayerNear(int ci, float y);
+        int BestLayer(int ci, float floorA);
+        bool IsDoorNode(int node);
+    }
+
     // Layered A* over the grid (pure CPU, no physics). Node = cell*MaxLayers +
-    // layer. Vertical rule lives in PathGridState.BestLayer; here we additionally
+    // layer. Vertical rule lives in the grid's BestLayer; here we additionally
     // prevent diagonal corner-cuts, add a small cost for stepping upward so the
     // path prefers a level route, and charge a heavy toll for walking THROUGH a
     // closed door cell — a detour of a few cells is always preferred, but when a
@@ -391,20 +426,20 @@ namespace KKLLMNPC
     // opens it on arrival).
     internal class Astar
     {
-        private const int DoorCrossCost = 550; // ~5.5 cells; cheaper than a long detour
+        private const int DoorCrossCost = Consts.PathDoorCrossCost; // ~5.5 cells; cheaper than a long detour
         private int _cols, _rows;
         private int _goalCi, _goalL;
-        private PathGridState _grid;
+        private ILayerGrid _grid;
         private int[] _gScore;
         private int[] _cameFrom;
         private bool[] _closed;
         private List<float> _heapF = new List<float>(1024);
         private List<int> _heapIdx = new List<int>(1024);
 
-        public Astar(int cols, int rows, int goalCi, int goalL, PathGridState grid)
+        public Astar(int cols, int rows, int goalCi, int goalL, ILayerGrid grid)
         {
             _cols = cols; _rows = rows; _goalCi = goalCi; _goalL = goalL; _grid = grid;
-            int N = cols * rows * PathGridState.MaxLayers;
+            int N = cols * rows * grid.MaxLayerCount();
             _gScore = new int[N]; _cameFrom = new int[N]; _closed = new bool[N];
             for (int i = 0; i < N; i++) { _gScore[i] = int.MaxValue; _cameFrom[i] = -1; }
         }
@@ -448,11 +483,10 @@ namespace KKLLMNPC
         private float H(int x, int z) // octile distance in cost units (1 per cell, diag ~1.41)
         {
             int dx = Mathf.Abs(x - _grid.CellX(_goalCi)), dz = Mathf.Abs(z - _grid.CellZ(_goalCi));
-            return (Mathf.Min(dx, dz) * 1.41421356f + Mathf.Abs(dx - dz)) * 100f;
+            return (Mathf.Min(dx, dz) * Consts.AstarDiagCost + Mathf.Abs(dx - dz)) * Consts.AstarScale;
         }
 
         public int ExpandedCount = 0;
-        public bool CrossedDoor = false;
 
         public void Expand(int sx, int sz, int sl)
         {
@@ -461,16 +495,15 @@ namespace KKLLMNPC
             _gScore[startNode] = 0;
             HeapPush(startNode, H(sx, sz));
 
-            int N = _cols * _rows * PathGridState.MaxLayers;
-            int nodeBudget = Math.Max(2048, N);
+            int N = _cols * _rows * _grid.MaxLayerCount();
+            int nodeBudget = Math.Max(Consts.AstarNodeBudgetMin, N);
             nodeBudget = Math.Min(N * 2, nodeBudget);
             int expanded = 0;
             ExpandedCount = 0;
-            CrossedDoor = false;
 
             int[] dxs = { 1, -1, 0, 0, 1, 1, -1, -1 };
             int[] dzs = { 0, 0, 1, -1, 1, -1, 1, -1 };
-            float[] dcost = { 1f, 1f, 1f, 1f, 1.41421356f, 1.41421356f, 1.41421356f, 1.41421356f };
+            float[] dcost = { 1f, 1f, 1f, 1f, Consts.AstarDiagCost, Consts.AstarDiagCost, Consts.AstarDiagCost, Consts.AstarDiagCost };
 
             while (_heapF.Count > 0 && expanded < nodeBudget)
             {
@@ -480,8 +513,9 @@ namespace KKLLMNPC
                 expanded++;
                 if (cur == goalNode) break;
 
-                int ci = cur / PathGridState.MaxLayers;
-                int l = cur % PathGridState.MaxLayers;
+                int ml = _grid.MaxLayerCount();
+                int ci = cur / ml;
+                int l = cur % ml;
                 int cx = ci % _cols, cz = ci / _cols;
                 float floorA = _grid.H(ci, l);
 
@@ -502,13 +536,10 @@ namespace KKLLMNPC
                     int nid = _grid.Node(nbci, l2);
                     if (_closed[nid]) continue;
                     float dy = _grid.H(nbci, l2) - floorA;
-                    int add = (int)Math.Round(dcost[d] * 100f)
-                              + (int)Math.Round(Mathf.Max(0f, dy) * 20f);
+                    int add = (int)Math.Round(dcost[d] * Consts.AstarScale)
+                              + (int)Math.Round(Mathf.Max(0f, dy) * Consts.AstarClimbCostMultiplier);
                     if (_grid.IsDoorNode(nid))
-                    {
                         add += DoorCrossCost;
-                        CrossedDoor = true;
-                    }
                     int ng = _gScore[cur] + add;
                     if (ng < _gScore[nid])
                     {
@@ -529,7 +560,7 @@ namespace KKLLMNPC
             if (_gScore[goalNode] == int.MaxValue) return false;
             var rev = new List<int>();
             int c = goalNode;
-            while (c != -1 && rev.Count < 100000) { rev.Add(c); c = _cameFrom[c]; }
+            while (c != -1 && rev.Count < Consts.AstarWaypointLimit) { rev.Add(c); c = _cameFrom[c]; }
             rev.Reverse();
             nodes = rev.ToArray();
             return true;

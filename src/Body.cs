@@ -190,38 +190,12 @@ namespace KKLLMNPC
             _everBound = true;
             if (!reuseIdentity)
             {
-                _npcName = PickName(target);   // default: use prefab name
-                _persona = BuildPersona();     // personality + gender + pronouns from the body
+                _npcName = PickName(target);   // base: prefab name — the LLM finalizes
+                _persona = BuildPersona();     // it in FinalizeIdentity (LLM thread) so
+                                               // the main thread never blocks on HTTP
                 // "Awake" moment: mark the chat log so we only read what happens from now
                 // on — not the conversation other players had before this NPC existed.
                 try { _chatBaseline = CheatsProcessor.GetOutput() ?? ""; } catch (Exception) { _chatBaseline = ""; }
-                // If the room-identity feature is enabled and we're in a room, bring up the
-                // NPC's own Photon identity early so it's joined before the NPC starts talking.
-                // No-op unless Multiplayer.IdentityBot is on and we're in a room.
-                try { EnsureIdentityBot(); } catch (Exception) { }
-
-                // Ask the LLM to choose a fitting name based on the body's traits.
-                if (_cfgNameSelection != null && _cfgNameSelection.Value && _persona != null)
-                {
-                    try
-                    {
-                        string gender = InferGender();
-                        string species = SpeciesForm(MyName());
-                        string traits = _persona.Contains("Personality:")
-                            ? _persona.Substring(_persona.IndexOf("Personality:") + 12).Trim().TrimEnd('.')
-                            : "";
-                        string llmName = ChooseNameWithLLM(gender, species, traits);
-                        if (!string.IsNullOrEmpty(llmName))
-                        {
-                            string oldName = _npcName;
-                            _npcName = llmName;
-                            Logger.LogInfo("KKLLMNPC: '" + oldName + "' renamed to '" + llmName + "' by LLM");
-                        }
-                    }
-                    catch (Exception e) { Logger.LogWarning("LLM name selection: " + e.Message); }
-                }
-
-                Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'" + (_persona != null ? " — " + _persona : ""));
             }
             _yawDeg = target.transform.eulerAngles.y; // start from current facing
             _controller = target.GetComponent<KoboldCharacterController>();

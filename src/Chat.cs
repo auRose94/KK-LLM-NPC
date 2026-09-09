@@ -24,6 +24,110 @@ namespace KKLLMNPC
     {
         // OnEvent is handled by the plugin and distributed to instances via HandleChat.
 
+        // Cross-instance name registry: two agents must never share a chat name — the
+        // old failure was two NPCs on the SAME avatar model both falling back to the
+        // prefab name and flooding chat with indistinguishable "LoonaDZ" lines. An
+        // in-memory set (all instances of this plugin) plus a small shared file under
+        // BepInEx/config so renamed DLL copies (KKLLMNPC2.dll) also collide-check.
+        // Player chat names are reserved (MarkTaken) so an NPC can't impersonate
+        // "Rosemary" or "Yipper" either.
+        internal static class NameRegistry
+        {
+            private static readonly object _lock = new object();
+            private static readonly HashSet<string> _taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            private static string _file;
+            private static bool _initialized;
+
+            private static void Init()
+            {
+                if (_initialized) return;
+                try
+                {
+                    string data = Application.dataPath;
+                    if (!string.IsNullOrEmpty(data))
+                    {
+                        string dir = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(data), "BepInEx", "config");
+                        System.IO.Directory.CreateDirectory(dir);
+                        _file = System.IO.Path.Combine(dir, "kkllmnpc_names.txt");
+                        if (System.IO.File.Exists(_file))
+                            foreach (var line in System.IO.File.ReadAllLines(_file))
+                            {
+                                string n = line.Trim();
+                                if (n.Length > 0) _taken.Add(n);
+                            }
+                    }
+                }
+                catch (Exception) { _file = null; }
+                _initialized = true;
+            }
+
+            // Reserve a name. False when it's already taken (by us, another agent,
+            // or a reserved player name).
+            internal static bool TryReserve(string name)
+            {
+                lock (_lock)
+                {
+                    Init();
+                    if (string.IsNullOrEmpty(name) || _taken.Contains(name)) return false;
+                    _taken.Add(name);
+                    if (_file != null)
+                    {
+                        try { System.IO.File.AppendAllText(_file, name + "\n"); } catch (Exception) { }
+                    }
+                    return true;
+                }
+            }
+
+            // Reserve WITHOUT a collision check — for names that must be usable
+            // (player chat names) and for re-claiming our own after a world reload.
+            internal static void MarkTaken(string name)
+            {
+                lock (_lock)
+                {
+                    Init();
+                    if (!string.IsNullOrEmpty(name)) _taken.Add(name);
+                }
+            }
+
+            internal static bool IsTaken(string name)
+            {
+                lock (_lock)
+                {
+                    Init();
+                    return !string.IsNullOrEmpty(name) && _taken.Contains(name);
+                }
+            }
+
+            internal static string TakenList()
+            {
+                lock (_lock)
+                {
+                    Init();
+                    return string.Join(", ", _taken).Trim();
+                }
+            }
+
+            // Guaranteed-unique fallback name: base, then base+suffix, then base-NNN.
+            internal static string Unique(string baseName, string hint)
+            {
+                lock (_lock)
+                {
+                    Init();
+                    string b = string.IsNullOrEmpty(baseName) ? "Kobold" : baseName;
+                    if (TryReserve(b)) return b;
+                    if (hint != null && TryReserve(b + "-" + hint)) return b + "-" + hint;
+                    for (int i = 0; i < 900; i++)
+                    {
+                        string cand = b + "-" + (100 + i);
+                        if (TryReserve(cand)) return cand;
+                    }
+                    string last = b + "-" + UnityEngine.Random.Range(1000, 9999);
+                    TryReserve(last);
+                    return last;
+                }
+            }
+        }
+
         // Pick an identity for the body: species hint from its name (e.g. "AbsolB"
         // → base name), plus a short suffix derived from its equipment so it's stable
         // per body within this session without asking the model.

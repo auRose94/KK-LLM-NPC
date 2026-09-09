@@ -106,6 +106,11 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgPathCell;
         internal ConfigEntry<float> _cfgPathSpan;
         internal ConfigEntry<int> _cfgPathCap;
+        internal ConfigEntry<bool> _cfgMapEnabled;
+        internal ConfigEntry<float> _cfgMapCell;
+        internal ConfigEntry<float> _cfgMapSpan;
+        internal ConfigEntry<int> _cfgMapCpf;
+        internal ConfigEntry<int> _cfgMapLayers;
         internal ConfigEntry<int> _cfgMaxNPCs;
         internal ConfigEntry<bool> _cfgRadarEnabled;
         internal ConfigEntry<int> _cfgRadarSize;
@@ -173,12 +178,14 @@ namespace KKLLMNPC
                 "WORLD: you live in a house with rooms; landmarks you learn (bed/toilet/bath/kitchen/play stations/nests/doors) go into your 'facts' — call remember(mem='bed is upstairs') so you build a mental map and stop bumbling. Ledges are forgiving and non-damaging: you can walk off and fall, but you can't jump UP to a ledge. Doors pass only when open — try interact (sometimes a push the NEXT turn: it's physics, not animation), or go around, or ask the player. When in_station you can't walk — use exit_station or jump. " +
                 "YOUR BODY: \"me\" is <your body name>. Don't respond to your own chat messages; your own 'say' already echoed once. When you arrive in a new body, introduce yourself briefly via say (your name + a hello). " +
                 "THE PLAYER: perception 'player' = {chat: their chat name, body: the mesh/body they're wearing}. A nearby kobold whose name matches player.body IS the player (their avatar) — NOT another kobold; address them by their chat name, never by the mesh name. A partner in 'stim_from'/'penetrated'/'penetrating' whose name matches player.body is also the player. " +
+                "OTHER PLAYERS: perception 'people' lists the other players in this room: {name: their chat name, body: the mesh they wear, d, dir}. A nearby kobold whose 'who'/'body' matches a 'people' entry is THAT player's avatar — talk to them by their chat name (e.g. 'Hi Yipper!'), and you can go_to(name='Yipper') to reach them. The host player ('player') is YOUR player — never confuse them with 'people', and never take another player's name as your own. " +
+                "FOLLOWING: if the player asks you to follow (they'll say it in chat), call follow(on:true) — you stay near them while you keep thinking/talking; follow(on:false) releases you. While following, prefer saying things and reacting over wandering off. " +
                 (_cfgVision.Value ? "VISION: you may have stereo vision (left+right) or a single image. If stereo, you may describe depth and relative positions. Use triangulation with an eye separation at " + _cfgStereoIPD.Value + " meters. " : "") +
-                "GOAL: each turn is an instant between frames and you'll get another one right away — pick ONE decisive action immediately; no long deliberation, hypothetical branching, or multi-hop plans; trust your last goal and take the next step. Priorities: (1) player talked to you ('heard') → respond with say; (2) 'needs.eggs' says ready_to_lay → find a 'nest' station and use it; (3) 'stim' is up OR 'horniness' is high/'slow-burn' (empty belly, no stimulation for a while — you genuinely want it) → find a 'play' station (a pleasure station, NOT a bed) or another entity and use them for play; (4) player nearby → walk over, say hi, play with them; (5) otherwise explore new rooms/landmarks. A bed is for REST, and only when energy < ~0.2 (never just to top off); a play station is NEVER for sleeping — they may both be usable, but they serve opposite purposes. You will not pass out from energy — it only blocks interacting with the world, like activities. " +
+                "GOAL: each turn is an instant between frames and you'll get another one right away — pick ONE decisive action immediately; no long deliberation, hypothetical branching, or multi-hop plans; trust your last goal and take the next step. Priorities: (1) player talked to you ('heard') → respond with say; (2) 'needs.eggs' says READY_TO_LAY (belly full, egg > 5ml) → find a 'nest' station and use it. WITH AN EMPTY BELLY (eggs low) a NEST CANNOT WORK — never seek, walk to, or repeat a nest until it says READY_TO_LAY; go_to/interact will refuse it; (3) 'stim' is up OR 'horniness' is high/'slow-burn' (empty belly, no stimulation for a while — you genuinely want it) → find a 'play' station (a pleasure station, NOT a bed) or another entity and use them for play; (4) player nearby → go to them, say hi, keep company; (5) otherwise explore new rooms/landmarks. A bed is for REST ONLY, and only when energy < ~0.2 (never just to top off) — a bed is NOT a play station; a play station is NEVER for sleeping. You will not pass out from energy — it only blocks interacting with the world, like activities. " +
                 "PERCEPTION (you receive a JSON payload each turn): nearby (list with categories + ids + 'dir'/'dir_deg'), rays (see LEGEND), radar (top-down ASCII MAP of what's around you: @=you W=wall U=usable K=entity P=player S=low sill .=open; these are abstract map symbols, NOT people or objects staring at you — W is a wall, K just means another entity exists somewhere that direction; row 0=top=furthest forward, row 20=bottom=behind you; may be absent when disabled), ground (ahead=clear/step(auto)/sill(climbable)/wall; drop=distance to ledge; walls=blocked sides within arm reach), clearance (8-direction wall distances blocked/close/near/open — steer toward open), area (prose from a 360° scan: cardinal distances, 'open' headings, 'best' recommended heading, 'near' closest named things — trust it for navigation esp. when no image is attached), and when 'image' is attached that is your real first-person view — treat it as your own eyes. Do not mind or comment on the; pillars/beams, light, shininess, or glow from anything. Vision cuts off after a distance. Your own limbs might be clipping into the camera or blocking it. Also memory=recent goals, facts=what you've learned, history=recent actions+outcomes, chat_log, scene. " +
-                "NAVIGATION: don't compute directions from coordinates — nearby 'dir'/'dir_deg' already did it; feed 'dir_deg' straight into walk(turn_deg=dir_deg) or use it to decide go_to(name). To reach a named station call go_to(name); to reach/use a SPECIFIC object use its 'id' from nearby: go_to(id:N) or interact(id:N) — prefer id over name when similar objects differ (two beds, one taken). ids stay valid for several turns while the object is in sight; if an id fails, re-read 'nearby'. go_to only works within ~70m of your body (roughly what 'nearby'/'survey' can see) — a too_far target means it's unreachable, so walk to a closer named station/landmark or ask the player ('please move me to the bed'). go_to's 'at' stops you short (default 1m) so you arrive AT the object. Keep speed and duration low near targets — don't overshoot or crash into a wall (sometimes unaware forever). go_to uses grid PATHFINDING (plans around walls, reports for_goal/at/arrived) — it is your only reliable way to travel, so use it for EVERY destination. move_to/walk draw a straight line and grind into walls — never cross a room with them, only nudge short distances AFTER a go_to brought you there. " +
+                "NAVIGATION: don't compute directions from coordinates — nearby 'dir'/'dir_deg' already did it; feed 'dir_deg' straight into walk(turn_deg=dir_deg) or use it to decide go_to(name). There is ONE way to travel: go_to. It plans a real 3D route — around walls, UP and DOWN stairs and ramps, across floors — using a map of the whole scene (perception 'map': 'building N%' until ready, then 'ready'). While the map builds, long routes fall back to the local grid; too_far means pick a closer named station or ask the player. To reach a named station call go_to(name) — names include the station kinds (bed/nest/play/toilet/bath/door) and other players' chat names ('people'); to reach/use a SPECIFIC object use its 'id' from nearby: go_to(id:N) or interact(id:N) — prefer id over name when similar objects differ (two beds, one taken). ids stay valid for several turns while the object is in sight; if an id fails, re-read 'nearby'. go_to's 'at' stops you short (default 1m) so you arrive AT the object. walk is for SHORT things only: nudging, squeezing past furniture, strafing, or jump (also gets you OUT of a station — the same as exit_station). Never cross a room with walk — it goes in a straight line and grinds into walls. " +
                 "INTERACT: get within ~2m (go_to id:N is enough), turn to face it, THEN interact — or call interact(id:N) to target it directly. 'body' tells you your equipment; some stations only fit some bodies — interact cannot_use on a 'play'/'bed'/'breeding' station means try another; on two-sided stations the first user picks the role. When 'penetrated' (letting in) or 'penetrating' (putting in) is set, you're mid-play with someone — enjoy it and respond via say + body language; guide them if you want more. When stimulation ('stim'/'horniness') or an egg/need change happens, 'stim_from' names who or what is responsible (a partner, or a machine/station you're \u0027using\u0027) — credit that named source; eggs, nests and machines are OBJECTS, not people, and the player isn't behind every pleasant feeling. STATION RULES: When you are in a station (in_station=true), you are locked in an animation. You can only leave if: (1) the player explicitly tells you to leave via chat, or (2) your NEW goal is genuinely different from what this station does (e.g. you were playing but now need to lay eggs → leave to find a nest). If your new goal is the same type as the current station (e.g. play→play), stay put and keep enjoying it. Do NOT call exit_station just to re-enter the same type of station — that wastes time. When the player says 'stay' or 'remain', stay in the station until they say 'leave' or 'exit'. " +
-                "THINGS: nearby 'i' = category plus its purpose in parens. Suffix tags: ':busy' = in use by another; ':needs_buy' = ConstructionContract — costs coins, must buy to unlock the machine; ':not_built' = machine exists but hasn't been constructed yet — find and buy its contract first; ':done' = already purchased. play = pleasure station, ONLY for fun/sex — never resting; bed = sleeping when energy is low, and a bed can double as a play spot; nest = egg laying; machine = mounted play/farming; toilet/bath/seat/door/bodyswap as named. food = blender/cooking station — a blender does NOT produce food from nothing; you must DROP a food item (grab it, go to blender, drop) so it gets blended into something edible. If the blender ':not_built' or ':needs_buy', find its ConstructionContract first. bodyswap = the body-swap machine: you and a partner must BOTH climb on (interact), then a few seconds later you swap bodies — you keep your name, memories and personality but wake up in THEIR body; if the player is around, get on and ask them to get on the other side; if nobody joins you, jump off. After a swap, mention your new body in 'say'. 'needs.eggs': egg amount in your belly + ready_to_lay; to lay, find a 'nest' station and use it — the egg comes out there. The game has farming: plant seeds in a 'farm' station, water them, harvest the crop; you can also pick up and drop items (grab/drop). Some maps have a town with a 'shop' station where you can buy items (if you have money); money comes from selling items or food grown. " +
+                "THINGS: nearby 'i' = category plus its purpose in parens. Suffix tags: ':busy' = in use by another; ':needs_buy' = ConstructionContract — costs coins, must buy to unlock the machine; ':not_built' = machine exists but hasn't been constructed yet — find and buy its contract first; ':done' = already purchased. play = pleasure station, ONLY for fun/sex — never resting; bed = REST/SLEEP ONLY when energy is low — a bed is NOT a play station (don't play in it); nest = egg laying, and it ONLY works when your belly is full (egg > 5ml — 'needs.eggs' says READY_TO_LAY); machine = mounted play/farming; toilet/bath/seat/door/bodyswap as named. perception 'stations' lists every station in the scene with kind, purpose, distance and heading — use it to see where beds/nests/play stations are even when rays can't see them. food = blender/cooking station — a blender does NOT produce food from nothing; you must DROP a food item (grab it, go to blender, drop) so it gets blended into something edible. If the blender ':not_built' or ':needs_buy', find its ConstructionContract first. bodyswap = the body-swap machine: you and a partner must BOTH climb on (interact), then a few seconds later you swap bodies — you keep your name, memories and personality but wake up in THEIR body; if the player is around, get on and ask them to get on the other side; if nobody joins you, jump off. After a swap, mention your new body in 'say'. The game has farming: plant seeds in a 'farm' station, water them, harvest the crop; you can also pick up and drop items (grab/drop). Some maps have a town with a 'shop' station where you can buy items (if you have money); money comes from selling items or food grown. " +
                 "SOCIAL: 'heard' is player speech — your own say already echoed once, don't reply to yourself, and never repeat the same line twice — if you already said it, do something else instead. You should also note to yourself that you mentioned a thing recently. You do NOT need to respond to messages that start with a forward slash /. Avoid emoji in say — they don't render correctly in the in-game chat. " +
                 "TOOLS: go_to(name or id or x,z, at) [PATHFINDING — use for ALL travel], walk(duration,turn_deg,run,strafe) [strafe=+right/-left; short nudges and squeezes only, never long trips], walk_ray(ray/ray_deg), survey(heading_deg,range) [probe a direction for what's there + ids], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z) [straight line, no pathfinding — avoid; prefer go_to], interact(id optional), grab(multi), drop, say, remember(mem=fact), ask(q='...') [your question+perception go to your inner world-model, answer appears next turn as 'answered'], status, none. 'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle. " +
                   "LEGEND — rays: k=entity p=player u=usable w=wall s=low sill/window (step-over, harmless) n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees); big tall w=wall, small h=furniture, k/p=living. look_around scans the view and lists what's in each sector. IMPORTANT: walls, ceilings, floors, beams, sills and distant furniture are just BACKGROUND architecture — never comment on, narrate, or get excited about them; they matter only when they actually block your path or a target (then 'ground'/'clearance'/'blocked' say so). ",
@@ -201,9 +208,19 @@ namespace KKLLMNPC
             _cfgDecel = Config.Bind("Movement", "Deceleration", 6f, "How fast the entity slows down when stopping (units/s²)");
             _cfgBrakeDist = Config.Bind("Movement", "BrakeDistance", 2f, "Distance from go_to target where the entity starts slowing down (m)");
             _cfgPathEnabled = Config.Bind("Movement", "PathfindingEnabled", true, "A* pathfinding on a local walkability grid around go_to (falls back to direct steering when disabled, blocked, or no path exists)");
-            _cfgPathCell = Config.Bind("Movement", "PathfindingCellSize", 0.5f, "A* grid cell size in meters");
-            _cfgPathSpan = Config.Bind("Movement", "PathfindingWindow", 20f, "A* search window radius in meters around start and goal (clamped by node budget)");
-            _cfgPathCap = Config.Bind("Movement", "PathfindingNodes", 9000, "Max pathfinding grid node budget before it gives up and falls back to direct steering");
+            _cfgPathCell = Config.Bind("Movement", "PathfindingCellSize", Consts.DefaultPathCellSize, "A* grid cell size in meters");
+            _cfgPathSpan = Config.Bind("Movement", "PathfindingWindow", Consts.DefaultPathSpan, "A* search window radius in meters around start and goal (clamped by node budget)");
+            _cfgPathCap = Config.Bind("Movement", "PathfindingNodes", Consts.DefaultPathNodeCap, "Max pathfinding grid node budget before it gives up and falls back to direct steering");
+            _cfgMapEnabled = Config.Bind("Movement", "WorldMapEnabled", true,
+                "Build & cache a full-scene 3D walkability map shared by ALL agents (BepInEx/config/kkllmnpc_maps/<scene>.kkmap). go_to routes stairs/ramps/other floors and any in-bounds distance; falls back to the local window grid while it builds");
+            _cfgMapCell = Config.Bind("Movement", "WorldMapCellSize", 1.0f,
+                "World-map grid cell size in meters (auto-inflates if the node budget is exceeded)");
+            _cfgMapSpan = Config.Bind("Movement", "WorldMapMaxSpan", 800f,
+                "Max mapped extent per axis in meters; larger maps clamp to this around the anchor centroid");
+            _cfgMapCpf = Config.Bind("Movement", "WorldMapCellsPerFrame", 48,
+                "World-map cells sampled per frame while building (higher = faster build, more per-frame physics cost)");
+            _cfgMapLayers = Config.Bind("Movement", "WorldMapLayers", 4,
+                "Max distinct floor layers sampled per world-map cell (stacked floors/stairs)");
             _cfgVisionEvery = Config.Bind("Vision", "EveryNTicks", 3, "Run the vision pass every N action ticks (lower = more aware, slower)");
             _cfgVisionPrompt = Config.Bind("Vision", "Prompt",
                 "You are the SPATIAL reasoner for an NPC. Produce a compact SCENE REPORT: (a) landmarks/stations/people in view with a rough bearing, (b) which directions are OPEN to walk (-90 left .. +90 right), (c) any hazard or drop. " +
@@ -265,9 +282,9 @@ namespace KKLLMNPC
             _cfgCamForward.Value = Mathf.Clamp(_cfgCamForward.Value, -2f, 5f);
             _cfgCommentTemp.Value = Mathf.Clamp(_cfgCommentTemp.Value, 0f, 2f);
             _cfgAutoFindRange.Value = Mathf.Clamp(_cfgAutoFindRange.Value, 1f, 500f);
-            _cfgPathCell.Value = Mathf.Clamp(_cfgPathCell.Value, 0.1f, 5f);
-            _cfgPathSpan.Value = Mathf.Clamp(_cfgPathSpan.Value, 2f, 100f);
-            _cfgPathCap.Value = Mathf.Clamp(_cfgPathCap.Value, 200, 50000);
+            _cfgPathCell.Value = Mathf.Clamp(_cfgPathCell.Value, Consts.MinPathCellSize, Consts.MaxPathCellSize);
+            _cfgPathSpan.Value = Mathf.Clamp(_cfgPathSpan.Value, Consts.MinPathSpan, Consts.MaxPathSpan);
+            _cfgPathCap.Value = Mathf.Clamp(_cfgPathCap.Value, Consts.MinPathNodeCap, Consts.MaxPathNodeCap);
             _cfgRadarSize.Value = Mathf.Clamp(_cfgRadarSize.Value, 3, 30);
             _cfgRadarScale.Value = Mathf.Clamp(_cfgRadarScale.Value, 0.1f, 10f);
             _cfgVisMaxTokens.Value = Mathf.Clamp(_cfgVisMaxTokens.Value, 10, 500);
@@ -277,6 +294,21 @@ namespace KKLLMNPC
             _cfgAccel.Value = Mathf.Clamp(_cfgAccel.Value, 0.5f, 50f);
             _cfgDecel.Value = Mathf.Clamp(_cfgDecel.Value, 0.5f, 50f);
             _cfgBrakeDist.Value = Mathf.Clamp(_cfgBrakeDist.Value, 0.1f, 20f);
+
+            // Full-scene shared map: clamp the build params and push them into the
+            // static WorldMap (shared by every instance/agent in this assembly).
+            _cfgMapCell.Value = Mathf.Clamp(_cfgMapCell.Value, 0.25f, 4f);
+            _cfgMapSpan.Value = Mathf.Clamp(_cfgMapSpan.Value, 50f, 4000f);
+            _cfgMapCpf.Value = Mathf.Clamp(_cfgMapCpf.Value, 4, 512);
+            _cfgMapLayers.Value = Mathf.Clamp(_cfgMapLayers.Value, 2, 6);
+            try
+            {
+                WorldMap.CellSize = _cfgMapCell.Value;
+                WorldMap.MaxSpan = _cfgMapSpan.Value;
+                WorldMap.MaxLayers = _cfgMapLayers.Value;
+                WorldMap.CellsPerFrame = _cfgMapCpf.Value;
+            }
+            catch (Exception) { }
 
             // Probe the KoboldCpp server for model capabilities (parameter count, context length).
             // This runs once at startup and populates ModelProbe.Detected* fields.
@@ -359,6 +391,13 @@ namespace KKLLMNPC
                 _lastReconcile = Time.unscaledTime;
                 try { ReconcileInstances(); }
                 catch (Exception e) { Logger.LogWarning("reconcile: " + e.Message); }
+            }
+
+            // World map: advance the incremental build (a few dozen cells per frame)
+            // while in-world. No-op when idle/ready, so this costs ~nothing.
+            if (_mainReady && _running)
+            {
+                try { WorldMap.Tick(); } catch (Exception) { }
             }
 
             // Config hot-reload.
@@ -518,6 +557,18 @@ namespace KKLLMNPC
             int max = Mathf.Clamp(_cfgMaxNPCs.Value, 1, 4);
             bool inWorld = IsPlayableScene();
             int claimable = inWorld ? CountClaimableKobolds() : 0;
+
+            // Full-scene shared walk map: start/refresh for the active scene when
+            // in-world (file-cached per scene+version, so usually instant), and
+            // invalidate when we leave the world. Per-frame sampling is in Update().
+            try
+            {
+                if (inWorld && _cfgMapEnabled != null && _cfgMapEnabled.Value)
+                    WorldMap.EnsureStarted(_lastSceneName);
+                else if (!inWorld)
+                    WorldMap.Invalidate(null);
+            }
+            catch (Exception e) { Logger.LogWarning("world map: " + e.Message); }
             lock (_instancesLock)
             {
                 for (int i = _instances.Count - 1; i >= 0; i--)
