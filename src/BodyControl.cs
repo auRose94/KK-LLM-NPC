@@ -258,7 +258,7 @@ namespace KKLLMNPC
             if (!wasInside)
                 return new { ok = false, reason = "not_penetrated" };
 
-            // Move our kobold away to break the connection
+            // Try to release: stop any hip animation, then move away to break the connection
             try
             {
                 RunOnMainThread(() =>
@@ -266,6 +266,12 @@ namespace KKLLMNPC
                     try
                     {
                         if (_kobold == null || !IsAlive(_kobold)) return true;
+                        // Stop any active thrust/hip animation first
+                        if (_charAnimator != null)
+                        {
+                            try { _charAnimator.SetHipVector(Vector2.zero); }
+                            catch (Exception) { }
+                        }
                         // Teleport slightly away from the penetrator source
                         Vector3 dir = whoTransform != null
                             ? (_kobold.transform.position - whoTransform.position).normalized
