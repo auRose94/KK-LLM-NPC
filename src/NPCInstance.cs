@@ -169,9 +169,6 @@ namespace KKLLMNPC
         private float _playerChatTime;
         private string _lastDeliveredChat;
         // The game chat log as it read at the moment this NPC acquired its body ("awoke").
-        // chat_log only ever feeds lines added AFTER this point, so the NPC doesn't
-        // "read" the conversation that happened before it existed.
-        private string _chatBaseline;
         // Repeat suppression for say: small models emit the exact same line several
         // turns in a row, spamming the in-game chat window with duplicates.
         private string _lastSayText;
@@ -201,6 +198,10 @@ namespace KKLLMNPC
 
         // One-shot nudge: appended to next system prompt after say-repeat suppression.
         internal bool _pendingSayNudge;
+
+        // Retry flag: set when LLM returns empty content (reasoning-only stream).
+        // Next turn appends a hint to the user message so the model replies with content.
+        internal bool _emptyContentRetry;
 
         // Reagent / belly awareness.
         private readonly Queue<string> _reagentEvents = new Queue<string>();
@@ -689,10 +690,11 @@ namespace KKLLMNPC
             lock (_thoughtHistory) { _thoughtHistory.Clear(); }
             lock (_facts) { _facts.Clear(); }
             _lastThought = "just woke up"; _lastAction = "none"; _tick = 0; _blockedInfo = null; _modelError = null;
-            _playerChat = null; _lastDeliveredChat = null; _chatBaseline = null;
+            _playerChat = null; _lastDeliveredChat = null;
             lock (_chatEntries) { _chatEntries.Clear(); }
             _seenChatAcks.Clear();
             _pendingSayNudge = false;
+            _emptyContentRetry = false;
             _lastSays.Clear();
             BodyLost = false; _bodyLostLogged = false;
             lock (_goalLock)

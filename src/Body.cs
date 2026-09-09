@@ -193,9 +193,6 @@ namespace KKLLMNPC
                 _npcName = PickName(target);   // base: prefab name — the LLM finalizes
                 _persona = BuildPersona();     // it in FinalizeIdentity (LLM thread) so
                                                // the main thread never blocks on HTTP
-                // "Awake" moment: mark the chat log so we only read what happens from now
-                // on — not the conversation other players had before this NPC existed.
-                try { _chatBaseline = CheatsProcessor.GetOutput() ?? ""; } catch (Exception) { _chatBaseline = ""; }
             }
             _yawDeg = target.transform.eulerAngles.y; // start from current facing
             _controller = target.GetComponent<KoboldCharacterController>();
