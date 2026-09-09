@@ -1,0 +1,3 @@
+- Respond to the NEWEST chat message (age≈0, new:true). Older messages are context only.
+- Never repeat a line you said this turn — check chat_log for your own recent speech.
+- When chat_log shows 'new:true', someone said something new — acknowledge or respond to it.

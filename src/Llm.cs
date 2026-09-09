@@ -685,6 +685,12 @@ namespace KKLLMNPC
                     : new Dictionary<string, object> { ["type"] = "text" };
 
                 string sysPrompt = IsSmallModel ? CompactSystemPrompt() : SystemPromptWithPersona();
+                // One-shot nudge after say-repeat suppression.
+                if (_pendingSayNudge)
+                {
+                    _pendingSayNudge = false;
+                    sysPrompt += "\nYou just repeated yourself — say something new or take an action.";
+                }
 
                 var payload = new Dictionary<string, object>
                 {
@@ -805,6 +811,12 @@ namespace KKLLMNPC
                     {
                         string preview = rawResponse.Length > 500 ? rawResponse.Substring(0, 500) + "..." : rawResponse;
                         Logger.LogWarning("LLM raw response (empty content): " + preview);
+                        // Reasoning-only stream: model emitted reasoning_content but no content.
+                        // Inject a hint into the next turn so it replies with normal content.
+                        if (rawResponse.Contains("reasoning_content"))
+                        {
+                            _modelError = "Your last reply contained ONLY reasoning (chain-of-thought) with no actual content. Reply with your answer as normal content, no reasoning.";
+                        }
                     }
                     var message = new Dictionary<string, object> { ["role"] = role };
                     if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;

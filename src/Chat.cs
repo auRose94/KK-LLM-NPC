@@ -167,72 +167,121 @@ namespace KKLLMNPC
         }
 
         // The full conversation as far as the game's chat panel has accumulated it
-        // (player lines + our own ToolSay lines), trimmed to the last ChatLogLines
-        // conversation lines. Strip HTML color tags and drop non-speech notices.
-        // Returns a JSON array (or "[]" if empty / disabled).
+        // (player lines + our own ToolSay lines), trimmed to the newest entries.
+        // Each entry includes a timestamp for age calculation and an ack flag.
+        // Returns a JSON array of {from, text, age, new} objects (or "[]" if empty).
         private string ChatLogJson()
         {
             try
             {
                 if (_cfgChatLogLines == null || _cfgChatLogLines.Value <= 0) return "[]";
-                string output;
-                try { output = CheatsProcessor.GetOutput(); }
-                catch (Exception) { return "[]"; }
-                if (string.IsNullOrEmpty(output)) return "[]";
-
-                // Only feed what happened AFTER this NPC awoke. The log grows by
-                // appending, so strip the baseline snapshot we took at body-acquire.
-                // If the log was reset (no longer starts with the baseline), the baseline
-                // is stale — treat the whole current log as fresh from now on.
-                if (!string.IsNullOrEmpty(_chatBaseline))
-                {
-                    if (output.StartsWith(_chatBaseline, StringComparison.Ordinal))
-                        output = output.Substring(_chatBaseline.Length);
-                    else
-                        _chatBaseline = null;
-                }
-                if (string.IsNullOrEmpty(output)) return "[]";
-
-                var lines = new System.Collections.Generic.List<string>();
+                float now = Time.unscaledTime;
                 string myName = MyName();
-                foreach (var raw in output.Split('\n'))
-                {
-                    if (string.IsNullOrEmpty(raw)) continue;
-                    string l = raw.Trim();
-                    if (l.Length == 0) continue;
-                    // Keep only human-readable speech lines: "<speaker>: <text>". Strip
-                    // BBCode-ish color tags like "<color=yellow>…</color>".
-                    int colon = l.IndexOf(':');
-                    if (colon <= 0 || colon > 32) continue;
-                    string speaker = l.Substring(0, colon).Trim();
-                    string body = l.Substring(colon + 1).Trim();
-                    if (speaker.Length == 0 || body.Length == 0) continue;
-                    if (speaker.StartsWith("<color", StringComparison.Ordinal) ||
-                        speaker.StartsWith("<", StringComparison.Ordinal)) continue;
-                    // Drop cheat/system commands so the NPC never has to interpret them.
-                    if (IsCheatCommand(body)) continue;
-                    // Skip own messages — the model already knows what it said.
-                    if (string.Equals(speaker, myName, StringComparison.OrdinalIgnoreCase)) continue;
-                    string clean = StripChatMarkup(l);
-                    lines.Add(clean);
-                }
 
-                int keep = Math.Min(_cfgChatLogLines.Value, MaxChatLog);
-                int start = lines.Count - keep;
-                if (start < 0) start = 0;
+                // Prune old entries and cap by count.
+                lock (_chatEntries)
+                {
+                    // Remove entries older than 60s.
+                    for (int i = _chatEntries.Count - 1; i >= 0; i--)
+                    {
+                        if (now - _chatEntries[i].Time > MaxChatEntriesAge)
+                            _chatEntries.RemoveAt(i);
+                    }
+                    // Cap to newest N entries.
+                    int keep = Math.Min(_cfgChatLogLines.Value, MaxChatEntriesCount);
+                    while (_chatEntries.Count > keep)
+                        _chatEntries.RemoveAt(0);
+                }
 
                 var sb = new StringBuilder("[");
                 bool first = true;
-                for (int i = start; i < lines.Count; i++)
+                lock (_chatEntries)
                 {
-                    if (!first) sb.Append(',');
-                    first = false;
-                    sb.Append(Json.Write(lines[i]));
+                    foreach (var e in _chatEntries)
+                    {
+                        // Skip own messages — the model already knows what it said.
+                        if (string.Equals(e.From, myName, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!first) sb.Append(',');
+                        first = false;
+                        double age = Math.Round(now - e.Time, 1);
+                        bool isNew = !_seenChatAcks.Contains(e.AckId);
+                        sb.Append("{\"from\":");
+                        sb.Append(Json.Write(e.From));
+                        sb.Append(",\"text\":");
+                        sb.Append(Json.Write(e.Text));
+                        sb.Append(",\"age\":");
+                        sb.Append(age.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+                        sb.Append(",\"new\":");
+                        sb.Append(isNew ? "true" : "false");
+                        sb.Append('}');
+                    }
                 }
                 sb.Append(']');
                 return sb.ToString();
             }
             catch (Exception) { return "[]"; }
+        }
+
+        // Record a chat entry with timestamp for the timestamped chat log.
+        private void RecordChatEntry(string speaker, string text)
+        {
+            if (string.IsNullOrEmpty(speaker) || string.IsNullOrEmpty(text)) return;
+            string clean = StripChatMarkup(text);
+            if (clean.Length == 0) return;
+            string ackId = ComputeAckId(speaker, clean);
+            lock (_chatEntries)
+            {
+                _chatEntries.Add(new ChatEntry
+                {
+                    From = speaker,
+                    Text = clean,
+                    Time = Time.unscaledTime,
+                    AckId = ackId,
+                });
+            }
+        }
+
+        // Compute a stable ack ID for a chat entry (hash of from+text+t).
+        private static string ComputeAckId(string from, string text)
+        {
+            // Simple FNV-1a hash for a stable, collision-resistant ID.
+            uint hash = 2166136261;
+            foreach (char c in from)
+            {
+                hash ^= (uint)c;
+                hash *= 16777619;
+            }
+            foreach (char c in text)
+            {
+                hash ^= (uint)c;
+                hash *= 16777619;
+            }
+            return hash.ToString("x8");
+        }
+
+        // Mark unseen chat entries that fuzzy-match the given text as "seen" (ack).
+        private void MarkChatAcks(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            lock (_chatEntries)
+            {
+                foreach (var e in _chatEntries)
+                {
+                    if (_seenChatAcks.Contains(e.AckId)) continue;
+                    if (ChatSimilarity.FuzzyMatchesChat(text, e.Text))
+                    {
+                        _seenChatAcks.Add(e.AckId);
+                        // Cap the seen-set.
+                        while (_seenChatAcks.Count > MaxSeenAcks)
+                        {
+                            // Remove oldest entries (first in set — arbitrary but bounded).
+                            var first = default(string);
+                            foreach (var k in _seenChatAcks) { first = k; break; }
+                            if (first != null) _seenChatAcks.Remove(first);
+                        }
+                    }
+                }
+            }
         }
 
         private static string StripChatMarkup(string s)
@@ -265,19 +314,37 @@ namespace KKLLMNPC
             if (text.Length == 0) text = p.S("message", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
             text = Sanitize(text);
-            // Repeat suppression: small models emit the exact same line several turns
-            // in a row, spamming the in-game chat window with duplicates. The line was
-            // already delivered once, so acknowledge it and nudge the model onward.
+            // Repeat suppression: check exact match, Jaccard, and Levenshtein ratio
+            // against the last 3 says to catch near-duplicate loops.
             lock (_sayLock)
             {
+                // Exact match within 15s.
                 if (Time.unscaledTime - _lastSayTime < 15f && string.Equals(_lastSayText, text, StringComparison.Ordinal))
                 {
-                    Logger.LogInfo("[NPC] say suppressed (repeat within 15s): " + text);
-                    return new { ok = true, said = text, note = "you already said this line — don't repeat it; do something else" };
+                    Logger.LogInfo("[NPC] say suppressed (exact repeat within 15s): " + text);
+                    _pendingSayNudge = true;
+                    return new { ok = true, said = text, reason = "say_repeat", note = "you already said this line — don't repeat it; do something else" };
                 }
+                // Similarity check against last 3 says.
+                foreach (var prev in _lastSays)
+                {
+                    double jaccard = ChatSimilarity.JaccardSimilarity(text, prev);
+                    double levRatio = ChatSimilarity.LevenshteinRatio(text, prev);
+                    if (jaccard > 0.65 || levRatio > 0.8)
+                    {
+                        Logger.LogInfo("[NPC] say suppressed (similar to recent): jaccard=" + jaccard.ToString("0.00") + " lev=" + levRatio.ToString("0.00") + " text=" + text);
+                        _pendingSayNudge = true;
+                        return new { ok = true, said = text, reason = "say_repeat", note = "you just said something very similar — say something different or take an action" };
+                    }
+                }
+                // Not a repeat — add to rolling list.
+                _lastSays.Enqueue(text);
+                while (_lastSays.Count > MaxLastSays) _lastSays.Dequeue();
                 _lastSayText = text;
                 _lastSayTime = Time.unscaledTime;
             }
+            // Mark unseen chat entries that this say fuzzy-matches as "seen" (ack).
+            MarkChatAcks(text);
             string who = _kobold != null ? CleanName(_kobold.name) : "NPC";
             Logger.LogInfo("[NPC] " + who + ": " + text); // always visible in the console/log
             RunOnMainThreadAsync(() =>

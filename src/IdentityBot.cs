@@ -34,6 +34,8 @@ namespace KKLLMNPC
         private string _roomName;
         private string _nickName;
         private int _retries;
+        private int _backoffSeconds = 2; // exponential backoff: 2s → 4s → 8s … cap 30s
+        private const int MaxBackoffSeconds = 30;
         private DateTime _lastRetryUtc = DateTime.MinValue;
         private DateTime _lastStartUtc = DateTime.MinValue;
         private readonly object _stateLock = new object();
@@ -54,9 +56,9 @@ namespace KKLLMNPC
             lock (_stateLock)
             {
                 if (_inRoom && _roomName == roomName && _nickName == nickName) return;
-                // Restart rate-limit: while the bot is down, the fallback (owner-attributed
+                // Exponential backoff: while the bot is down, the fallback (owner-attributed
                 // chat) covers us, so there's no point hammering Photon every turn.
-                if ((DateTime.UtcNow - _lastStartUtc).TotalSeconds < 10) return;
+                if ((DateTime.UtcNow - _lastStartUtc).TotalSeconds < _backoffSeconds) return;
                 if (_running || _client != null)
                 {
                     // A previous attempt is stalled or gave up (retries exhausted) — tear it
@@ -183,14 +185,17 @@ namespace KKLLMNPC
         public void OnDisconnected(DisconnectCause cause)
         {
             _inRoom = false;
-            _npc.Logger.LogWarning("[identity-bot] disconnected: " + cause + " — falling back to owner-attributed chat");
-            // A couple of bounded reconnect attempts, then give up (fallback covers us).
-            if (_running && _retries < 2 && (DateTime.UtcNow - _lastRetryUtc).TotalSeconds > 5)
+            _retries++;
+            _npc.Logger.LogWarning("[identity-bot] disconnected: " + cause + " (attempt " + _retries + ", backoff=" + _backoffSeconds + "s) — falling back to owner-attributed chat");
+            // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap.
+            // After 3 consecutive failures, stop trying for this turn (fallback covers us).
+            if (_running && _retries <= 3)
             {
-                _retries++;
                 _lastRetryUtc = DateTime.UtcNow;
                 try { if (_client != null) _client.ConnectUsingSettings(BuildAppSettings()); }
                 catch (Exception e) { _npc.Logger.LogWarning("[identity-bot] reconnect: " + e.Message); }
+                // Double backoff for next failure (cap at 30s).
+                _backoffSeconds = Math.Min(_backoffSeconds * 2, MaxBackoffSeconds);
             }
         }
         public void OnCustomAuthenticationResponse(Dictionary<string, object> data) { }
@@ -210,6 +215,7 @@ namespace KKLLMNPC
         {
             _inRoom = true;
             _retries = 0;
+            _backoffSeconds = 2; // reset backoff on success
             _npc.Logger.LogInfo("[identity-bot] in room as '" + _nickName + "' — NPC chat now attributed to the NPC");
         }
         public void OnJoinRoomFailed(short returnCode, string message)
