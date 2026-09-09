@@ -87,6 +87,7 @@ namespace KKLLMNPC
                             crouch = F(_crouch),
                         };
                         cached["needs"] = needs;
+                        try { ModuleRegistry.RunPerception(this, cached); } catch (Exception e) { Logger.LogDebug("module perception (cache): " + e.Message); }
                         return cached;
                     }
                 }
@@ -299,6 +300,10 @@ namespace KKLLMNPC
             // Compaction status: tell the model if it's running in compressed mode.
             if (_ctxMgr != null && _ctxMgr.CompactionLevel > 0)
                 result["compaction"] = _ctxMgr.CompactionStatusJson();
+
+            // Module perception hooks (BodyControl, Farming, Identity, ...) add their
+            // keys here — modules never edit this file.
+            try { ModuleRegistry.RunPerception(this, result); } catch (Exception e) { Logger.LogDebug("module perception: " + e.Message); }
 
             return result;
         }

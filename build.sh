@@ -76,6 +76,11 @@ if [ "$COMPILER" = "mcs" ]; then
     # Ship the system-prompt file next to the DLL (LLM.SystemPromptFile default is
     # resolved relative to the plugin dir). Optional — built-in prompt is the fallback.
     [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
+    # Module prompt extras (each module adds prompt_extras/<name>.txt).
+    if [ -d prompt_extras ] && [ -n "$(ls -A prompt_extras/*.txt 2>/dev/null)" ]; then
+      mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
+      cp -f prompt_extras/*.txt "$KDIR/BepInEx/plugins/prompt_extras/"
+    fi
     printf 'Built with mcs and deployed %s\n' "$KDIR/BepInEx/plugins/KKLLMNPC.dll"
 elif [ "$COMPILER" = "dotnet" ]; then
     # .NET SDK path — requires a .csproj (create one if missing)
@@ -116,6 +121,10 @@ PROJ
     fi
     dotnet build -c Release -o "$KDIR/BepInEx/plugins/"
     [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
+    if [ -d prompt_extras ] && [ -n "$(ls -A prompt_extras/*.txt 2>/dev/null)" ]; then
+      mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
+      cp -f prompt_extras/*.txt "$KDIR/BepInEx/plugins/prompt_extras/"
+    fi
     echo "Built with dotnet and deployed to $KDIR/BepInEx/plugins/"
 else
     echo "ERROR: Unknown compiler '$COMPILER'" >&2

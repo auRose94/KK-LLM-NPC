@@ -208,6 +208,8 @@ namespace KKLLMNPC
 
             float dt = Time.fixedDeltaTime;
             UpdateHorniness(dt);
+            // Module hooks (BodyControl etc.) — each guarded, never breaks the tick.
+            try { ModuleRegistry.RunPhysics(this, dt); } catch (Exception e) { Logger.LogDebug("module physics: " + e.Message); }
             float turnRate = _cfgTurnRate != null ? _cfgTurnRate.Value : 180f;
             float accel = _cfgAccel != null ? _cfgAccel.Value : 4f;
             float decel = _cfgDecel != null ? _cfgDecel.Value : 6f;

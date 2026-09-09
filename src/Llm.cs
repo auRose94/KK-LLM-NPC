@@ -562,11 +562,15 @@ namespace KKLLMNPC
 
         // The configured system prompt, plus the derived body persona (personality,
         // gender, pronouns) so every turn the model is reminded of WHO it is.
+        // Module prompt extras (prompt_extras/*.txt) are appended last — each module
+        // ships its own file instead of editing the shared prompt.
         private string SystemPromptWithPersona()
         {
             string base_ = ResolveSystemPromptBase();
-            if (string.IsNullOrEmpty(_persona)) return base_;
-            return base_ + "\n" + _persona;
+            string extras = "";
+            try { extras = ModuleRegistry.PromptExtras(); } catch (Exception) { }
+            if (string.IsNullOrEmpty(_persona)) return base_ + extras;
+            return base_ + "\n" + _persona + extras;
         }
 
         // Compact system prompt for small models (7B-13B). Covers the essentials
@@ -1280,6 +1284,7 @@ namespace KKLLMNPC
         // (legacy aliases jump/move_to/walk_ray included — RunTool maps them).
         private bool IsKnownToolWord(string key)
         {
+            if (ModuleRegistry.IsModuleTool(key)) return true;
             switch (key)
             {
                 case "walk":
@@ -1373,7 +1378,9 @@ namespace KKLLMNPC
             if (aliases.TryGetValue(s, out alias)) return alias;
             // Substring containment: "go" in a blob → go_to, "walk" in a blob → walk, etc.
             // Order matters: check longer matches first to avoid "go" matching before "go_to".
-            string[] ordered = new[] { "complete_goal", "set_goal", "drop_goal", "exit_station", "look_around", "walk_ray", "go_to", "follow", "move_to", "interact", "remember", "forget", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
+            var orderedList = new List<string> { "complete_goal", "set_goal", "drop_goal", "exit_station", "look_around", "walk_ray", "go_to", "follow", "move_to", "interact", "remember", "forget", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
+            foreach (var mt in ModuleRegistry.ModuleToolNames()) if (!orderedList.Contains(mt)) orderedList.Add(mt);
+            string[] ordered = orderedList.ToArray();
             foreach (var tool in ordered)
                 if (s.Contains(tool)) return tool;
             // Prefix match: first 3+ chars of a known tool.
@@ -1391,6 +1398,7 @@ namespace KKLLMNPC
 
         private static bool IsKnownToolWordStatic(string key)
         {
+            if (ModuleRegistry.IsModuleTool(key)) return true;
             switch (key)
             {
                 case "walk":
@@ -1691,8 +1699,15 @@ namespace KKLLMNPC
                     case "status": return ToolStatus();
                     case "none": return new { ok = true };
                     default:
+                        // Module tools (BodyControl, Farming, Identity, ...) register
+                        // via ModuleRegistry — dispatch before declaring unknown.
+                        {
+                            object moduleResult;
+                            if (ModuleRegistry.TryTool(name, this, p, out moduleResult))
+                                return moduleResult;
+                        }
                         // Model was asked for act= but produced a legacy/unknown name.
-                        SetModelError("Invalid action '" + name + "'. Valid actions: go_to, walk, follow, stop, survey, look_around, look, exit_station, crouch, interact, grab, drop, say, remember, forget, set_goal, complete_goal, drop_goal, ask, status, none.");
+                        SetModelError("Invalid action '" + name + "'. Valid actions: go_to, walk, follow, stop, survey, look_around, look, exit_station, crouch, interact, grab, drop, say, remember, forget, set_goal, complete_goal, drop_goal, ask, status, none, " + string.Join(", ", ModuleRegistry.ModuleToolNames()) + ".");
                         Logger.LogWarning("unknown action: " + name);
                         return new { ok = false, reason = "unknown_tool", tool = name };
                 }
@@ -1748,12 +1763,18 @@ namespace KKLLMNPC
 
         private Dictionary<string, object> ActionParamProps()
         {
-            return new Dictionary<string, object>
+            // Module-registered tools extend the action enum and the param schema —
+            // each module ships its own file, no edits to this method needed.
+            var extra = ModuleRegistry.ModuleToolNames();
+            var enumVals = new List<object> { "go_to", "walk", "follow", "stop", "survey", "remember", "ask", "look_around", "look", "exit_station", "crouch", "interact", "grab", "drop", "say", "status", "none" };
+            foreach (var e in extra) if (!enumVals.Contains(e)) enumVals.Add(e);
+
+            var props = new Dictionary<string, object>
             {
                 // ACTION FIRST: reasoning models burn tokens on "thought" and can
                 // truncate before emitting the action. Emitting action (and the
                 // movement/say params) first means even a truncated call still acts.
-                ["action"] = new Dictionary<string, object> { ["type"] = "string", ["enum"] = new object[] { "go_to", "walk", "follow", "stop", "survey", "remember", "ask", "look_around", "look", "exit_station", "crouch", "interact", "grab", "drop", "say", "status", "none" } },
+                ["action"] = new Dictionary<string, object> { ["type"] = "string", ["enum"] = enumVals.ToArray() },
                 ["say"] = Str("say", "optional <10 words — posts to the real in-game chat window AND a speech bubble"),
                 ["name"] = Str("name", "go_to: place to reach by name — 'bed' 'toilet' 'bath' 'nest' 'sex' 'seat' 'door' 'bodyswap', a PLAYER'S chat name (host or from 'people'), or any usable's name"),
                 ["id"] = Num("id", "go_to/interact: the numeric 'id' of a specific object from your 'nearby' or survey result — use this to target an exact object instead of matching by name (e.g. go_to id:3, interact id:2)"),
@@ -1773,6 +1794,10 @@ namespace KKLLMNPC
                 ["pitch_deg"] = Num("pitch_deg", "look abs pitch"),
                 ["sweep"] = Num("sweep", "look_around: degrees to sweep around (default 120)"),
             };
+            // Merge module-registered tool parameters (thrust, erection, plant, ...).
+            foreach (var kv in ModuleRegistry.ModuleParamSchemas())
+                if (!props.ContainsKey(kv.Key)) props[kv.Key] = kv.Value;
+            return props;
         }
 
         private Dictionary<string, object> Num(string n, string d) { return new Dictionary<string, object> { ["type"] = new object[] { "number", "null" }, ["description"] = d }; }

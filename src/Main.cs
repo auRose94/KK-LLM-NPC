@@ -160,6 +160,9 @@ namespace KKLLMNPC
             Log = Logger;
             Json.ErrorLog = msg => { try { Log?.LogWarning(msg); } catch (Exception) { } };
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
+            // Discover module partials (tools/perception/physics hooks) — reflection
+            // scan, so new module files register without touching shared files.
+            try { ModuleRegistry.Scan(); } catch (Exception e) { Logger.LogWarning("module scan: " + e.Message); }
 
             _cfgEndpoint = Config.Bind("LLM", "Endpoint", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions URL. LM Studio default: http://127.0.0.1:1234/v1/chat/completions");
             _cfgModel = Config.Bind("LLM", "Model", "local-model", "Model name to request. LM Studio: use the exact model name from the Developer tab. KoboldCpp: 'local-model' works.");
