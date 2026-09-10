@@ -264,7 +264,10 @@ namespace KKLLMNPC
             else if (b == _kobold) next = a;
             if (next == null || _kobold == null) return;
             string prevName = PickName(_kobold);
-            Logger.LogInfo("KKLLMNPC: '" + (_npcName ?? "?") + "' body-swapping " + prevName + " -> " + PickName(next));
+            string newName = PickName(next);
+            Logger.LogInfo("KKLLMNPC: '" + (_npcName ?? "?") + "' body-swapping " + prevName + " -> " + newName);
+            // Record swap for BodyControl perception (ring buffer + identity flag).
+            try { RecordSwap(prevName, newName); } catch (Exception) { }
             RunOnMainThread(() =>
             {
                 try { RebindAfterSwap(next); }
