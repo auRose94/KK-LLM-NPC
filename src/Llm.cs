@@ -1255,6 +1255,15 @@ namespace KKLLMNPC
                                 else if (k == "go_to") { if (!fields.ContainsKey("name")) fields["name"] = content2; }
                                 else if (k == "remember") { if (!fields.ContainsKey("mem")) fields["mem"] = content2; }
                                 else if (k == "ask") { if (!fields.ContainsKey("q")) fields["q"] = content2; }
+                                else if (k == "follow")
+                                {
+                                    // Parse "on:true" / "on:false" into fields so ToolFollow gets the param.
+                                    var fp = content2.Split(':');
+                                    if (fp.Length == 2 && bool.TryParse(fp[1].Trim(), out bool onVal))
+                                        fields["on"] = onVal.ToString();
+                                    else if (bool.TryParse(content2.Trim(), out onVal))
+                                        fields["on"] = onVal.ToString();
+                                }
                             }
                         }
                         break;
@@ -1625,6 +1634,15 @@ namespace KKLLMNPC
                         else if (tool == "go_to" && !d.ContainsKey("name")) d["name"] = payload;
                         else if (tool == "remember" && !d.ContainsKey("mem")) d["mem"] = payload;
                         else if (tool == "ask" && !d.ContainsKey("q")) d["q"] = payload;
+                        else if (tool == "follow")
+                        {
+                            // Parse "on:true" / "on:false" into the dict.
+                            var fp = payload.Split(':');
+                            if (fp.Length == 2 && bool.TryParse(fp[1].Trim(), out bool onVal))
+                                d["on"] = onVal;
+                            else if (bool.TryParse(payload.Trim(), out onVal))
+                                d["on"] = onVal;
+                        }
                         Logger.LogInfo("small-model salvage: " + tool + " → " + payload);
                         return new JsonObj(d);
                     }
