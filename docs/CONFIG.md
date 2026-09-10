@@ -76,6 +76,15 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `PathfindingCellSize` | `0.5` | 0.1–5m | A* grid cell size in meters |
 | `PathfindingWindow` | `20` | 2–100m | A* search window radius in meters around start and goal |
 | `PathfindingNodes` | `9000` | 200–50000 | Max pathfinding grid node budget before it gives up and falls back to direct steering |
+| `PathTimeBudgetMs` | `8` | ≥1ms | Time budget (ms) for A* path expansion. On overrun, returns partial path instead of null |
+| `PathMaxExpansions` | `20000` | ≥100 | Max A* node expansions. On overrun, returns partial path instead of null |
+| `WorldMapEnabled` | `true` | bool | Build & cache a full-scene 3D walkability map shared by ALL agents |
+| `WorldMapCellSize` | `1.0` | 0.25–4m | World-map grid cell size in meters (auto-inflates if the node budget is exceeded) |
+| `WorldMapMaxSpan` | `2000` | ≥2m | Max span (m) for the full-scene world map. Adaptive cell sizing (span/1200, clamped to [0.5,4.0]) keeps the grid within the hard cell cap (~4M) |
+| `WorldMapMaxCells` | `4000000` | ≥1 | Hard cell cap for the world map. If cols×rows exceeds this, cell size is inflated |
+| `WorldMapAutoLayers` | `true` | bool | Auto-detect floor layers from scene Y samples (gap > 1.5m = new layer, cap 16). If false, uses fixed layer count |
+| `WorldMapLayers` | `4` | 1–16 | Fixed layer count (only used when WorldMapAutoLayers = false) |
+| `WorldMapCellsPerFrame` | `48` | ≥1 | World-map cells sampled per frame while building (higher = faster build, more per-frame physics cost) |
 
 ## [Needs] — Body State
 
