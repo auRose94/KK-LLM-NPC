@@ -644,6 +644,13 @@ namespace KKLLMNPC
                 string percep = perceptionJson;
                 if (percep.EndsWith("}")) percep = percep.Substring(0, percep.Length - 1) + mem + "}";
                 string text = "perception:" + percep;
+                // Retry hint: after an empty-content (reasoning-only) response, append
+                // an instruction so the model replies with normal content this turn.
+                if (_emptyContentRetry)
+                {
+                    _emptyContentRetry = false;
+                    text += "\n[INSTRUCTION] Your last reply contained only reasoning with no actual content. Reply with your answer as normal content, no reasoning.";
+                }
 
                 // With a vision-capable action model, attach frames as proper
                 // image parts. Send past images (oldest first) plus current frame
@@ -685,6 +692,12 @@ namespace KKLLMNPC
                     : new Dictionary<string, object> { ["type"] = "text" };
 
                 string sysPrompt = IsSmallModel ? CompactSystemPrompt() : SystemPromptWithPersona();
+                // One-shot nudge after say-repeat suppression.
+                if (_pendingSayNudge)
+                {
+                    _pendingSayNudge = false;
+                    sysPrompt += "\nYou just repeated yourself — say something new or take an action.";
+                }
 
                 var payload = new Dictionary<string, object>
                 {
@@ -805,6 +818,12 @@ namespace KKLLMNPC
                     {
                         string preview = rawResponse.Length > 500 ? rawResponse.Substring(0, 500) + "..." : rawResponse;
                         Logger.LogWarning("LLM raw response (empty content): " + preview);
+                        // Reasoning-only stream: model emitted reasoning_content but no content.
+                        // Set retry flag so next turn appends a hint to the user message.
+                        if (rawResponse.Contains("reasoning_content"))
+                        {
+                            _emptyContentRetry = true;
+                        }
                     }
                     var message = new Dictionary<string, object> { ["role"] = role };
                     if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;

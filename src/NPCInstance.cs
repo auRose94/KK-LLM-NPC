@@ -171,14 +171,39 @@ namespace KKLLMNPC
         private float _playerChatTime;
         private string _lastDeliveredChat;
         // The game chat log as it read at the moment this NPC acquired its body ("awoke").
-        // chat_log only ever feeds lines added AFTER this point, so the NPC doesn't
-        // "read" the conversation that happened before it existed.
-        private string _chatBaseline;
         // Repeat suppression for say: small models emit the exact same line several
         // turns in a row, spamming the in-game chat window with duplicates.
         private string _lastSayText;
         private float _lastSayTime = -99f;
         private readonly object _sayLock = new object();
+        // Rolling list of last 3 say texts for similarity-based repeat detection.
+        private readonly Queue<string> _lastSays = new Queue<string>();
+        private const int MaxLastSays = 3;
+
+        // Timestamped chat entries: (speaker, text, timeSeen). Feeds ChatLogJson()
+        // with age info and ack tracking.
+        private readonly List<ChatEntry> _chatEntries = new List<ChatEntry>();
+        private const int MaxChatEntriesAge = 60; // seconds
+        private const int MaxChatEntriesCount = 8;
+
+        internal sealed class ChatEntry
+        {
+            internal string From;
+            internal string Text;
+            internal float Time;
+            internal string AckId; // hash of from+text+t for dedup
+        }
+
+        // Ack tracking: seen chat entry IDs (cap 100). "new:true" until entry is seen.
+        private readonly HashSet<string> _seenChatAcks = new HashSet<string>();
+        private const int MaxSeenAcks = 100;
+
+        // One-shot nudge: appended to next system prompt after say-repeat suppression.
+        internal bool _pendingSayNudge;
+
+        // Retry flag: set when LLM returns empty content (reasoning-only stream).
+        // Next turn appends a hint to the user message so the model replies with content.
+        internal bool _emptyContentRetry;
 
         // Reagent / belly awareness.
         private readonly Queue<string> _reagentEvents = new Queue<string>();
@@ -595,6 +620,7 @@ namespace KKLLMNPC
             _playerChat = heard;
             _playerChatTime = Time.unscaledTime;
             Logger.LogInfo("heard chat: " + heard);
+            RecordChatEntry(isLocal ? "player" : (senderName ?? "someone"), msg);
 
             // Detect stay/leave commands from the player.
             if (isLocal && msg != null)
@@ -668,7 +694,12 @@ namespace KKLLMNPC
             lock (_thoughtHistory) { _thoughtHistory.Clear(); }
             lock (_facts) { _facts.Clear(); }
             _lastThought = "just woke up"; _lastAction = "none"; _tick = 0; _blockedInfo = null; _modelError = null;
-            _playerChat = null; _lastDeliveredChat = null; _chatBaseline = null;
+            _playerChat = null; _lastDeliveredChat = null;
+            lock (_chatEntries) { _chatEntries.Clear(); }
+            _seenChatAcks.Clear();
+            _pendingSayNudge = false;
+            _emptyContentRetry = false;
+            _lastSays.Clear();
             BodyLost = false; _bodyLostLogged = false;
             lock (_goalLock)
             {
