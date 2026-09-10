@@ -127,6 +127,8 @@ namespace KKLLMNPC
         internal ConfigEntry<int> _cfgFactDecay;
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
+        internal ConfigEntry<float> _cfgFarmScanRadius;
+        internal ConfigEntry<int> _cfgFarmScanMax;
 
         // ---- instance management ----
         private readonly List<NPCInstance> _instances = new List<NPCInstance>();
@@ -277,6 +279,10 @@ namespace KKLLMNPC
                 "Run a second Photon client in the room under the NPC's own name so its chat renders as 'KoboldName: text' to EVERYONE (not attributed to you). OFF = safe default (chat shows 'YourName: KoboldName: text' to others). Opt-in: adds a room player, may affect player count / host logic.");
             _cfgIdentityAppId = Config.Bind("Multiplayer", "IdentityAppId", "",
                 "Photon AppId for the identity bot. Blank = reuse the game's own AppId (recommended). Only set if the game's is not accessible.");
+            _cfgFarmScanRadius = Config.Bind("Farming", "ScanRadius", 3.0f,
+                "Radius (m) to scan for seeds, plants, watering cans, blenders, grinders, and egg spawners");
+            _cfgFarmScanMax = Config.Bind("Farming", "ScanMax", 8,
+                "Max number of farm entries in perception (cap to keep payload small)");
 
             // Clamp config values to safe ranges to prevent divide-by-zero, negative durations, etc.
             _cfgThinkInterval.Value = Mathf.Clamp(_cfgThinkInterval.Value, 0.05f, 10f);
@@ -315,6 +321,8 @@ namespace KKLLMNPC
             _cfgAccel.Value = Mathf.Clamp(_cfgAccel.Value, 0.5f, 50f);
             _cfgDecel.Value = Mathf.Clamp(_cfgDecel.Value, 0.5f, 50f);
             _cfgBrakeDist.Value = Mathf.Clamp(_cfgBrakeDist.Value, 0.1f, 20f);
+            _cfgFarmScanRadius.Value = Mathf.Clamp(_cfgFarmScanRadius.Value, 1f, 20f);
+            _cfgFarmScanMax.Value = Mathf.Clamp(_cfgFarmScanMax.Value, 1, 20);
 
             // Full-scene shared map: clamp the build params and push them into the
             // static WorldMap (shared by every instance/agent in this assembly).

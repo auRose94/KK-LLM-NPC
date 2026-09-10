@@ -90,6 +90,8 @@ namespace KKLLMNPC
         internal ConfigEntry<int> _cfgFactDecay;
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
+        internal ConfigEntry<float> _cfgFarmScanRadius;
+        internal ConfigEntry<int> _cfgFarmScanMax;
 
         // ---- runtime state ----
         private Thread _llmThread;
@@ -473,6 +475,8 @@ namespace KKLLMNPC
             _cfgFactDecay = plugin._cfgFactDecay;
             _cfgIdentityBot = plugin._cfgIdentityBot;
             _cfgIdentityAppId = plugin._cfgIdentityAppId;
+            _cfgFarmScanRadius = plugin._cfgFarmScanRadius;
+            _cfgFarmScanMax = plugin._cfgFarmScanMax;
         }
 
         // ------------------------------------------------------------------
