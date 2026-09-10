@@ -64,12 +64,17 @@ namespace KKLLMNPC
         public const float MinPathSpan = 2f;
         public const float MaxPathSpan = 100f;
         public const float PathMinSpan = 4f;
+        // Max layers for per-query local grid (PathGridState). WorldMap auto-detects.
         public const int PathMaxLayers = 4;
         public const float PathClimbStep = 0.5f;
         public const int PathDoorCrossCost = 550;
         public const int PathNodeBudgetMin = 2048;
         public const int PathWaypointLimit = 100000;
         public const float PathRayHeightOffset = 0.75f;
+        // Time budget for A* expansion (ms). On overrun, partial path is returned.
+        public const float PathTimeBudgetMs = 8f;
+        // Max A* node expansions (default). On overrun, partial path is returned.
+        public const int PathMaxExpansions = 20000;
 
         // ---- Radar ----
         public const int DefaultRadarSize = 10;

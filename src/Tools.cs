@@ -319,19 +319,31 @@ namespace KKLLMNPC
                         SetMove(1f, 0f, false, 0f, Mathf.Clamp(stopAt / 2f, 0.3f, 12f), p.B("run", false));
                         return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "continuing path; re-issue go_to to replan" };
                     }
-                    // 1) Shared full-scene map: routes the WHOLE scene (stairs, ramps,
-                    //    stacked floors, any distance in bounds) — the fix for stations
-                    //    that are "too far" for the local window grid.
-                    if (WorldMap.Ready)
+                    // Try the background worker first (non-blocking).
+                    List<Vector3> bgPath = null;
+                    try { bgPath = PathWorker.GetResult(_currentKoboldId); } catch (Exception) { }
+
+                    // If no background result ready, try main-thread pathfinding.
+                    if (bgPath == null)
                     {
-                        try { path = (List<Vector3>)RunOnMainThread(() => WorldMap.FindPathSmoothed(_kobold.transform.position, arrive), 20000); }
-                        catch (Exception e) { Logger.LogWarning("world-map path: " + e.Message); }
+                        // 1) Shared full-scene map: routes the WHOLE scene (stairs, ramps,
+                        //    stacked floors, any distance in bounds) — the fix for stations
+                        //    that are "too far" for the local window grid.
+                        if (WorldMap.Ready)
+                        {
+                            try { path = (List<Vector3>)RunOnMainThread(() => WorldMap.FindPathSmoothed(_kobold.transform.position, arrive), 20000); }
+                            catch (Exception e) { Logger.LogWarning("world-map path: " + e.Message); }
+                        }
+                        // 2) Local window A* (map building, or points outside map bounds).
+                        if (path == null && _cfgPathEnabled.Value)
+                        {
+                            try { path = (List<Vector3>)RunOnMainThread(() => FindPath(_kobold.transform.position, arrive), 12000); }
+                            catch (Exception e) { Logger.LogWarning("pathfind: " + e.Message); }
+                        }
                     }
-                    // 2) Local window A* (map building, or points outside map bounds).
-                    if (path == null && _cfgPathEnabled.Value)
+                    else
                     {
-                        try { path = (List<Vector3>)RunOnMainThread(() => FindPath(_kobold.transform.position, arrive), 12000); }
-                        catch (Exception e) { Logger.LogWarning("pathfind: " + e.Message); }
+                        path = bgPath;
                     }
                 }
                 if (path != null && path.Count >= 2)

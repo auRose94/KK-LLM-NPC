@@ -106,9 +106,13 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgPathCell;
         internal ConfigEntry<float> _cfgPathSpan;
         internal ConfigEntry<int> _cfgPathCap;
+        internal ConfigEntry<float> _cfgPathTimeBudget;
+        internal ConfigEntry<int> _cfgPathMaxExpansions;
         internal ConfigEntry<bool> _cfgMapEnabled;
         internal ConfigEntry<float> _cfgMapCell;
         internal ConfigEntry<float> _cfgMapSpan;
+        internal ConfigEntry<int> _cfgMapMaxCells;
+        internal ConfigEntry<bool> _cfgMapAutoLayers;
         internal ConfigEntry<int> _cfgMapCpf;
         internal ConfigEntry<int> _cfgMapLayers;
         internal ConfigEntry<int> _cfgMaxNPCs;
@@ -163,6 +167,8 @@ namespace KKLLMNPC
             // Discover module partials (tools/perception/physics hooks) — reflection
             // scan, so new module files register without touching shared files.
             try { ModuleRegistry.Scan(); } catch (Exception e) { Logger.LogWarning("module scan: " + e.Message); }
+            // Start the background path worker.
+            PathWorker.Start();
 
             _cfgEndpoint = Config.Bind("LLM", "Endpoint", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions URL. LM Studio default: http://127.0.0.1:1234/v1/chat/completions");
             _cfgModel = Config.Bind("LLM", "Model", "local-model", "Model name to request. LM Studio: use the exact model name from the Developer tab. KoboldCpp: 'local-model' works.");
@@ -214,12 +220,19 @@ namespace KKLLMNPC
             _cfgPathCell = Config.Bind("Movement", "PathfindingCellSize", Consts.DefaultPathCellSize, "A* grid cell size in meters");
             _cfgPathSpan = Config.Bind("Movement", "PathfindingWindow", Consts.DefaultPathSpan, "A* search window radius in meters around start and goal (clamped by node budget)");
             _cfgPathCap = Config.Bind("Movement", "PathfindingNodes", Consts.DefaultPathNodeCap, "Max pathfinding grid node budget before it gives up and falls back to direct steering");
+            // Time budget for A* expansion (ms). On overrun, partial path is returned.
+            _cfgPathTimeBudget = Config.Bind("Movement", "PathTimeBudgetMs", Consts.PathTimeBudgetMs, "Time budget (ms) for A* path expansion. On overrun, returns partial path instead of null.");
+            _cfgPathMaxExpansions = Config.Bind("Movement", "PathMaxExpansions", Consts.PathMaxExpansions, "Max A* node expansions. On overrun, returns partial path instead of null.");
             _cfgMapEnabled = Config.Bind("Movement", "WorldMapEnabled", true,
                 "Build & cache a full-scene 3D walkability map shared by ALL agents (BepInEx/config/kkllmnpc_maps/<scene>.kkmap). go_to routes stairs/ramps/other floors and any in-bounds distance; falls back to the local window grid while it builds");
             _cfgMapCell = Config.Bind("Movement", "WorldMapCellSize", 1.0f,
                 "World-map grid cell size in meters (auto-inflates if the node budget is exceeded)");
-            _cfgMapSpan = Config.Bind("Movement", "WorldMapMaxSpan", 800f,
-                "Max mapped extent per axis in meters; larger maps clamp to this around the anchor centroid");
+            _cfgMapSpan = Config.Bind("Movement", "WorldMapMaxSpan", 2000f,
+                "Max span (m) for the full-scene world map. Adaptive cell sizing (span/1200, clamped to [0.5,4.0]) keeps the grid within the hard cell cap (~4M).");
+            _cfgMapMaxCells = Config.Bind("Movement", "WorldMapMaxCells", 4000000,
+                "Hard cell cap for the world map. If cols*rows exceeds this, cell size is inflated.");
+            _cfgMapAutoLayers = Config.Bind("Movement", "WorldMapAutoLayers", true,
+                "Auto-detect floor layers from scene Y samples (gap > 1.5m = new layer, cap 16). If false, uses fixed layer count.");
             _cfgMapCpf = Config.Bind("Movement", "WorldMapCellsPerFrame", 48,
                 "World-map cells sampled per frame while building (higher = faster build, more per-frame physics cost)");
             _cfgMapLayers = Config.Bind("Movement", "WorldMapLayers", 4,
@@ -288,6 +301,11 @@ namespace KKLLMNPC
             _cfgPathCell.Value = Mathf.Clamp(_cfgPathCell.Value, Consts.MinPathCellSize, Consts.MaxPathCellSize);
             _cfgPathSpan.Value = Mathf.Clamp(_cfgPathSpan.Value, Consts.MinPathSpan, Consts.MaxPathSpan);
             _cfgPathCap.Value = Mathf.Clamp(_cfgPathCap.Value, Consts.MinPathNodeCap, Consts.MaxPathNodeCap);
+            _cfgPathTimeBudget.Value = Mathf.Max(1f, _cfgPathTimeBudget.Value);
+            _cfgPathMaxExpansions.Value = Mathf.Max(100, _cfgPathMaxExpansions.Value);
+            WorldMap.MaxSpan = _cfgMapSpan.Value;
+            WorldMap.MaxCells = _cfgMapMaxCells.Value;
+            if (!_cfgMapAutoLayers.Value) WorldMap.MaxLayers = _cfgMapLayers.Value;
             _cfgRadarSize.Value = Mathf.Clamp(_cfgRadarSize.Value, 3, 30);
             _cfgRadarScale.Value = Mathf.Clamp(_cfgRadarScale.Value, 0.1f, 10f);
             _cfgVisMaxTokens.Value = Mathf.Clamp(_cfgVisMaxTokens.Value, 10, 500);
@@ -470,6 +488,7 @@ namespace KKLLMNPC
             _mainReady = false;
             try { if (_chatCallbackRegistered) { PhotonNetwork.RemoveCallbackTarget(this); _chatCallbackRegistered = false; } } catch (Exception) { }
             StopWatchers();
+            PathWorker.Stop();
             lock (_instancesLock)
             {
                 foreach (var npc in _instances)

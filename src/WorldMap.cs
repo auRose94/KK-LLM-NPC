@@ -249,10 +249,16 @@ namespace KKLLMNPC
         // Config (read by the plugin when starting a build; defaults here keep the
         // class self-sufficient).
         internal static float CellSize = 1.0f;
-        internal static float MaxSpan = 800f;
-        internal static int MaxLayers = Consts.PathMaxLayers;
+        // Default 2000m span (was 800) — covers whole maps. Adaptive cell sizing
+        // (span / 1200, clamped to [0.5, 4.0]) ensures the grid stays within the
+        // hard cell cap (~4M) even on very large scenes.
+        internal static float MaxSpan = 2000f;
+        // Auto floors: 0 = auto-detect from Y samples (was 4).
+        internal static int MaxLayers = 0;
         internal static int NodeBudget = 2000000;
         internal static int CellsPerFrame = 48;
+        // Hard cell cap — if cols * rows exceeds this, inflate cell size.
+        internal static int MaxCells = 4_000_000;
 
         internal static bool Ready { get { lock (_gate) return _build != null && _build.Ready; } }
         internal static bool Building { get { lock (_gate) return _build != null && !_build.Ready && !_build.Failed; } }
@@ -375,16 +381,34 @@ namespace KKLLMNPC
                 if (maxX - minX > MaxSpan) { minX = cx - MaxSpan * 0.5f; maxX = cx + MaxSpan * 0.5f; }
                 if (maxZ - minZ > MaxSpan) { minZ = cz - MaxSpan * 0.5f; maxZ = cz + MaxSpan * 0.5f; }
 
-                // Cell size: start at the configured size, inflate until the node
-                // budget holds (cell^2 * area * layers <= NodeBudget).
-                float cell = Mathf.Clamp(CellSize, 0.25f, 4f);
-                int cols = Mathf.Max(2, Mathf.CeilToInt((maxX - minX) / cell));
-                int rows = Mathf.Max(2, Mathf.CeilToInt((maxZ - minZ) / cell));
-                while ((long)cols * rows * MaxLayers > NodeBudget && cell < 4f)
+                // Adaptive cell sizing: base = span / 1200, clamped to [0.5, 4.0].
+                // This gives ~1200 cells at the default 2000m span, keeping the grid
+                // fine enough for useful paths while covering the whole scene.
+                float width = maxX - minX;
+                float depth = maxZ - minZ;
+                float baseCell = Mathf.Max(0.5f, Mathf.Min(4.0f, width / AdaptiveCell.BaseDivisor));
+                float cell = Mathf.Max(baseCell, CellSize);
+                int cols = Mathf.Max(2, Mathf.CeilToInt(width / cell));
+                int rows = Mathf.Max(2, Mathf.CeilToInt(depth / cell));
+
+                // Enforce hard cell cap — inflate cell if cols*rows exceeds it.
+                while ((long)cols * rows > MaxCells && cell < 8f)
                 {
                     cell *= 1.2f;
-                    cols = Mathf.Max(2, Mathf.CeilToInt((maxX - minX) / cell));
-                    rows = Mathf.Max(2, Mathf.CeilToInt((maxZ - minZ) / cell));
+                    cols = Mathf.Max(2, Mathf.CeilToInt(width / cell));
+                    rows = Mathf.Max(2, Mathf.CeilToInt(depth / cell));
+                }
+
+                // Auto floors: cluster occupied Y values to determine layer count.
+                // If MaxLayers == 0 (default), detect from scene anchors.
+                int actualLayers = MaxLayers;
+                if (actualLayers <= 0)
+                {
+                    float[] ySamples = new float[anchors.Count];
+                    for (int i = 0; i < anchors.Count; i++) ySamples[i] = anchors[i].y;
+                    float[] layers = AutoFloor.Cluster(ySamples, 1.5f, 16);
+                    actualLayers = layers.Length;
+                    if (actualLayers < 1) actualLayers = 1;
                 }
 
                 // Try the cache FIRST — a previous session may have already built this.
@@ -399,7 +423,7 @@ namespace KKLLMNPC
                     return;
                 }
 
-                _build = new WorldMapBuild(scene, minX, minZ, cell, cols, rows, MaxLayers) { Source = "built" };
+                _build = new WorldMapBuild(scene, minX, minZ, cell, cols, rows, actualLayers) { Source = "built" };
                 _sampleFromY = b.max.y + 15f;
                 LLMNPCPlugin.Log?.LogInfo("KKLLMNPC: world map build started: scene='" + scene
                     + "' " + cols + "x" + rows + " cells @" + Fm(cell) + "m (span "

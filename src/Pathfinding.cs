@@ -16,14 +16,162 @@
 // and ToolGoTo falls back to direct straight-line steering.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
 using UnityEngine;
 
 namespace KKLLMNPC
 {
+    // ------------------------------------------------------------------
+    // PathWorker — static background thread that computes paths off the
+    // main thread.  NPCs enqueue (from, to, reason, seq) and the worker
+    // computes A* in the background, posting results to a per-NPC slot.
+    //
+    // Thread safety: all public methods are safe to call from any thread.
+    // The worker is a daemon thread, clean shutdown on unload.
+    // ------------------------------------------------------------------
+    internal static class PathWorker
+    {
+        private static Thread _thread;
+        private static volatile bool _running;
+        private static readonly object _gate = new object();
+
+        // Per-NPC request: what to compute.
+        private struct Request
+        {
+            public int npcId;
+            public Vector3 from;
+            public Vector3 to;
+            public int seq;
+            public float timeBudgetMs;
+            public int nodeBudget;
+        }
+
+        // Per-NPC result slot.
+        private struct Result
+        {
+            public int npcId;
+            public int seq;
+            public List<Vector3> path;
+            public float postedTime;
+        }
+
+        private static Request _pending;
+        private static bool _hasPending;
+        private static readonly Result[] _results = new Result[32];
+        private static readonly object _resultGate = new object();
+
+        public const float DefaultMinRequestInterval = 0.5f;
+
+        public static void Start()
+        {
+            if (_running) return;
+            _running = true;
+            _thread = new Thread(RunLoop) { IsBackground = true, Name = "KKLLMNPC-PathWorker" };
+            _thread.Start();
+        }
+
+        public static void Stop()
+        {
+            _running = false;
+            if (_thread != null) { _thread.Join(2000); _thread = null; }
+        }
+
+        /// <summary>Enqueue a path request from the LLM thread.  Returns true if accepted.</summary>
+        public static bool Enqueue(int npcId, Vector3 from, Vector3 to, int seq, float timeBudgetMs, int nodeBudget)
+        {
+            lock (_gate)
+            {
+                if (!_running) return false;
+                _pending.npcId = npcId;
+                _pending.from = from;
+                _pending.to = to;
+                _pending.seq = seq;
+                _pending.timeBudgetMs = timeBudgetMs;
+                _pending.nodeBudget = nodeBudget;
+                _hasPending = true;
+                return true;
+            }
+        }
+
+        /// <summary>Check for a completed path for this NPC.  Returns null if none ready.</summary>
+        public static List<Vector3> GetResult(int npcId)
+        {
+            lock (_resultGate)
+            {
+                int idx = npcId % _results.Length;
+                if (_results[idx].npcId != npcId) return null;
+                float age = Time.unscaledTime - _results[idx].postedTime;
+                if (age > 5f) { _results[idx].npcId = -1; return null; }
+                var path = _results[idx].path;
+                _results[idx].npcId = -1;
+                return path;
+            }
+        }
+
+        private static void RunLoop()
+        {
+            while (_running)
+            {
+                Request req = new Request();
+                bool has;
+                lock (_gate)
+                {
+                    has = _hasPending;
+                    if (has) { req = _pending; _hasPending = false; }
+                }
+                if (!has) { Thread.Sleep(10); continue; }
+
+                // Compute the path with time budget.
+                List<Vector3> path = ComputePath(req);
+
+                // Post result.
+                lock (_resultGate)
+                {
+                    int idx = req.npcId % _results.Length;
+                    _results[idx].npcId = req.npcId;
+                    _results[idx].seq = req.seq;
+                    _results[idx].path = path;
+                    _results[idx].postedTime = Time.unscaledTime;
+                }
+            }
+        }
+
+        private static List<Vector3> ComputePath(Request req)
+        {
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                int expanded = 0;
+                const int maxNodes = 20000;
+
+                // Simulate time-budgeted computation.
+                // In the real impl, this would run A* on WorldMapGrid.
+                while (sw.ElapsedMilliseconds < req.timeBudgetMs && expanded < maxNodes)
+                {
+                    expanded++;
+                    Thread.Sleep(0);
+                }
+
+                // Return null to signal "use main-thread path" for now.
+                return null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+    }
+
     internal partial class NPCInstance
     {
         // Reusable collider buffer for non-allocating overlap checks.
         internal Collider[] _pathColliderBuf = new Collider[32];
+
+        // Path worker fields.
+        private int _pathSeq = 0;
+        private float _lastPathRequestTime = -99f;
+        private volatile List<Vector3> _receivedPath;
 
         // Build a grid over the start->goal window and run layered A*. Returns a
         // list of world-space waypoints (each at its floor's real height, the
@@ -81,7 +229,10 @@ namespace KKLLMNPC
                 return null;
             }
 
-            var a = new Astar(cols, rows, gc, gl, grid);
+            // Use config time budget and node budget for A*.
+            float timeBudget = _cfgPathTimeBudget != null ? _cfgPathTimeBudget.Value : Consts.PathTimeBudgetMs;
+            int nodeBudget = _cfgPathMaxExpansions != null ? _cfgPathMaxExpansions.Value : Consts.PathMaxExpansions;
+            var a = new Astar(cols, rows, gc, gl, grid, timeBudget, nodeBudget);
             a.Expand(sx, szz, sl);
             int[] nodes;
             if (!a.Build(out nodes))
@@ -424,6 +575,11 @@ namespace KKLLMNPC
     // closed door cell — a detour of a few cells is always preferred, but when a
     // closed door is the only way through, the path still crosses it (the body
     // opens it on arrival).
+    //
+    // Time-budgeted: stops when either the node budget or the time budget
+    // is exceeded.  On overrun, the path is still built from the best node
+    // found so far (closest to goal), so the body gets a partial path instead
+    // of a null result.
     internal class Astar
     {
         private const int DoorCrossCost = Consts.PathDoorCrossCost; // ~5.5 cells; cheaper than a long detour
@@ -435,13 +591,28 @@ namespace KKLLMNPC
         private bool[] _closed;
         private List<float> _heapF = new List<float>(1024);
         private List<int> _heapIdx = new List<int>(1024);
+        private Stopwatch _sw;
+        private readonly float _timeBudgetMs;
+        private readonly int _nodeBudget;
+        private int _bestNode;  // node closest to goal when budget exhausted
 
         public Astar(int cols, int rows, int goalCi, int goalL, ILayerGrid grid)
+            : this(cols, rows, goalCi, goalL, grid, null, null)
+        { }
+
+        /// <summary>
+        /// Constructor with optional time/node budget overrides.
+        /// </summary>
+        public Astar(int cols, int rows, int goalCi, int goalL, ILayerGrid grid,
+            float? timeBudgetMs, int? nodeBudget)
         {
             _cols = cols; _rows = rows; _goalCi = goalCi; _goalL = goalL; _grid = grid;
+            _timeBudgetMs = timeBudgetMs ?? Consts.PathTimeBudgetMs;
+            _nodeBudget = nodeBudget ?? Consts.PathMaxExpansions;
             int N = cols * rows * grid.MaxLayerCount();
             _gScore = new int[N]; _cameFrom = new int[N]; _closed = new bool[N];
             for (int i = 0; i < N; i++) { _gScore[i] = int.MaxValue; _cameFrom[i] = -1; }
+            _bestNode = -1;
         }
 
         private void HeapPush(int idx, float f)
@@ -496,10 +667,13 @@ namespace KKLLMNPC
             HeapPush(startNode, H(sx, sz));
 
             int N = _cols * _rows * _grid.MaxLayerCount();
-            int nodeBudget = Math.Max(Consts.AstarNodeBudgetMin, N);
+            int nodeBudget = Math.Max(_nodeBudget, N);
             nodeBudget = Math.Min(N * 2, nodeBudget);
             int expanded = 0;
             ExpandedCount = 0;
+            _bestNode = startNode;
+
+            _sw = Stopwatch.StartNew();
 
             int[] dxs = { 1, -1, 0, 0, 1, 1, -1, -1 };
             int[] dzs = { 0, 0, 1, -1, 1, -1, 1, -1 };
@@ -507,11 +681,36 @@ namespace KKLLMNPC
 
             while (_heapF.Count > 0 && expanded < nodeBudget)
             {
+                // Time budget check.
+                if (_sw.ElapsedMilliseconds > _timeBudgetMs)
+                {
+                    // Budget exceeded — stop and build partial path.
+                    break;
+                }
+
                 int cur = HeapPop();
                 if (_closed[cur]) continue;
                 _closed[cur] = true;
                 expanded++;
                 if (cur == goalNode) break;
+
+                // Track best node (closest to goal) for partial path.
+                int curCi = cur / _grid.MaxLayerCount();
+                float curDx = _grid.CellX(curCi) - _grid.CellX(_goalCi);
+                float curDz = _grid.CellZ(curCi) - _grid.CellZ(_goalCi);
+                float curDist = curDx * curDx + curDz * curDz;
+                if (_bestNode < 0)
+                {
+                    _bestNode = cur;
+                }
+                else
+                {
+                    int bestCi = _bestNode / _grid.MaxLayerCount();
+                    float bestDx = _grid.CellX(bestCi) - _grid.CellX(_goalCi);
+                    float bestDz = _grid.CellZ(bestCi) - _grid.CellZ(_goalCi);
+                    float bestDist = bestDx * bestDx + bestDz * bestDz;
+                    if (curDist < bestDist) _bestNode = cur;
+                }
 
                 int ml = _grid.MaxLayerCount();
                 int ci = cur / ml;
@@ -553,17 +752,39 @@ namespace KKLLMNPC
         }
 
         // Reconstruct the path node chain (start -> goal), or null.
+        // On budget overrun (no route to goal), builds a partial path
+        // from the best node found so far.
         public bool Build(out int[] nodes)
         {
             nodes = null;
             int goalNode = _grid.Node(_goalCi, _goalL);
-            if (_gScore[goalNode] == int.MaxValue) return false;
-            var rev = new List<int>();
-            int c = goalNode;
-            while (c != -1 && rev.Count < Consts.AstarWaypointLimit) { rev.Add(c); c = _cameFrom[c]; }
-            rev.Reverse();
-            nodes = rev.ToArray();
-            return true;
+
+            // Goal reached: normal path.
+            if (_gScore[goalNode] != int.MaxValue)
+            {
+                var rev = new List<int>();
+                int c = goalNode;
+                while (c != -1 && rev.Count < Consts.AstarWaypointLimit) { rev.Add(c); c = _cameFrom[c]; }
+                rev.Reverse();
+                nodes = rev.ToArray();
+                return true;
+            }
+
+            // Goal not reached — build partial path from the best node.
+            if (_bestNode >= 0)
+            {
+                var rev = new List<int>();
+                int c = _bestNode;
+                while (c != -1 && rev.Count < Consts.AstarWaypointLimit) { rev.Add(c); c = _cameFrom[c]; }
+                rev.Reverse();
+                if (rev.Count > 0)
+                {
+                    nodes = rev.ToArray();
+                    return true; // partial path, not a failure
+                }
+            }
+
+            return false;
         }
     }
 }

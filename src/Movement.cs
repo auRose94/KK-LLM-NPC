@@ -251,40 +251,71 @@ namespace KKLLMNPC
                     _followDist = dp;
                     if (dp > 1.8f)
                     {
+                        // Check for a completed background path first.
+                        List<Vector3> fpath = null;
+                        try { fpath = PathWorker.GetResult(_currentKoboldId); } catch (Exception) { }
+
+                        // If no background result, decide whether to replan using milestones.
                         bool needPath;
                         lock (_stateLock)
                         {
-                            needPath = _path == null || _pathIdx >= _path.Count - 1
-                                || Time.unscaledTime - _followLastPath > 1.5f
-                                || (Vector3.Distance(_pathGoal, new Vector3(ppos.x, 0f, ppos.z)) > 2f);
+                            if (_receivedPath != null)
+                            {
+                                fpath = _receivedPath;
+                                _receivedPath = null;
+                                needPath = false;
+                            }
+                            else
+                            {
+                                int remaining = _path != null ? Math.Max(0, _path.Count - 1 - _pathIdx) : 0;
+                                float distToGoal = _pathGoalSet ? Vector3.Distance(_pathGoal, new Vector3(ppos.x, 0f, ppos.z)) : 0f;
+                                float deviation = _path != null && _pathIdx < _path.Count ? Vector3.Distance(_kobold.transform.position, _path[Math.Min(_pathIdx, _path.Count - 1)]) : 0f;
+                                float timeSincePath = _followLastPath > 0 ? Time.unscaledTime - _followLastPath : 999f;
+                                bool teleported = _pathGoalSet && distToGoal > PathPolicy.TeleportDistance;
+
+                                needPath = PathPolicy.ShouldReplan(
+                                    _path != null,
+                                    remaining,
+                                    distToGoal,
+                                    dp > 1.8f,
+                                    deviation,
+                                    timeSincePath,
+                                    teleported);
+                            }
                         }
+
                         if (needPath && !IsInAnimationStation())
                         {
-                            List<Vector3> fpath = null;
-                            if (WorldMap.Ready)
+                            if (fpath == null)
                             {
-                                try { fpath = WorldMap.FindPathSmoothed(_kobold.transform.position, ppos); }
-                                catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
+                                if (WorldMap.Ready)
+                                {
+                                    try { fpath = WorldMap.FindPathSmoothed(_kobold.transform.position, ppos); }
+                                    catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
+                                }
+                                if (fpath == null && _cfgPathEnabled.Value)
+                                {
+                                    try { fpath = FindPath(_kobold.transform.position, ppos); }
+                                    catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
+                                }
                             }
-                            if (fpath == null && _cfgPathEnabled.Value)
+                            if (fpath != null && fpath.Count >= 2)
                             {
-                                try { fpath = FindPath(_kobold.transform.position, ppos); }
-                                catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
-                            }
-                            lock (_stateLock)
-                            {
-                                if (fpath != null && fpath.Count >= 2)
+                                lock (_stateLock)
                                 {
                                     _path = fpath; _pathIdx = 0;
                                     _pathGoal = new Vector3(ppos.x, 0f, ppos.z);
                                     _pathGoalSet = true;
                                     _followLastPath = Time.unscaledTime;
                                 }
-                                else
+                            }
+                            else
+                            {
+                                lock (_stateLock)
                                 {
                                     _path = null; _pathIdx = 0; _pathGoalSet = false;
-                                    _navTarget = ppos; // straight-line steer fallback
                                 }
+                                _navTarget = ppos; // straight-line steer fallback
                             }
                         }
                     }

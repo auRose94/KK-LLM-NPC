@@ -77,6 +77,8 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgPathCell;
         internal ConfigEntry<float> _cfgPathSpan;
         internal ConfigEntry<int> _cfgPathCap;
+        internal ConfigEntry<float> _cfgPathTimeBudget;
+        internal ConfigEntry<int> _cfgPathMaxExpansions;
         internal ConfigEntry<bool> _cfgRadarEnabled;
         internal ConfigEntry<int> _cfgRadarSize;
         internal ConfigEntry<float> _cfgRadarScale;
@@ -433,6 +435,8 @@ namespace KKLLMNPC
             _cfgPathCell = plugin._cfgPathCell;
             _cfgPathSpan = plugin._cfgPathSpan;
             _cfgPathCap = plugin._cfgPathCap;
+            _cfgPathTimeBudget = plugin._cfgPathTimeBudget;
+            _cfgPathMaxExpansions = plugin._cfgPathMaxExpansions;
             _cfgRadarEnabled = plugin._cfgRadarEnabled;
             _cfgRadarSize = plugin._cfgRadarSize;
             _cfgRadarScale = plugin._cfgRadarScale;
