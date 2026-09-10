@@ -251,7 +251,6 @@ namespace KKLLMNPC
                     try { _photonView?.RPC("StopAnimationRPC", RpcTarget.All); }
                     catch (Exception e) { Logger.LogWarning("go_to exit station: " + e.Message); }
                     _stationPurpose = null;
-                    _stationEntryThought = null;
                 }
                 else
                 {
@@ -507,7 +506,6 @@ namespace KKLLMNPC
             StopMove(); // also release local input (controller ignores it while animating)
             _stimSource = null; // no longer mounted: the machine's not the stim source
             _stationPurpose = null; // no longer in a station
-            _stationEntryThought = null;
             _stationEntryTime = 0f;
             _stayInStation = false;
             return new { ok = sent, was_in_station = inStation, note = "exits any animation station — same as pressing jump" };
@@ -610,7 +608,6 @@ namespace KKLLMNPC
                 _stimSourceT = Time.unscaledTime;
                 // Track station purpose for smart exit decisions.
                 _stationPurpose = ClassifyUsable(CleanName(target.name));
-                _stationEntryThought = _lastThought;
                 _stationEntryTime = Time.unscaledTime;
                 _stayInStation = false; // entering a new station clears any previous stay request
                 return (object)new { ok = true, used = CleanName(target.name), type = _stationPurpose, dist = F(dist) };

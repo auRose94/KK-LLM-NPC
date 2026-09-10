@@ -431,7 +431,7 @@ namespace KKLLMNPC
                     // adjust compaction level if needed.
                     if (_ctxMgr != null && ModelProbe.DetectedContextLength > 0)
                     {
-                        int factCount = 0, histCount = 0, thoughtCount = 0, chatCount = 0;
+                        int factCount = 0, histCount = 0, thoughtCount = 0;
                         lock (_facts) { factCount = _facts.Count; }
                         lock (_history) { histCount = _history.Count; }
                         lock (_thoughtHistory) { thoughtCount = _thoughtHistory.Count; }
@@ -486,7 +486,6 @@ namespace KKLLMNPC
             {
                 bool moving = Mathf.Abs(_moveLocalZ) > 0.01f || Mathf.Abs(_moveLocalX) > 0.01f;
                 if (moving) _lastMoveTime = Time.unscaledTime;
-                _wasMovingLastTick = moving;
             }
         }
 

@@ -169,8 +169,6 @@ namespace KKLLMNPC
         internal Collider[] _pathColliderBuf = new Collider[32];
 
         // Path worker fields.
-        private int _pathSeq = 0;
-        private float _lastPathRequestTime = -99f;
         private volatile List<Vector3> _receivedPath;
 
         // Build a grid over the start->goal window and run layered A*. Returns a

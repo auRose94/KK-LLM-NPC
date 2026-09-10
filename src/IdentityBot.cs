@@ -36,7 +36,6 @@ namespace KKLLMNPC
         private int _retries;
         private int _backoffSeconds = 2; // exponential backoff: 2s → 4s → 8s … cap 30s
         private const int MaxBackoffSeconds = 30;
-        private DateTime _lastRetryUtc = DateTime.MinValue;
         private DateTime _lastStartUtc = DateTime.MinValue;
         private readonly object _stateLock = new object();
 
@@ -191,7 +190,6 @@ namespace KKLLMNPC
             // After 3 consecutive failures, stop trying for this turn (fallback covers us).
             if (_running && _retries <= 3)
             {
-                _lastRetryUtc = DateTime.UtcNow;
                 try { if (_client != null) _client.ConnectUsingSettings(BuildAppSettings()); }
                 catch (Exception e) { _npc.Logger.LogWarning("[identity-bot] reconnect: " + e.Message); }
                 // Double backoff for next failure (cap at 30s).

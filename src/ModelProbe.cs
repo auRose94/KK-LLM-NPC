@@ -63,22 +63,20 @@ namespace KKLLMNPC
                 const int probeDelayMs = 1000;
 
                 // 1. Try KoboldCpp /model endpoint (richest info)
-                bool koboldOk = false;
                 for (int attempt = 0; attempt < probeRetries; attempt++)
                 {
                     TryKoboldModel(baseUrl, apiKey);
-                    if (DetectedModelName != null || DetectedContextLength > 0) { koboldOk = true; break; }
+                    if (DetectedModelName != null || DetectedContextLength > 0) { break; }
                     if (attempt < probeRetries - 1)
                         LLMNPCPlugin.Log?.LogInfo("ModelProbe: /model probe attempt " + (attempt + 1) + "/" + probeRetries + ", retrying...");
                     Thread.Sleep(probeDelayMs);
                 }
 
                 // 2. Try OpenAI /v1/models (at least gives us the model name)
-                bool openAiOk = false;
                 for (int attempt = 0; attempt < probeRetries; attempt++)
                 {
                     TryOpenAIModels(baseUrl, apiKey);
-                    if (DetectedModelName != null || AvailableModels.Count > 0) { openAiOk = true; break; }
+                    if (DetectedModelName != null || AvailableModels.Count > 0) { break; }
                     if (attempt < probeRetries - 1)
                         LLMNPCPlugin.Log?.LogInfo("ModelProbe: /v1/models probe attempt " + (attempt + 1) + "/" + probeRetries + ", retrying...");
                     Thread.Sleep(probeDelayMs);

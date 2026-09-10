@@ -22,9 +22,6 @@ namespace KKLLMNPC
         private Rect _overlayRect = new Rect(20, 20, 600, 600);
         private string _overlayStatus = "";
 
-        // Per-instance kill switch (config-backed so it persists).
-        private ConfigEntry<bool> _cfgEnabled;
-
         // Tab selection (0=State, 1=Config, 2=Instances)
         private int _activeTab = 0;
 
@@ -42,10 +39,9 @@ namespace KKLLMNPC
         // Config section scroll
         private float _configScrollY = 0f;
 
-        // Bind a hotkey + enabled config on Awake (called from the existing Awake).
+        // Bind a hotkey on Awake (called from the existing Awake).
         private void InitOverlay()
         {
-            _cfgEnabled = Config.Bind("General", "Enabled", true, "If false this instance is inert: no possession, no LLM calls");
         }
 
         // Format a float to a short string.

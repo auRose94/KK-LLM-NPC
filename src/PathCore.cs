@@ -210,7 +210,6 @@ namespace KKLLMNPC
         public int[] Solve()
         {
             var sw = Stopwatch.StartNew();
-            int N = _cols * _rows;
             int startNode = _sz * _cols + _sx;
             int goalNode = _gz * _cols + _gx;
 
@@ -237,7 +236,6 @@ namespace KKLLMNPC
                 if (cur == goalNode) break;
 
                 int cx = cur % _cols, cz = cur / _cols;
-                float floorA = 0f; // simplified: no layer in this version
 
                 for (int d = 0; d < 8; d++)
                 {

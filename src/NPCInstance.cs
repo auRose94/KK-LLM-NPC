@@ -244,11 +244,9 @@ namespace KKLLMNPC
 
         // Station stay/exit tracking.
         // _stationPurpose: the classified type of station the NPC is in ("play", "bed", etc.)
-        // _stationEntryThought: the NPC's goal when it entered the station
         // _stationEntryTime: Time.unscaledTime when the NPC entered the station
         // _stayInStation: set by player chat command ("stay"/"remain"), cleared by "leave"/"exit"
         private string _stationPurpose;
-        private string _stationEntryThought;
         private float _stationEntryTime;
         private volatile bool _stayInStation;
 
@@ -269,7 +267,6 @@ namespace KKLLMNPC
         private float _moveTargetZ;
         private float _moveTargetX;
         private bool _moveJump;
-        private bool _moveRun;
         private float _moveUntilTime;
         private float _crouch = 0f;
         private float _manualCrouchSet = -99f;
@@ -285,13 +282,9 @@ namespace KKLLMNPC
         private float _lastDoorTryTime = -99f;
         // Activity tracking for dynamic think interval
         private float _lastMoveTime = -999f;
-        private bool _wasMovingLastTick;
         // Perception throttling
         private int _lastFullPerceptionTick = -999;
         private object _cachedPerception;
-        // Nearby cache
-        private List<object> _cachedNearby;
-        private int _lastNearbyTick = -999;
         // Empty-reply tracking (aggregate spam, expose to history so the model self-corrects)
         private int _emptyReplies;
         private float _lastEmptyReplyLog = -99f;
@@ -647,7 +640,6 @@ namespace KKLLMNPC
                         try { RunOnMainThreadAsync(() => { _photonView?.RPC("StopAnimationRPC", RpcTarget.All); }); }
                         catch (Exception e) { Logger.LogWarning("player leave: " + e.Message); }
                         _stationPurpose = null;
-                        _stationEntryThought = null;
                         Logger.LogInfo("[" + MyName() + "] player asked to leave station.");
                     }
                 }
@@ -710,7 +702,7 @@ namespace KKLLMNPC
                 _goal = null; _goalTick = -1; _goalRepeats = 0; _goalProgress = "";
                 _recentlyDropped.Clear(); _lastThoughtText = null; _thoughtRepeat = 0;
             }
-            _stationPurpose = null; _stationEntryThought = null; _stationEntryTime = 0f; _stayInStation = false;
+            _stationPurpose = null; _stationEntryTime = 0f; _stayInStation = false;
             _targetIdByInst.Clear();
             _targetRefByInst.Clear();
             _nextTargetId = 1;

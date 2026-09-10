@@ -694,7 +694,6 @@ namespace KKLLMNPC
                         LLMNPCPlugin.Log?.LogInfo("KKLLMNPC: world map cache outdated (v" + version + " < v" + FormatVersion + ") — rebuilding.");
                         return false;
                     }
-                    int slen = r.ReadUInt16();
                     string sname = r.ReadString();
                     if (!string.Equals(sname, scene, StringComparison.Ordinal)) return false;
                     float minX = r.ReadSingle();

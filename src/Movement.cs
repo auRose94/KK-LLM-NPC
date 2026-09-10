@@ -87,7 +87,6 @@ namespace KKLLMNPC
                 _moveTargetZ = Mathf.Clamp(forwardSpeed, -8f, 8f);
                 _moveTargetX = Mathf.Clamp(strafeSpeed, -8f, 8f);
                 _moveJump = jump;
-                _moveRun = run;
                 _yawOffsetDeg = turnDeg;
                 _moveUntilTime = durationSec > 0f ? Time.unscaledTime + durationSec : 0f;
             }

@@ -572,7 +572,6 @@ namespace KKLLMNPC
             bool penis = false, female = false;
             try
             {
-                var g = _kobold.GetGenes();
                 penis = _kobold.activeDicks != null && _kobold.activeDicks.Count >= 1;
                 female = _kobold.penetratables != null && _kobold.penetratables.Count >= 3;
             }

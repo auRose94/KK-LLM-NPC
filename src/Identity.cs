@@ -31,70 +31,40 @@ namespace KKLLMNPC
 
     internal partial class NPCInstance
     {
-        // ------------------------------------------------------------------
-        // Identity block fields (per-NPC, set during FinalizeIdentity or rename)
-        // ------------------------------------------------------------------
-
-        // Sexual orientation: gay, bi, pan, straight. Used by the identity
-        // perception block so the model can reason about consent and attraction.
-        internal string _identityOrientation;
-
-        // Trans status: cis, trans_mf, trans_fm, nonbinary. Also used by
-        // the identity perception block.
-        internal string _identityTrans;
-
-        // Expressed persona: a short descriptor of how the NPC expresses
-        // themselves (e.g. "feminine", "masculine", "androgynous", "flamboyant").
-        internal string _identityPersona;
-
-        // Consent preferences: whether the NPC has explicit consent rules
-        // derived from their orientation/trans status. Set by the prompt
-        // extras file, not by code.
-
-        // ------------------------------------------------------------------
         // Identity block — returned by perception as a JSON-serializable object.
         // The model uses this to understand WHO it is and how it relates to others.
         // ------------------------------------------------------------------
         internal object IdentityBlock()
         {
             // Build identity block from the NPC's persona prompt if available.
-            // The LLM thread populates these during FinalizeIdentity; if not set
-            // yet, report what we have (or null if nothing).
-            string orient = _identityOrientation;
-            string trans = _identityTrans;
-            string persona = _identityPersona;
-
-            // If the persona prompt contains orientation/trans info, parse it.
-            if (string.IsNullOrEmpty(orient) || string.IsNullOrEmpty(trans) || string.IsNullOrEmpty(persona))
+            string orient = null, trans = null, persona = null;
+            if (_persona != null)
             {
-                if (_persona != null)
+                string lower = _persona.ToLowerInvariant();
+                if (string.IsNullOrEmpty(orient))
                 {
-                    string lower = _persona.ToLowerInvariant();
-                    if (string.IsNullOrEmpty(orient))
+                    if (lower.Contains("gay")) orient = "gay";
+                    else if (lower.Contains("bi")) orient = "bi";
+                    else if (lower.Contains("pan")) orient = "pan";
+                    else if (lower.Contains("straight")) orient = "straight";
+                }
+                if (string.IsNullOrEmpty(trans))
+                {
+                    if (lower.Contains("trans"))
                     {
-                        if (lower.Contains("gay")) orient = "gay";
-                        else if (lower.Contains("bi")) orient = "bi";
-                        else if (lower.Contains("pan")) orient = "pan";
-                        else if (lower.Contains("straight")) orient = "straight";
+                        if (lower.Contains("mf") || lower.Contains("female to male")) trans = "trans_mf";
+                        else if (lower.Contains("fm") || lower.Contains("male to female")) trans = "trans_fm";
+                        else trans = "trans";
                     }
-                    if (string.IsNullOrEmpty(trans))
-                    {
-                        if (lower.Contains("trans"))
-                        {
-                            if (lower.Contains("mf") || lower.Contains("female to male")) trans = "trans_mf";
-                            else if (lower.Contains("fm") || lower.Contains("male to female")) trans = "trans_fm";
-                            else trans = "trans";
-                        }
-                        else if (lower.Contains("nonbinary") || lower.Contains("non-binary")) trans = "nonbinary";
-                        else trans = "cis";
-                    }
-                    if (string.IsNullOrEmpty(persona))
-                    {
-                        if (lower.Contains("feminine")) persona = "feminine";
-                        else if (lower.Contains("masculine")) persona = "masculine";
-                        else if (lower.Contains("androgynous")) persona = "androgynous";
-                        else if (lower.Contains("flamboyant")) persona = "flamboyant";
-                    }
+                    else if (lower.Contains("nonbinary") || lower.Contains("non-binary")) trans = "nonbinary";
+                    else trans = "cis";
+                }
+                if (string.IsNullOrEmpty(persona))
+                {
+                    if (lower.Contains("feminine")) persona = "feminine";
+                    else if (lower.Contains("masculine")) persona = "masculine";
+                    else if (lower.Contains("androgynous")) persona = "androgynous";
+                    else if (lower.Contains("flamboyant")) persona = "flamboyant";
                 }
             }
 
