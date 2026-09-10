@@ -1,6 +1,4 @@
-# KK-LLM-NPC (Name WIP)
-
-## License: Open-Source MIT
+# KK-LLM-NPC
 
 LLM-driven Kobold NPCs for [KoboldKare](https://store.steampowered.com/app/1102930/KoboldKare/).
 
@@ -19,9 +17,9 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 - **8-direction clearance** — which way is open, what's a wall/sill/window.
 - **Ground** — supported / step / sill / ledge / drop distance.
 - **Nearby** — kobolds, the player, and usable stations within 14m, with bearing ("front-right") and category (`bed`/`nest`/`play`/...).
-- **Pathfinding** — A* pathfinding allows the npcs to walk to locations and navigate obstacles.
+- **Whole-map pathfinding** — background A* on a cached 3D walkability grid; time-budgeted with per-frame expansion caps so the main thread never hitches.
 - **First-person JPEG** (optional, on a bump / after turns / periodically).
-- **Body** — equipment (penis / penetrables), energy, horniness (with trend arrow), egg amount.
+- **Body** — equipment (penis / penetrables), energy, horniness (with trend arrow), egg amount, stimulation, penetration state.
 - **State** — in-station, being penetrated (depth/hole/thrust per penetrator), penetrating someone.
 - **Reagent events** — drank/sprayed/metabolized ("drank Water 5ml") when the belly changes.
 - **Player chat** — what you typed into the game chat; it answers.
@@ -29,14 +27,32 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
   `remember` and prunes via `forget` (stale facts also decay out over time).
 
 It then emits one structured `act` per tick (via JSON-schema response_format; works on any
-model, not just tool-calling ones), with an optional `plan[]` to chain up to 8 steps:
-`walk` / `walk_ray` / `go_to` (name → closest matching station!) / `jump` / `look` /
-`look_around` / `interact` / `crouch` / `grab` / `drop` / `say` / `ask` / `interact` / `exit_station`,
-plus the goal machine: `set_goal` / `complete_goal` / `drop_goal` (one persistent goal,
-not re-derived each turn) and `forget` (drop a fact from memory).
+model, not just tool-calling ones), with an optional `plan[]` to chain up to 8 steps.
 
-Two NPCs in the same game see each other as regular `kobold`s in `nearby` and react to
-each other's chat bubbles.
+### Available tools
+
+| Category | Tools |
+|----------|-------|
+| **Movement** | `walk`, `walk_ray`, `go_to` (name → closest station), `jump` |
+| **Interaction** | `look`, `look_around`, `interact`, `crouch`, `grab`, `drop`, `exit_station` |
+| **Communication** | `say`, `ask` (self-question), `remember`, `forget` |
+| **Goals** | `set_goal`, `complete_goal`, `drop_goal` |
+| **Body control** | `thrust`, `erection`, `mount`, `unmount`, `orgasm` |
+| **Farming** | `plant`, `water`, `harvest`, `plant_egg` |
+| **Cooking** | `feed_blender`, `grind` |
+| **Identity** | `rename` |
+
+### Perception keys
+
+| Key | Description |
+|-----|-------------|
+| `body_control` | erection (0–1), stimulation, penetration state, hip animation status |
+| `farm` | nearby plants (name, growing, watered, stage, produce) |
+| `cooking` | nearby blenders/grinders, held seed/watering can flags |
+| `identity` | orientation, trans status, persona, gender, pronouns |
+| `mail_atm` | nearby mailbox/ATM machines |
+| `swap_recent` | last 10 body-swap events |
+| `my_swap` | whether the NPC is currently in a body it doesn't own |
 
 ## Behavior highlights
 
@@ -44,6 +60,9 @@ each other's chat bubbles.
 - **Obstacle-aware movement** — validates before walking, slips along walls via fan-steering,
   treats low sills/windows as climbable instead of walls, ledges report drop height so it can
   hop down small ones.
+- **Whole-map pathfinding** — background worker thread computes A* paths off the main thread;
+  milestone-based replanning (only replans when the target moved, path is exhausted, or deviation
+  exceeds threshold). Time-budgeted expansion prevents frame hitches on large maps.
 - **Vision pipeline** (separate thread): a vision model writes a compact scene report +
   nav hint ("go:-30:bed") feeding the planner. Action model sees a first-person frame on bumps.
 - **Camera anti-clip** — detects the head buried in geometry and auto-crouches until vision clears,
@@ -51,22 +70,27 @@ each other's chat bubbles.
 - **Body awareness** — knows which station it can use (`interact` reports `cannot_use` with reason),
   locks gaze on its partner during intimacy, moans on stimulation, gets out of stations via
   `jump` / `exit_station` (the game's own "cancel" path).
- - **Reagent/egg awareness** — detects drinks, sprays, pumps, and egg readiness; seeks a nest to lay.
- - **Asks itself questions** (`ask` tool) — answers land next tick and auto-remember as facts.
- - **Persistent goal** (`set_goal` / `complete_goal` / `drop_goal`) — one stored goal drives every
-   tick instead of re-deliberating; a repetition guard nudges it out of stuck loops, and finishing
-   a goal sheds its scratch facts.
- - **Forgetting** — stale facts decay out of context (`FactDecayTicks`) and `forget` drops them on
-   demand, so finished business stops lingering.
- - **Hears only post-spawn chat** — a baseline is captured when the NPC wakes, so it never
-   "reads" the conversation other players had before it existed.
- - **Distinct name per body** (from the kobold's own name + instance suffix), says it in chat.
- - **Attributed chat** (opt-in) — a second Photon client makes its chat render as `KoboldName: text`
-   to everyone, not attributed to the plugin owner.
-
-```bash
-./build.sh 
-```
+- **Body control tools** — `thrust` (hip animation), `erection`, `mount`/`unmount`, `orgasm`
+  with consent-aware prompt guidance.
+- **Reagent/egg awareness** — detects drinks, sprays, pumps, and egg readiness; seeks a nest to lay.
+- **Farming & cooking** — `plant` → `water` → `harvest` cycle, `plant_egg`, `feed_blender`, `grind`.
+  Perception reports nearby plants and cooking equipment.
+- **Identity** — per-NPC orientation, trans status, expressed persona. `rename` tool with
+  uniqueness validation. Mailbox/ATM awareness (mail = selling/trading kobolds).
+- **Asks itself questions** (`ask` tool) — answers land next tick and auto-remember as facts.
+- **Persistent goal** (`set_goal` / `complete_goal` / `drop_goal`) — one stored goal drives every
+  tick instead of re-deliberating; a repetition guard nudges it out of stuck loops, and finishing
+  a goal sheds its scratch facts.
+- **Forgetting** — stale facts decay out of context (`FactDecayTicks`) and `forget` drops them on
+  demand, so finished business stops lingering.
+- **Chat freshness** — timestamped chat log with acknowledgment tracking; the NPC only sees
+  post-spawn conversation. Say-repeat suppression (Jaccard + Levenshtein) prevents near-identical
+  lines from looping.
+- **Hears only post-spawn chat** — a baseline is captured when the NPC wakes, so it never
+  "reads" the conversation other players had before it existed.
+- **Distinct name per body** (from the kobold's own name + instance suffix), says it in chat.
+- **Attributed chat** (opt-in) — a second Photon client makes its chat render as `KoboldName: text`
+  to everyone, not attributed to the plugin owner.
 
 ## Install
 
@@ -151,6 +175,15 @@ All blank = use `[LLM]` config.
 | `PathfindingCellSize` | 0.5 | 0.1–5m | A* grid cell size |
 | `PathfindingWindow` | 20 | 2–100m | A* search window radius |
 | `PathfindingNodes` | 9000 | 200–50000 | Max pathfinding node budget |
+| `PathTimeBudgetMs` | 8 | ≥1ms | Time budget (ms) for A* expansion. On overrun, returns partial path |
+| `PathMaxExpansions` | 20000 | ≥100 | Max A* node expansions. On overrun, returns partial path |
+| `WorldMapEnabled` | true | bool | Build & cache a full-scene 3D walkability map shared by ALL agents |
+| `WorldMapCellSize` | 1.0 | 0.25–4m | World-map grid cell size in meters |
+| `WorldMapMaxSpan` | 2000 | ≥2m | Max span (m) for the world map. Adaptive cell sizing keeps the grid within ~4M cells |
+| `WorldMapMaxCells` | 4000000 | ≥1 | Hard cell cap; cell size inflates if exceeded |
+| `WorldMapAutoLayers` | true | bool | Auto-detect floor layers (gap > 1.5m = new layer, cap 16) |
+| `WorldMapLayers` | 4 | 1–16 | Fixed layer count (only when auto-detect is off) |
+| `WorldMapCellsPerFrame` | 48 | ≥1 | Cells sampled per frame while building the world map |
 
 ### `[Needs]` — body state
 
@@ -159,17 +192,24 @@ All blank = use `[LLM]` config.
 | `HornyClimbPerMin` | 5 | 0–60/min | Slow-burn horniness rise rate per minute |
 | `HornyBaseline` | 0.08 | 0–1 | Starting horniness when the NPC takes a body |
 
+### `[Farming]` — farm/cooking perception
+
+| Key | Default | Range | Purpose |
+| --- | --- | --- | --- |
+| `ScanRadius` | 3.0 | 1–20m | Radius to scan for plants, blenders, grinders, egg spawners |
+| `ScanMax` | 8 | 1–20 | Max farm/cooking entries in perception (keeps payload small) |
+
 ### `[Memory]` — facts & forgetting
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `FactDecayTicks` | 900 | Ticks before a fact decays out of context if not re-asserted (0 = never decay). Re-`remember`ing a fact refreshes its age, so actively-used facts outlive scratch notes. |
+| `FactDecayTicks` | 900 | Ticks before a fact decays out of context if not re-asserted (0 = never decay). Re-`remember`ing a fact refreshes its age. |
 
 ### `[Multiplayer]` — NPC room identity
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `IdentityBot` | false | Run a second Photon client in the room under the NPC's own name so its chat renders as `KoboldName: text` to everyone (opt-in: adds a room player, may affect player count / host logic). Off = chat is owner-attributed. |
+| `IdentityBot` | false | Run a second Photon client in the room under the NPC's own name so its chat renders as `KoboldName: text` to everyone. Opt-in. |
 | `IdentityAppId` | blank | Photon AppId for the identity bot. Blank = reuse the game's own AppId (recommended). |
 
 ### `[General]` — global
@@ -213,6 +253,21 @@ mcs -target:library -out:KKLLMNPC.dll src/*.cs \
 
 # Instance 2 (deployed as KKLLMNPC2.dll)
 # Modify build.sh to accept an instance count parameter
+```
+
+## Tests
+
+All tests run with zero external dependencies (pure C# + mono):
+
+```bash
+# JSON parser/writer (22 tests)
+mcs -target:exe -out:/tmp/t.exe tests/test_json.cs tests/test_json_standalone.cs src/Json.cs && mono /tmp/t.exe
+
+# PathCore (33 tests: A*, ShouldReplan, adaptive cell, auto floors)
+mcs -target:exe -out:/tmp/t_pf.exe tests/test_pathcore.cs src/PathCore.cs && mono /tmp/t_pf.exe
+
+# Chat similarity (19 tests: Jaccard, Levenshtein, fuzzy matching)
+mcs -target:exe -out:/tmp/t_chat.exe tests/test_chat_similarity.cs src/ChatSimilarity.cs && mono /tmp/t_chat.exe
 ```
 
 ## Architecture

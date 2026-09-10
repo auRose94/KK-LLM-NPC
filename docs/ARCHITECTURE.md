@@ -18,6 +18,7 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 │     • Nearby objects (OverlapSphere)                            │
 │     • Body state (energy, horniness, reagent events)            │
 │     • Vision caption (optional, separate thread)                │
+│     • Module perception (body_control, farm, cooking, etc.)     │
 │                                                                  │
 │  2. Query LLM ──→ QueryLLM() ──→ POST /v1/chat/completions    │
 │     • Sends perception + memory + facts as JSON                 │
@@ -44,6 +45,8 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 │  • Horniness update (slow-burn while unstimulated)              │
 │  • Ambient commentary (moan on stimulation spike)               │
 │  • Photon ownership re-assertion                                │
+│  • PhysicsTick hooks (body control)                             │
+│  • Background path worker (A* on separate thread)               │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,7 +59,7 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 - Registers Photon chat callback
 - Main-thread synchronization via `SynchronizationContext`
 
-### NPC Instance (`NPCInstance` — 15 partial files)
+### NPC Instance (`NPCInstance` — 26 partial files)
 
 | File | Responsibility |
 |------|---------------|
@@ -67,38 +70,58 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 | `Movement.cs` | Physics-frame movement, walk validation, camera clip |
 | `Tools.cs` | Tool implementations (walk, go_to, interact, say, etc.) |
 | `Chat.cs` | Photon chat, speech bubbles, chat log processing |
-| `Pathfinding.cs` | 3D layered A* on walkability grid |
+| `Pathfinding.cs` | 3D layered A* on walkability grid + background worker |
+| `WorldMap.cs` | Full-scene cached walkability map (shared by all agents) |
+| `PathCore.cs` | Pure A* solver, path policy, adaptive cell sizing (Unity-free) |
 | `Vision.cs` | Background vision caption pass |
+| `BodyControl.cs` | thrust/erection/mount/unmount/orgasm tools + swap awareness |
+| `Farming.cs` | plant/water/harvest/plant_egg tools + farm perception |
+| `Cooking.cs` | feed_blender/grind tools + cooking perception |
+| `Identity.cs` | identity block, rename tool, mailbox/ATM perception |
+| `ChatSimilarity.cs` | Jaccard + Levenshtein similarity (pure C#, testable) |
 | `SafeHttp.cs` | Retry wrapper with exponential backoff |
 | `Constants.cs` | Named constants for magic numbers |
 | `ContextManager.cs` | Dynamic context window compaction |
 | `ModelProbe.cs` | Server capability detection |
 | `Json.cs` | Hand-rolled JSON parser/writer |
-| `Patches.cs` | Harmony patches for animator rotation |
+| `ModuleRegistry.cs` | Reflection-based module discovery (tools, physics, perception) |
+| `IdentityBot.cs` | Second Photon client for NPC room identity |
+| `Patches.cs` | Harmony patches for animator rotation conflicts |
+| `Overlay.cs` | Debug overlay GUI |
+| `GoalMachine.cs` | Persistent goal machine (set/complete/drop) |
 
 ### Key Design Decisions
 
-1. **Partial class split**: `NPCInstance` is split across 15 files by subsystem.
+1. **Partial class split**: `NPCInstance` is split across 26 files by subsystem.
    Each file handles one concern. This is intentional — it keeps individual files
    manageable while the logical class is large (~5000 lines total).
 
-2. **Background LLM thread**: The decision loop runs on its own thread. Unity API
-   access goes through `RunOnMainThread()` which posts to the main thread's
-   `SynchronizationContext`.
+2. **Module registry**: New features register via `ModuleRegistry` — tools, physics
+   tick hooks, and perception hooks are discovered by reflection. No shared-file
+   edits needed to add a new module.
 
-3. **JSON schema over tools**: Uses `response_format: json_schema` instead of
+3. **Background path worker**: A* pathfinding runs on a static worker thread. NPCs
+   enqueue paths; the worker computes off-main; results are posted to per-NPC slots.
+   Milestone-based replanning (only when deviation/target-move/age triggers) replaces
+   timer-driven replanning.
+
+4. **JSON schema over tools**: Uses `response_format: json_schema` instead of
    `tool_choice` because many chat templates (Gemma, etc.) reject tool forcing.
 
-4. **Fuzzy tool matching**: Small models produce misspelled tool names. A
+5. **Fuzzy tool matching**: Small models produce misspelled tool names. A
    Levenshtein-distance-based fuzzy matcher recovers valid tool calls.
 
-5. **Dynamic compaction**: `ContextManager` monitors context fill ratio and
+6. **Dynamic compaction**: `ContextManager` monitors context fill ratio and
    escalates compaction (trim history → merge facts → model switch) when needed.
 
-6. **Photon ownership**: The plugin claims PhotonView ownership of possessed
+7. **Photon ownership**: The plugin claims PhotonView ownership of possessed
    bodies. Other mods can steal it — hence the 3-second re-assertion watchdog.
 
-7. **Harmony patches**: `CharacterControllerAnimator` coroutines fight our
+8. **Chat freshness**: Timestamped chat log with ack tracking. Say-repeat suppression
+   uses Jaccard + Levenshtein similarity. Identity bot uses exponential backoff.
+   Empty-content handling retries once before safe no-op.
+
+9. **Harmony patches**: `CharacterControllerAnimator` coroutines fight our
    rotation control. Patches neutralize the `MoveNext()` rotation writes.
 
 ### Data Flow
@@ -114,6 +137,7 @@ Perception:
     OverlapSphere → nearby objects
     Body introspection → energy, horniness, equipment
     Vision caption → scene description + nav hint
+    Module perception → body_control, farm, cooking, identity, etc.
     → JSON payload
 
 LLM:
@@ -124,6 +148,7 @@ LLM:
 
 Movement:
     FixedUpdate → apply velocity, validate walk, steer around obstacles
+    Background path worker → A* on local grid or full world map
     Camera clip → auto-crouch
     Photon → re-assert ownership
 ```
@@ -138,6 +163,7 @@ Movement:
 | Commentary thread | Free-form musings via Task.Run |
 | Ask thread | Question answering via Task.Run |
 | Plan steps thread | Background plan execution via Task.Run |
+| Path worker | Static daemon thread: computes A* paths off the main thread |
 
 ### Error Handling
 
@@ -145,3 +171,4 @@ Movement:
 - Perception failures return `{ok: false}` instead of crashing the loop
 - Mono string conversion errors are sanitized (surrogate scrubbing)
 - Thread abort/InterruptedException handled gracefully
+- Tool handlers never throw; return `{ok: false, reason: "...", hint: "..."}`

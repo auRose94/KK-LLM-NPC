@@ -99,6 +99,13 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 |-----|---------|-------|---------|
 | `FactDecayTicks` | `900` | 0–… | Ticks before a fact decays out of context if the model hasn't re-asserted it. Re-`remember`ing a fact (same category prefix) refreshes its age, so actively-used facts outlive scratch notes. 0 = facts never decay. |
 
+## [Farming] — Farm/Cooking Perception
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `ScanRadius` | `3.0` | 1–20m | Radius (m) to scan for seeds, plants, watering cans, blenders, grinders, and egg spawners |
+| `ScanMax` | `8` | 1–20 | Max number of farm/cooking entries in perception (cap to keep payload small) |
+
 ## [Multiplayer] — NPC Room Identity
 
 | Key | Default | Purpose |

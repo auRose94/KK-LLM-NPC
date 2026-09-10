@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Background path worker** — static daemon thread computes A* paths off the main thread;
+  milestone-based replanning (only when target moved, path exhausted, or deviation exceeds
+  threshold); time-budgeted expansion prevents frame hitches on large maps
+- **Whole-map world map** — cached 3D walkability map shared by all agents; adaptive cell
+  sizing (span/1200, clamped [0.5,4.0]); hard cell cap (~4M); auto floor detection
+  (gap > 1.5m = new layer, cap 16)
+- **Body control module** — `thrust` (hip animation), `erection`, `mount`, `unmount`,
+  `orgasm` tools with consent-aware prompt guidance; perception `body_control` reports
+  erection, stimulation, penetration state, hip animation status
+- **Chat freshness** — timestamped chat log with ack tracking; say-repeat suppression
+  (Jaccard > 0.65 OR Levenshtein ratio > 0.8); identity bot exponential backoff
+  (2s → 30s); empty-content retry; de-duped log
+- **Farming & cooking module** — `plant`, `water`, `harvest`, `plant_egg`, `feed_blender`,
+  `grind` tools; perception `farm` (nearby plants) and `cooking` (nearby equipment)
+- **Identity module** — per-NPC identity block (orientation, trans status, persona);
+  `rename` tool with uniqueness validation; mailbox/ATM perception
+- **PathCore.cs** — pure C# A* solver, path policy, adaptive cell sizing (Unity-free,
+  compiles standalone for testing)
+- **ChatSimilarity.cs** — Jaccard + Levenshtein similarity (pure C#, testable)
+- **New tests** — `test_pathcore.cs` (33 tests: A*, ShouldReplan, adaptive cell, auto floors);
+  `test_chat_similarity.cs` (19 tests: Jaccard, Levenshtein, fuzzy matching)
+- **New prompt extras** — `body_control.txt`, `chat.txt`, `farmcook.txt`, `identity.txt`
+
+### Changed
+- **Pathfinding** — moved from inline FixedUpdate A* to background worker; added time budget
+  and expansion cap; world map with auto-layers and adaptive cells
+- **Movement config** — added `PathTimeBudgetMs`, `PathMaxExpansions`, `WorldMapEnabled`,
+  `WorldMapCellSize`, `WorldMapMaxSpan`, `WorldMapMaxCells`, `WorldMapAutoLayers`,
+  `WorldMapLayers`, `WorldMapCellsPerFrame`
+- **Farming config** — new `[Farming]` section with `ScanRadius` and `ScanMax`
+- **Architecture** — 26 partial class files (up from 15); new `ModuleRegistry` for
+  reflection-based feature discovery
+- **Warning count** — reduced from 19 to 0 (removed dead locals, fields, and assignments)
+
+### Added
 - **Goal machine** — `set_goal` / `complete_goal` / `drop_goal` tools with a persistent goal in perception (`goal` block + `nudge` when stuck); a thought-repetition guard for models that ignore the tools; completing/dropping a goal sheds its scratch facts (`src/GoalMachine.cs`)
 - **`forget` tool** — drop a fact by category, text, or substring (no argument = drop the oldest fact); the explicit half of forgetting
 - **Fact decay** — `Memory.FactDecayTicks` (default 900; 0 = off): facts the model hasn't re-asserted age out of context; re-`remember`ing refreshes a fact's age; cap eviction now removes the oldest fact
