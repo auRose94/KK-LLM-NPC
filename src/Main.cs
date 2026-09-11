@@ -130,6 +130,13 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgFarmScanRadius;
         internal ConfigEntry<int> _cfgFarmScanMax;
 
+        // ---- console (bash-like REPL) mode ----
+        internal ConfigEntry<bool> _cfgConsoleEnabled;
+        internal ConfigEntry<int> _cfgConsoleMaxRounds;
+        internal ConfigEntry<int> _cfgConsoleMaxTokens;
+        internal ConfigEntry<int> _cfgConsoleHistory;
+        internal ConfigEntry<string> _cfgConsolePromptFile;
+
         // ---- instance management ----
         private readonly List<NPCInstance> _instances = new List<NPCInstance>();
         private readonly object _instancesLock = new object();
@@ -284,6 +291,21 @@ namespace KKLLMNPC
             _cfgFarmScanMax = Config.Bind("Farming", "ScanMax", 8,
                 "Max number of farm entries in perception (cap to keep payload small)");
 
+            // Console REPL: the AI gets a bash-like shell instead of a perception
+            // payload every tick — it polls the game (ls, cd, cat, echo...) and reads
+            // the output before its next command. echo = speaking. Set Enabled=false
+            // to return to the legacy push-perception loop.
+            _cfgConsoleEnabled = Config.Bind("Console", "Enabled", true,
+                "Bash-like console mode (default ON): the model polls the game with commands (ls, cd, use, echo...) instead of receiving a big perception payload each tick. echo = speak. Set false for the legacy push-perception loop.");
+            _cfgConsoleMaxRounds = Config.Bind("Console", "MaxRounds", 3,
+                "Max command rounds per think cycle (each round = one LLM call after reading the output). 1 = single shot, higher = more back-and-forth exploration.");
+            _cfgConsoleMaxTokens = Config.Bind("Console", "MaxTokens", 256,
+                "Max tokens per console reply (command lines are short — low is fast)");
+            _cfgConsoleHistory = Config.Bind("Console", "HistoryMessages", 30,
+                "Rolling conversation window size (messages kept, system prompt always kept)");
+            _cfgConsolePromptFile = Config.Bind("Console", "SystemPromptFile", "system_prompt_console.txt",
+                "Console-mode persona/world-rules file (relative to game dir). The command list + console protocol are appended automatically. Blank = built-in persona.");
+
             // Clamp config values to safe ranges to prevent divide-by-zero, negative durations, etc.
             _cfgThinkInterval.Value = Mathf.Clamp(_cfgThinkInterval.Value, 0.05f, 10f);
             _cfgImageEvery.Value = Mathf.Max(1, _cfgImageEvery.Value);
@@ -323,6 +345,9 @@ namespace KKLLMNPC
             _cfgBrakeDist.Value = Mathf.Clamp(_cfgBrakeDist.Value, 0.1f, 20f);
             _cfgFarmScanRadius.Value = Mathf.Clamp(_cfgFarmScanRadius.Value, 1f, 20f);
             _cfgFarmScanMax.Value = Mathf.Clamp(_cfgFarmScanMax.Value, 1, 20);
+            _cfgConsoleMaxRounds.Value = Mathf.Clamp(_cfgConsoleMaxRounds.Value, 1, 8);
+            _cfgConsoleMaxTokens.Value = Mathf.Clamp(_cfgConsoleMaxTokens.Value, 64, 4096);
+            _cfgConsoleHistory.Value = Mathf.Clamp(_cfgConsoleHistory.Value, 6, 120);
 
             // Full-scene shared map: clamp the build params and push them into the
             // static WorldMap (shared by every instance/agent in this assembly).

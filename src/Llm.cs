@@ -107,6 +107,7 @@ namespace KKLLMNPC
             string q = p.S("q", "");
             if (string.IsNullOrWhiteSpace(q)) return new { ok = false, reason = "empty_question" };
             _pendingQuestion = q.Trim();
+            _consoleAnswerDelivered = false; // console mode: deliver the answer next turn
             // Fire the question on a worker thread; the answer is picked up next tick.
             if (!_answerBusy)
             {
@@ -388,6 +389,18 @@ namespace KKLLMNPC
                     if (lastState != "running") { lastState = "running"; Logger.LogInfo("KKLLMNPC: loop active."); }
 
                     _tick++;
+                    // Console REPL mode (default): the model polls the game with shell
+                    // commands (ls, cd, echo...) instead of receiving a perception
+                    // payload every tick — smaller payloads, no overload, and it asks
+                    // for exactly the data it needs, in a command → output → command stream.
+                    if (ConsoleEnabled())
+                    {
+                        if (_cfgVision.Value) MaybeStartVisionPass(); // keep captions/facts flowing
+                        ConsoleTurn();
+                        UpdateActivity();
+                        Thread.Sleep((int)(GetDynamicThinkInterval() * 1000));
+                        continue;
+                    }
                     bool imageDue = _cfgSendImage.Value && (
                         !_cfgVision.Value
                         || _tick % Math.Max(1, _cfgImageEvery.Value) == 0
@@ -711,13 +724,58 @@ namespace KKLLMNPC
                     ["max_tokens"] = _cfgMaxTokens.Value,
                     ["stream"] = true,
                 };
-                string body = Json.Write(payload);
+                string toolName = null, toolArgs = null;
+                string fullContent = PostChatPayload(payload, out toolName, out toolArgs);
+                if (fullContent == null) return null;
 
-                var req = (HttpWebRequest)WebRequest.Create(_cfgEndpoint.Value);
+                var message = new Dictionary<string, object> { ["role"] = "assistant" };
+                if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;
+                if (toolName != null && !string.IsNullOrEmpty(toolArgs))
+                {
+                    message["tool_calls"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["id"] = null,
+                            ["type"] = "function",
+                            ["function"] = new Dictionary<string, object>
+                            {
+                                ["name"] = toolName,
+                                ["arguments"] = toolArgs,
+                            },
+                        },
+                    };
+                }
+                var fakeResp = new Dictionary<string, object>
+                {
+                    ["choices"] = new object[]
+                    {
+                        new Dictionary<string, object> { ["message"] = message },
+                    },
+                };
+                return Json.Write(fakeResp);
+            }
+            catch (Exception e)
+            {
+                try { Logger.LogWarning("QueryLLM: " + e.Message); } catch (Exception) { }
+                return null;
+            }
+        }
+
+        // POST a chat payload and return the assistant's content (sanitized), or null
+        // on failure (logged). Shared by the legacy act-JSON path (QueryLLM) and the
+        // console path (QueryConsoleModel). toolName/toolArgs capture any tool_calls.
+        private string PostChatPayload(Dictionary<string, object> payload, out string toolName, out string toolArgs)
+        {
+            toolName = null; toolArgs = null;
+            try
+            {
+                string body = Json.Write(payload);
+                var req = (HttpWebRequest)WebRequest.Create(Val(_cfgEndpoint));
                 req.Method = "POST";
                 req.ContentType = "application/json";
-                if (!string.IsNullOrEmpty(_cfgApiKey.Value))
-                    req.Headers["Authorization"] = "Bearer " + _cfgApiKey.Value;
+                if (!string.IsNullOrEmpty(Val(_cfgApiKey)))
+                    req.Headers["Authorization"] = "Bearer " + Val(_cfgApiKey);
                 req.Timeout = 120000; req.ReadWriteTimeout = 120000;
                 byte[] bytes = Encoding.UTF8.GetBytes(body);
                 req.ContentLength = bytes.Length;
@@ -726,130 +784,10 @@ namespace KKLLMNPC
                 using (var stream = resp.GetResponseStream())
                 {
                     if (stream == null) return null;
-
-                    // Read the full response first — it may be SSE or plain JSON.
                     string rawResponse;
                     using (var reader = new StreamReader(stream, Encoding.UTF8))
                         rawResponse = reader.ReadToEnd();
-
-                    var contentBuilder = new StringBuilder();
-                    var toolArgsBuilder = new StringBuilder();
-                    string toolCallId = null;
-                    string toolName = null;
-                    string role = "assistant";
-
-                    // Try SSE format first: lines prefixed with "data: ".
-                    bool anySSE = false;
-                    foreach (var rawLine in rawResponse.Split('\n'))
-                    {
-                        string line = rawLine.TrimEnd('\r');
-                        if (line.Length == 0) continue;
-                        if (!line.StartsWith("data: ")) continue;
-                        anySSE = true;
-                        string data = line.Substring(6);
-                        if (data == "[DONE]") break;
-                        try
-                        {
-                            var chunk = Json.Parse(data) as Dictionary<string, object>;
-                            if (chunk == null) continue;
-                            var choices = chunk.GetValueOrDefault("choices") as List<object>;
-                            if (choices == null || choices.Count == 0) continue;
-                            var delta = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("delta") as Dictionary<string, object>;
-                            if (delta == null) continue;
-                            if (delta.ContainsKey("role")) role = delta["role"].ToString();
-                            var c = delta.GetValueOrDefault("content") as string;
-                            if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
-                            var tcs = delta.GetValueOrDefault("tool_calls") as List<object>;
-                            if (tcs != null)
-                            {
-                                foreach (var tcObj in tcs)
-                                {
-                                    var tc = tcObj as Dictionary<string, object>; if (tc == null) continue;
-                                    if (tc.GetValueOrDefault("id") is string idStr) toolCallId = idStr;
-                                    var fn = tc.GetValueOrDefault("function") as Dictionary<string, object>; if (fn == null) continue;
-                                    if (fn.GetValueOrDefault("name") is string n && !string.IsNullOrEmpty(n)) toolName = n;
-                                    if (fn.GetValueOrDefault("arguments") is string a && !string.IsNullOrEmpty(a)) toolArgsBuilder.Append(Sanitize(a));
-                                }
-                            }
-                        }
-                        catch (Exception) { }
-                    }
-
-                    // Fallback: non-streaming JSON response (common with LM Studio /v1/chat/completions).
-                    if (!anySSE && contentBuilder.Length == 0 && toolName == null)
-                    {
-                        try
-                        {
-                            var root = Json.Parse(rawResponse) as Dictionary<string, object>;
-                            if (root != null)
-                            {
-                                var choices = root.GetValueOrDefault("choices") as List<object>;
-                                if (choices != null && choices.Count > 0)
-                                {
-                                    var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
-                                    if (msg != null)
-                                    {
-                                        if (msg.ContainsKey("role")) role = msg["role"].ToString();
-                                        var c = msg.GetValueOrDefault("content") as string;
-                                        if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
-                                        var tcs = msg.GetValueOrDefault("tool_calls") as List<object>;
-                                        if (tcs != null)
-                                        {
-                                            foreach (var tcObj in tcs)
-                                            {
-                                                var tc = tcObj as Dictionary<string, object>; if (tc == null) continue;
-                                                if (tc.GetValueOrDefault("id") is string idStr) toolCallId = idStr;
-                                                var fn = tc.GetValueOrDefault("function") as Dictionary<string, object>; if (fn == null) continue;
-                                                if (fn.GetValueOrDefault("name") is string n && !string.IsNullOrEmpty(n)) toolName = n;
-                                                if (fn.GetValueOrDefault("arguments") is string a && !string.IsNullOrEmpty(a)) toolArgsBuilder.Append(Sanitize(a));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception) { }
-                    }
-                    // Build a non-streaming response JSON so the rest of the pipeline works unchanged.
-                    string fullContent = contentBuilder.ToString();
-                    // Debug: log raw response when empty, so we can see what the model actually sent.
-                    if (string.IsNullOrEmpty(fullContent) && toolName == null && rawResponse.Length > 0)
-                    {
-                        string preview = rawResponse.Length > 500 ? rawResponse.Substring(0, 500) + "..." : rawResponse;
-                        Logger.LogWarning("LLM raw response (empty content): " + preview);
-                        // Reasoning-only stream: model emitted reasoning_content but no content.
-                        // Set retry flag so next turn appends a hint to the user message.
-                        if (rawResponse.Contains("reasoning_content"))
-                        {
-                            _emptyContentRetry = true;
-                        }
-                    }
-                    var message = new Dictionary<string, object> { ["role"] = role };
-                    if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;
-                    if (toolName != null && toolArgsBuilder.Length > 0)
-                    {
-                        message["tool_calls"] = new object[]
-                        {
-                            new Dictionary<string, object>
-                            {
-                                ["id"] = toolCallId,
-                                ["type"] = "function",
-                                ["function"] = new Dictionary<string, object>
-                                {
-                                    ["name"] = toolName,
-                                    ["arguments"] = toolArgsBuilder.ToString(),
-                                },
-                            },
-                        };
-                    }
-                    var fakeResp = new Dictionary<string, object>
-                    {
-                        ["choices"] = new object[]
-                        {
-                            new Dictionary<string, object> { ["message"] = message },
-                        },
-                    };
-                    return Json.Write(fakeResp);
+                    return ParseChatResponse(rawResponse, out toolName, out toolArgs);
                 }
             }
             catch (Exception e)
@@ -867,6 +805,101 @@ namespace KKLLMNPC
                     Logger.LogWarning("LLM endpoint: " + msg);
                 return null;
             }
+        }
+
+        // Parse a raw chat-completions response (SSE stream or plain JSON) into the
+        // assistant content + any tool_call. Shared by the legacy and console paths.
+        private string ParseChatResponse(string rawResponse, out string toolName, out string toolArgs)
+        {
+            toolName = null;
+            toolArgs = null;
+            var contentBuilder = new StringBuilder();
+
+            // Try SSE format first: lines prefixed with "data: ".
+            bool anySSE = false;
+            foreach (var rawLine in rawResponse.Split('\n'))
+            {
+                string line = rawLine.TrimEnd('\r');
+                if (line.Length == 0) continue;
+                if (!line.StartsWith("data: ")) continue;
+                anySSE = true;
+                string data = line.Substring(6);
+                if (data == "[DONE]") break;
+                try
+                {
+                    var chunk = Json.Parse(data) as Dictionary<string, object>;
+                    if (chunk == null) continue;
+                    var choices = chunk.GetValueOrDefault("choices") as List<object>;
+                    if (choices == null || choices.Count == 0) continue;
+                    var delta = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("delta") as Dictionary<string, object>;
+                    if (delta == null) continue;
+                    var c = delta.GetValueOrDefault("content") as string;
+                    if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                    var tcs = delta.GetValueOrDefault("tool_calls") as List<object>;
+                    if (tcs != null)
+                    {
+                        foreach (var tcObj in tcs)
+                        {
+                            var tc = tcObj as Dictionary<string, object>; if (tc == null) continue;
+                            var fn = tc.GetValueOrDefault("function") as Dictionary<string, object>; if (fn == null) continue;
+                            if (fn.GetValueOrDefault("name") is string n && !string.IsNullOrEmpty(n)) toolName = n;
+                            if (fn.GetValueOrDefault("arguments") is string a && !string.IsNullOrEmpty(a))
+                                toolArgs = (toolArgs == null ? "" : toolArgs) + Sanitize(a);
+                        }
+                    }
+                }
+                catch (Exception) { }
+            }
+
+            // Fallback: non-streaming JSON response (common with LM Studio /v1/chat/completions).
+            if (!anySSE && contentBuilder.Length == 0 && toolName == null)
+            {
+                try
+                {
+                    var root = Json.Parse(rawResponse) as Dictionary<string, object>;
+                    if (root != null)
+                    {
+                        var choices = root.GetValueOrDefault("choices") as List<object>;
+                        if (choices != null && choices.Count > 0)
+                        {
+                            var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                            if (msg != null)
+                            {
+                                var c = msg.GetValueOrDefault("content") as string;
+                                if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                                var tcs = msg.GetValueOrDefault("tool_calls") as List<object>;
+                                if (tcs != null)
+                                {
+                                    foreach (var tcObj in tcs)
+                                    {
+                                        var tc = tcObj as Dictionary<string, object>; if (tc == null) continue;
+                                        var fn = tc.GetValueOrDefault("function") as Dictionary<string, object>; if (fn == null) continue;
+                                        if (fn.GetValueOrDefault("name") is string n && !string.IsNullOrEmpty(n)) toolName = n;
+                                        if (fn.GetValueOrDefault("arguments") is string a && !string.IsNullOrEmpty(a))
+                                            toolArgs = (toolArgs == null ? "" : toolArgs) + Sanitize(a);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception) { }
+            }
+
+            string fullContent = contentBuilder.ToString();
+            // Debug: log raw response when empty, so we can see what the model actually sent.
+            if (string.IsNullOrEmpty(fullContent) && toolName == null && rawResponse.Length > 0)
+            {
+                string preview = rawResponse.Length > 500 ? rawResponse.Substring(0, 500) + "..." : rawResponse;
+                Logger.LogWarning("LLM raw response (empty content): " + preview);
+                // Reasoning-only stream: model emitted reasoning_content but no content.
+                // Set retry flag so next turn appends a hint to the user message.
+                if (rawResponse.Contains("reasoning_content"))
+                {
+                    _emptyContentRetry = true;
+                }
+            }
+            return fullContent;
         }
 
         private void ExecuteToolCalls(string responseJson)

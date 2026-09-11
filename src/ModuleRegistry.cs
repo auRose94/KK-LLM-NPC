@@ -1,8 +1,16 @@
 // Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
 // Module registry: lets partial-class modules (BodyControl, Farming, Identity, ...)
 // register tools, per-physics-tick hooks, and perception fields WITHOUT touching the
-// shared files (Llm.cs, Movement.cs, Senses.cs). Modules register in a static
-// constructor:  static MyModule() { ModuleRegistry.Tool("thrust", (n, p) => n.ToolThrust(p), schema); }
+// shared files (Llm.cs, Movement.cs, Senses.cs). Modules expose a static Register()
+// method (a guard-flag idiom), which Scan() discovers via reflection and invokes once
+// at plugin start:
+//   public static void Register() {
+//       if (_registered) return; _registered = true;
+//       ModuleRegistry.Tool("thrust", (n, p) => n.ToolThrust(p), schema);
+//   }
+// NOTE: a static CONSTRUCTOR alone will NOT run — Scan() only calls Register() methods,
+// so registration in `static MyModule() { ... }` is silently skipped (this used to drop
+// the Identity module's `rename` tool).
 using System;
 using System.Collections.Generic;
 using System.IO;

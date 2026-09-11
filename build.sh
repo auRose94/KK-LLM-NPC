@@ -76,6 +76,7 @@ if [ "$COMPILER" = "mcs" ]; then
     # Ship the system-prompt file next to the DLL (LLM.SystemPromptFile default is
     # resolved relative to the plugin dir). Optional — built-in prompt is the fallback.
     [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
+    [ -f system_prompt_console.txt ] && cp -f system_prompt_console.txt "$KDIR/BepInEx/plugins/system_prompt_console.txt"
     # Module prompt extras (each module adds prompt_extras/<name>.txt).
     if [ -d prompt_extras ] && [ -n "$(ls -A prompt_extras/*.txt 2>/dev/null)" ]; then
       mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
@@ -121,6 +122,7 @@ PROJ
     fi
     dotnet build -c Release -o "$KDIR/BepInEx/plugins/"
     [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
+    [ -f system_prompt_console.txt ] && cp -f system_prompt_console.txt "$KDIR/BepInEx/plugins/system_prompt_console.txt"
     if [ -d prompt_extras ] && [ -n "$(ls -A prompt_extras/*.txt 2>/dev/null)" ]; then
       mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
       cp -f prompt_extras/*.txt "$KDIR/BepInEx/plugins/prompt_extras/"

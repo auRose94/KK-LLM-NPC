@@ -89,6 +89,8 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 | `Patches.cs` | Harmony patches for animator rotation conflicts |
 | `Overlay.cs` | Debug overlay GUI |
 | `GoalMachine.cs` | Persistent goal machine (set/complete/drop) |
+| `Console.cs` | Console REPL (default mode): command handlers, event drain, prompt, the command→output→command turn loop |
+| `ConsoleShell.cs` | Bash-like command vocabulary + lenient line/reply parser (pure C#, unit-testable) |
 
 ### Key Design Decisions
 
@@ -124,6 +126,19 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 9. **Harmony patches**: `CharacterControllerAnimator` coroutines fight our
    rotation control. Patches neutralize the `MoveNext()` rotation writes.
 
+10. **Console REPL (default mode)**: Instead of pushing a big perception JSON every
+    tick, the model sits at a bash-like shell and *polls* the game — it sends command
+    lines (`ls`, `cd`, `cat`, `echo`…), reads the terse output, then sends its next
+    command (a command → data → read → command stream). This keeps payloads small (works
+    on small local models, no context overload) and lets the NPC ask for exactly the data
+    it needs. `echo` is how it speaks. Bash-style names are chosen because small models
+    already know them from shell data; legacy `act` names (`say`, `go_to`, `interact`,
+    `walk`, …) are kept as aliases, and a deliberately *tight* fuzzy matcher (one-char
+    insert/delete only, or substitution for 4+ char commands) recovers typos without
+    turning prose into commands. Module tools register themselves into the same
+    vocabulary at startup (`ConsoleShell.RegisterExtra`). Set `[Console] Enabled=false`
+    to fall back to the legacy push-perception / `act`-JSON loop, which is kept intact.
+
 ### Data Flow
 
 ```
@@ -140,7 +155,14 @@ Perception:
     Module perception → body_control, farm, cooking, identity, etc.
     → JSON payload
 
-LLM:
+LLM (console mode — default):
+    drain world events ([chat]/[event]/[ask]) + state anchor + "$" prompt
+    → model replies with command lines (ls, cd, echo, cat ...)
+    → parse + execute each line → print terse terminal output
+    → model reads output, sends more commands (or `sleep` to end the turn)
+    → repeat up to MaxRounds; rolling window (HistoryMessages) bounds the context
+
+LLM (legacy mode — [Console] Enabled=false):
     POST perception → model
     Parse act JSON → tool calls
     Execute tools → movement, interaction, speech

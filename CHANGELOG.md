@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Console REPL (bash-like AI interface, default ON)** — the LLM now *polls* the game from a shell
+  instead of receiving a perception JSON blob every tick: it sends command lines (`ls`, `ps`, `pwd`,
+  `whoami`, `cat facts|goal|chat|needs|history|stations|map|body`, `status`, `find`, `look`; `echo
+  <words>` to **speak**; `cd`, `use`, `run`, `turn`, `jump`, `crouch`, `exit`, `get`, `drop`, `follow`,
+  `stop`, `sleep`; `remember`, `forget`, `goal`, `ask`), reads the terse output, then sends more
+  commands — a command → data → read → command stream. Payloads stay small (works on small local
+  models, no overload), and the model asks for exactly the data it needs. Bash-style names are
+  chosen so small models already know them; legacy `act` names (`say`→`echo`, `go_to`→`cd`,
+  `interact`→`use`, `walk`→`run`, …) are aliases, with a deliberately tight fuzzy matcher that
+  recovers typos without turning prose into commands. Module tools (thrust, plant, water, harvest,
+  plant_egg, feed_blender, grind, rename, …) register into the same vocabulary at startup.
+  New `[Console]` config section (`Enabled`, `MaxRounds`, `MaxTokens`, `HistoryMessages`,
+  `SystemPromptFile`); a `system_prompt_console.txt` persona ships with the plugin.
+  `Console.Enabled=false` restores the legacy push-perception / `act`-JSON loop (kept intact).
+  New files: `src/Console.cs`, `src/ConsoleShell.cs`, `system_prompt_console.txt`;
+  tests: `tests/test_console_shell.cs` (90 tests).
 - **Background path worker** — static daemon thread computes A* paths off the main thread;
   milestone-based replanning (only when target moved, path exhausted, or deviation exceeds
   threshold); time-budgeted expansion prevents frame hitches on large maps

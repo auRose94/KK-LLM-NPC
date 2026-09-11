@@ -92,6 +92,12 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgIdentityAppId;
         internal ConfigEntry<float> _cfgFarmScanRadius;
         internal ConfigEntry<int> _cfgFarmScanMax;
+        // ---- console (bash-like REPL) mode ----
+        internal ConfigEntry<bool> _cfgConsoleEnabled;
+        internal ConfigEntry<int> _cfgConsoleMaxRounds;
+        internal ConfigEntry<int> _cfgConsoleMaxTokens;
+        internal ConfigEntry<int> _cfgConsoleHistory;
+        internal ConfigEntry<string> _cfgConsolePromptFile;
 
         // ---- runtime state ----
         private Thread _llmThread;
@@ -470,6 +476,11 @@ namespace KKLLMNPC
             _cfgIdentityAppId = plugin._cfgIdentityAppId;
             _cfgFarmScanRadius = plugin._cfgFarmScanRadius;
             _cfgFarmScanMax = plugin._cfgFarmScanMax;
+            _cfgConsoleEnabled = plugin._cfgConsoleEnabled;
+            _cfgConsoleMaxRounds = plugin._cfgConsoleMaxRounds;
+            _cfgConsoleMaxTokens = plugin._cfgConsoleMaxTokens;
+            _cfgConsoleHistory = plugin._cfgConsoleHistory;
+            _cfgConsolePromptFile = plugin._cfgConsolePromptFile;
         }
 
         // ------------------------------------------------------------------
@@ -693,6 +704,15 @@ namespace KKLLMNPC
             _playerChat = null; _lastDeliveredChat = null;
             lock (_chatEntries) { _chatEntries.Clear(); }
             _seenChatAcks.Clear();
+            // Reset the console REPL conversation (fresh boot on world reload).
+            _consoleMsgs = null;
+            _consoleProseStreak = 0;
+            _consoleEmptyStreak = 0;
+            _consoleLastCmdKey = null;
+            _consoleStuckCount = 0;
+            _pendingShotB64 = null;
+            _consoleSlept = false;
+            _consoleAnswerDelivered = true;
             _pendingSayNudge = false;
             _emptyContentRetry = false;
             _lastSays.Clear();

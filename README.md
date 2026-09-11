@@ -26,21 +26,28 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 - **History** — its last 10 actions with outcomes, recent goals, and a `facts` list it extends via
   `remember` and prunes via `forget` (stale facts also decay out over time).
 
-It then emits one structured `act` per tick (via JSON-schema response_format; works on any
-model, not just tool-calling ones), with an optional `plan[]` to chain up to 8 steps.
+By default the NPC sits at a **bash-like console** instead of receiving all of that as a
+JSON blob every tick: it *polls* the game with short shell commands, reads the output, then
+sends its next command (command → data → read → command, in a stream). It asks for exactly
+what it needs — `ls` for what's nearby, `status` for a one-line snapshot, `cat
+facts|goal|history` for memory — so the payload stays small, works on small local models, and
+never overloads the context. It **speaks with `echo`**. (Set `[Console] Enabled=false` to
+restore the legacy push-perception / `act`-JSON loop.)
 
-### Available tools
+### Console commands (bash-like)
 
-| Category | Tools |
-|----------|-------|
-| **Movement** | `walk`, `walk_ray`, `go_to` (name → closest station), `jump` |
-| **Interaction** | `look`, `look_around`, `interact`, `crouch`, `grab`, `drop`, `exit_station` |
-| **Communication** | `say`, `ask` (self-question), `remember`, `forget` |
-| **Goals** | `set_goal`, `complete_goal`, `drop_goal` |
-| **Body control** | `thrust`, `erection`, `mount`, `unmount`, `orgasm` |
-| **Farming** | `plant`, `water`, `harvest`, `plant_egg` |
-| **Cooking** | `feed_blender`, `grind` |
-| **Identity** | `rename` |
+The model types these at the shell prompt, one per line, and reads each result before the
+next. Bash-style names are chosen so even small models already know them from shell data.
+Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `interact`→`use`,
+`walk`→`run`, `exit_station`→`exit`, `grab`→`get`, `set_goal`→`goal`, …).
+
+| Group | Commands |
+|-------|----------|
+| **Read (poll the game)** | `ls` (nearby), `ps` (who's around), `pwd` (where), `whoami` (me), `cat facts\|goal\|chat\|needs\|history\|stations\|map\|body`, `status` (one-line snapshot), `find <place\|deg>`, `look left\|right\|up\|down\|around\|<deg>` |
+| **Act** | `echo <words>` (**speak**), `cd <place\|id:N>`, `use <thing\|id:N>`, `run [secs] [left\|right]`, `turn [deg]`, `jump`, `crouch [0..1]`, `exit`, `get`, `drop`, `follow on\|off`, `stop`, `sleep [secs]` (end turn) |
+| **Memory & goals** | `remember <fact>`, `forget <fact>`, `goal <text>\|done\|drop`, `ask <question>` |
+| **Module tools** | `thrust`, `erection`, `mount`, `unmount`, `orgasm`, `plant`, `water`, `harvest`, `plant_egg`, `feed_blender`, `grind`, `rename` (positional args: `target`, `amount`) |
+| **Misc** | `screenshot` (on-demand vision), `help` (list commands), `clear` |
 
 ### Perception keys
 
@@ -124,6 +131,20 @@ Drop `KKLLMNPC.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
 | `CommentEveryNTicks` | 5 | free commentary interval (0 = off) |
 | `CommentTemp` | 0.9 | sampling temperature for commentary |
 | `ChatLogLines` | 20 | lines of chat history to feed the model (0 = off) |
+
+### `[Console]` — bash-like REPL mode (default ON)
+
+The model polls the game with shell commands instead of receiving a perception payload each
+tick — smaller payloads, no overload, and it asks for exactly the data it needs. `echo`
+= speak. Set `Enabled=false` for the legacy push-perception / `act`-JSON loop.
+
+| Key | Default | Range | Purpose |
+| --- | --- | --- | --- |
+| `Enabled` | true | bool | Console REPL mode (default ON); false = legacy perception loop |
+| `MaxRounds` | 3 | 1–8 | Command rounds per think cycle (each round = one LLM call after reading output) |
+| `MaxTokens` | 256 | 64–4096 | Max tokens per console reply (command lines are short — low is fast) |
+| `HistoryMessages` | 30 | 6–120 | Rolling conversation window (system prompt always kept) |
+| `SystemPromptFile` | `system_prompt_console.txt` | — | Console persona/world-rules file (command list + protocol appended automatically) |
 
 ### `[Vision]` — the background "eyes" thread
 

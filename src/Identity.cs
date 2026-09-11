@@ -11,15 +11,22 @@ using UnityEngine;
 namespace KKLLMNPC
 {
     // ------------------------------------------------------------------
-    // Identity module: static constructor registers tool + perception hooks.
-    // The rename tool is registered without schema (prompt_extras/identity.txt
-    // documents the parameters). Schema registration has an overload
-    // resolution conflict in mcs between params string[] and Dictionary.
+    // Identity module: static Register() (discovered by ModuleRegistry.Scan)
+    // registers tool + perception hooks. The rename tool is registered without
+    // schema (prompt_extras/identity.txt documents the parameters). Schema
+    // registration has an overload resolution conflict in mcs between params
+    // string[] and Dictionary, so the schema-less Tool() overload is used.
+    // NOTE: must expose a static Register() (not just a static ctor) — the
+    // reflection scan only invokes Register() methods, so a static-constructor
+    // registration would never run.
     // ------------------------------------------------------------------
     internal static class IdentityModule
     {
-        static IdentityModule()
+        private static bool _registered;
+        public static void Register()
         {
+            if (_registered) return;
+            _registered = true;
             ModuleRegistry.Tool("rename", (n, p) => n.ToolRename(p));
             ModuleRegistry.Perception((n, dict) =>
             {

@@ -10,6 +10,7 @@ dependencies) and run via `mono`.
 | `test_json.cs` + `test_json_standalone.cs` | 22 | Json parser/writer (null, bool, int, float, string, object, array, nested, truncated, whitespace, round-trip) |
 | `test_pathcore.cs` | 33 | A* solver, PathPolicy.ShouldReplan (14 cases), adaptive cell sizing, auto floor detection |
 | `test_chat_similarity.cs` | 19 | Jaccard similarity, Levenshtein ratio, fuzzy matching (6+ significant words) |
+| `test_console_shell.cs` | 90 | Console REPL parser: canonical/alias/fuzzy resolution, prose guard, prompt prefixes, headers, payload + quoted args, legacy call-style args, reply splitting (fences/bullets/mixed), help text, module `RegisterExtra` |
 
 ## Running
 
@@ -24,6 +25,9 @@ mcs -target:exe -out:/tmp/t_pf.exe tests/test_pathcore.cs src/PathCore.cs && mon
 
 # Chat similarity (19 tests)
 mcs -target:exe -out:/tmp/t_chat.exe tests/test_chat_similarity.cs src/ChatSimilarity.cs && mono /tmp/t_chat.exe
+
+# Console shell (90 tests)
+mcs -target:exe -out:/tmp/t_cs.exe tests/test_console_shell.cs src/ConsoleShell.cs && mono /tmp/t_cs.exe
 ```
 
 All tests print `PASS` per case and a summary line (`N passed, 0 failed`).
