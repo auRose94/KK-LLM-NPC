@@ -710,6 +710,7 @@ namespace KKLLMNPC
             _consoleEmptyStreak = 0;
             _consoleLastCmdKey = null;
             _consoleStuckCount = 0;
+            if (_consoleRecentCmds != null) _consoleRecentCmds.Clear();
             _pendingShotB64 = null;
             _consoleSlept = false;
             _consoleAnswerDelivered = true;

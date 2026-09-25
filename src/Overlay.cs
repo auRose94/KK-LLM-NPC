@@ -18,8 +18,8 @@ namespace KKLLMNPC
 {
     public partial class LLMNPCPlugin
     {
-        private bool _overlayVisible;
-        private Rect _overlayRect = new Rect(20, 20, 600, 600);
+        private bool _overlayVisible = false;
+        private Rect _overlayRect = new Rect(20, 20, 600, 500);
         private string _overlayStatus = "";
 
         // Tab selection (0=State, 1=Config, 2=Instances)
@@ -48,23 +48,8 @@ namespace KKLLMNPC
         private static string F(float v) => v.ToString("F1", CultureInfo.InvariantCulture);
 
         // ------------------------------------------------------------------
-        // Main entry points
+        // Main entry points - OnGUI is now in Main.cs (required by Unity)
         // ------------------------------------------------------------------
-
-        private void OnGUI()
-        {
-            // Hotkey to toggle, only when in-game.
-            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.F6)
-            {
-
-                _overlayVisible = !_overlayVisible;
-                Event.current.Use();
-            }
-            if (!_overlayVisible) return;
-
-            _overlayRect = GUI.Window(GetInstanceID(), _overlayRect, DrawOverlayWindow,
-                new GUIContent("KKLLMNPC" + InstanceSuffix + " control"), null);
-        }
 
         private void DrawOverlayWindow(int id)
         {

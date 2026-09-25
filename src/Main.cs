@@ -172,6 +172,13 @@ namespace KKLLMNPC
             _mainContext = SynchronizationContext.Current;
             Log = Logger;
             Json.ErrorLog = msg => { try { Log?.LogWarning(msg); } catch (Exception) { } };
+            
+            // Create a hidden GameObject for the overlay UI to work with OnGUI
+            var uiGO = new GameObject("KKLLMNPC_UIGameObject");
+            UnityEngine.Object.DontDestroyOnLoad(uiGO);
+            uiGO.hideFlags = HideFlags.HideAndDontSave;
+            uiGO.AddComponent<OverlayUI>();
+            
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
             // Discover module partials (tools/perception/physics hooks) — reflection
             // scan, so new module files register without touching shared files.
@@ -784,5 +791,102 @@ namespace KKLLMNPC
             _lastSceneName = key;
             Logger.LogInfo("KKLLMNPC: idle (" + key + ").");
         }
+
+        // ------------------------------------------------------------------
+        // IMGUI overlay rendering - called from OverlayUI.OnGUI()
+        // ------------------------------------------------------------------
+        internal void OnGUICallback()
+        {
+            if (!_overlayVisible) return;
+            
+            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.F6)
+            {
+                _overlayVisible = !_overlayVisible;
+                Event.current.Use();
+            }
+            if (!_overlayVisible) return;
+
+            // Draw the overlay content directly without GUI.Window
+            float x = 10, y = 25, w = _overlayRect.width - 20;
+            
+            // --- Tab bar ---
+            y += DrawTabBar(x, y, w);
+
+            // --- Content (scrollable) ---
+            float contentHeight = _activeTab == 1 ? 420 : (_activeTab == 2 ? 200 : 140);
+            float scrollH = _overlayRect.height - y - 10;
+            _configScrollY = Mathf.Clamp(_configScrollY, 0, Mathf.Max(0, contentHeight - scrollH));
+
+            GUI.BeginGroup(new Rect(x, y, w, scrollH), null, null);
+            float cy = -_configScrollY;
+
+            switch (_activeTab)
+            {
+                case 0: cy += DrawStateSection(x, cy, w); break;
+                case 1: cy += DrawConfigSection(x, cy, w); break;
+                case 2: cy += DrawInstancesSection(x, cy, w); break;
+            }
+
+            if (!string.IsNullOrEmpty(_overlayStatus))
+            {
+                GUI.contentColor = new Color(0.8f, 0.9f, 0.4f);
+                GUI.Label(new Rect(6, cy + 4, w, 14), _overlayStatus);
+                GUI.contentColor = Color.white;
+                cy += 16;
+            }
+
+            GUI.EndGroup();
+
+            // Scrollbar
+            if (contentHeight > scrollH)
+            {
+                float sbX = x + w - 14;
+                float sbY = y;
+                float sbW = 12;
+                
+                Rect trackUp = new Rect(sbX, sbY, sbW, _configScrollY);
+                Rect trackDown = new Rect(sbX, sbY + _configScrollY, sbW, scrollH - _configScrollY);
+                if (Event.current.type == EventType.MouseDown && Event.current.button == 0)
+                {
+                    if (trackUp.Contains(Event.current.mousePosition))
+                        _configScrollY -= scrollH * 0.5f;
+                    if (trackDown.Contains(Event.current.mousePosition))
+                        _configScrollY += scrollH * 0.5f;
+                }
+            }
+
+            // Mouse wheel scroll
+            if (Event.current.type == EventType.ScrollWheel && _overlayRect.Contains(Event.current.mousePosition))
+            {
+                _configScrollY -= Event.current.delta.y * 15;
+                _configScrollY = Mathf.Clamp(_configScrollY, 0, Mathf.Max(0, contentHeight - scrollH));
+                Event.current.Use();
+            }
+
+            // Drag handle at bottom
+            GUI.DragWindow(new Rect(0, _overlayRect.height - 12, _overlayRect.width, 12));
+        }
+
     }
 }
+
+// Separate class outside the plugin so it can be used as a MonoBehaviour component
+namespace KKLLMNPC
+{
+    public class OverlayUI : MonoBehaviour 
+    {
+        private LLMNPCPlugin _plugin;
+
+        public void SetPlugin(LLMNPCPlugin plugin)
+        {
+            _plugin = plugin;
+        }
+
+        private void OnGUI()
+        {
+            // This will be called by Unity because OverlayUI extends MonoBehaviour
+            if (_plugin != null) _plugin.OnGUICallback();
+        }
+    }
+}
+

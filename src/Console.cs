@@ -41,6 +41,7 @@ namespace KKLLMNPC
         private int _consoleEmptyStreak;   // consecutive empty replies
         private string _consoleLastCmdKey; // "cmd:arg1,arg2" for stuck detection
         private int _consoleStuckCount;
+        private List<string> _consoleRecentCmds; // recent command strings for similarity check
         private string _pendingShotB64;    // image to attach to the next output message
         private bool _consoleSlept;        // `sleep` ran — end the cycle
         private bool _consoleAnswerDelivered = true; // ask() answer not yet shown
@@ -68,6 +69,7 @@ namespace KKLLMNPC
             _consoleEmptyStreak = 0;
             _consoleLastCmdKey = null;
             _consoleStuckCount = 0;
+            _consoleRecentCmds = new List<string>();
             Logger.LogInfo("[" + MyName() + "] console initialized (bash-like REPL mode)");
         }
 
@@ -253,13 +255,35 @@ namespace KKLLMNPC
 
                     if (known.Count == 0)
                     {
-                        // No command lines at all: prose/thought. Give one nudge, then
+                        // No command lines at all: prose/thought. Give nudges, then
                         // accept it as a thought (don't punish thinking out loud forever).
                         _consoleProseStreak++;
-                        if (!nudgedNoCmd && _consoleProseStreak < 3)
+
+                        string nudgeMsg;
+                        if (_consoleProseStreak == 1)
+                        {
+                            nudgeMsg = "That's not a command line. Reply with commands only (try: help).\n$\n";
+                        }
+                        else if (_consoleProseStreak == 2)
+                        {
+                            // More direct guidance for prose writers
+                            nudgeMsg = "REPLY WITH COMMAND LINES ONLY — no prose, thoughts, or explanations.\nTry: ls, cd, echo, sleep\n$\n";
+                        }
+                        else if (_consoleProseStreak >= 3 && _consoleProseStreak < 5)
+                        {
+                            // Offer help and state the problem
+                            nudgeMsg = "COMMAND LINES ONLY — prose not accepted.\nType 'help' for command list.\nCurrent goal: " + (string.IsNullOrEmpty(_goal) ? "(none)" : _goal) + "\n$\n";
+                        }
+                        else
+                        {
+                            // Final warning before treating as thought
+                            nudgeMsg = "Last chance: commands only. Or type sleep to end the turn.\n$\n";
+                        }
+
+                        if (!nudgedNoCmd && _consoleProseStreak < 5)
                         {
                             nudgedNoCmd = true;
-                            AddConsoleMsg("user", "That's not a command line. Reply with commands only (try: help).\n$\n");
+                            AddConsoleMsg("user", nudgeMsg);
                             continue;
                         }
                         _lastThought = reply.Length > 80 ? reply.Substring(0, 80) : reply;
@@ -298,13 +322,20 @@ namespace KKLLMNPC
                         string hist = Shorten(output, 60);
                         PushHistory(line.Cmd, hist);
 
-                        // stuck detection: same command + args repeated
+                        // Record command for similarity tracking
+                        RecordCommand(line.Raw);
+
+                        // stuck detection: improved semantic similarity check + exact repeat
+                        int simCount = 0;
+                        bool isRepeat = IsCommandRepeat(line.Raw, out simCount);
+
                         string key = line.Cmd + ":" + string.Join(",", line.Args);
-                        if (key == _consoleLastCmdKey)
+                        if (key == _consoleLastCmdKey || isRepeat)
                         {
                             _consoleStuckCount++;
-                            if (_consoleStuckCount == 3)
-                                outSb.AppendLine("stuck — you're repeating the same command. Try something different, or sleep.");
+                            // Provide more helpful stuck message with guidance
+                            if (_consoleStuckCount >= 2)
+                                outSb.AppendLine("stuck — you're repeating similar commands. Try something different, check your goal, or sleep.");
                         }
                         else _consoleStuckCount = 0;
                         _consoleLastCmdKey = key;
@@ -507,16 +538,21 @@ namespace KKLLMNPC
             string[] a = line.Args ?? new string[0];
             switch (cmd)
             {
-                case "echo": case "say":
+                case "echo":
+                case "say":
                     d["say"] = line.Payload ?? (a.Length > 0 ? string.Join(" ", a) : "");
                     break;
-                case "cd": case "go_to": case "move_to":
+                case "cd":
+                case "go_to":
+                case "move_to":
                     if (a.Length > 0) d[ArgTargetKey(a[0])] = ArgTargetVal(a[0]);
                     break;
-                case "use": case "interact":
+                case "use":
+                case "interact":
                     if (a.Length > 0) d[ArgTargetKey(a[0])] = ArgTargetVal(a[0]);
                     break;
-                case "run": case "walk":
+                case "run":
+                case "walk":
                     {
                         float dur = 2f;
                         bool side = false; string sideDir = null;
@@ -585,6 +621,84 @@ namespace KKLLMNPC
         private static string ArgTargetVal(string a)
         {
             return a.StartsWith("id:", StringComparison.Ordinal) ? a.Substring(3) : a;
+        }
+
+        // ------------------------------------------------------------------
+        // helpers for console improvements
+        // ------------------------------------------------------------------
+
+        // Compute similarity between two command strings (0.0 = different, 1.0 = same)
+        private static float CommandSimilarity(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return 0f;
+            if (a == b) return 1f;
+
+            // Extract command name
+            string cmdA = a.Split(' ')[0].Trim();
+            string cmdB = b.Split(' ')[0].Trim();
+            if (cmdA != cmdB) return 0f; // different commands
+
+            // Compare arguments using Levenshtein on the arg portion
+            int idxA = a.IndexOf(' ');
+            int idxB = b.IndexOf(' ');
+            string argsA = idxA >= 0 ? a.Substring(idxA).Trim() : "";
+            string argsB = idxB >= 0 ? b.Substring(idxB).Trim() : "";
+
+            if (string.IsNullOrEmpty(argsA) && string.IsNullOrEmpty(argsB)) return 1f;
+            if (string.IsNullOrEmpty(argsA) || string.IsNullOrEmpty(argsB)) return 0.3f;
+
+            // Simple similarity: check if one contains the other's key parts
+            int matches = 0;
+            int total = 0;
+            var argsAList = argsA.Split(new[] { ' ', ',', ':' }, StringSplitOptions.RemoveEmptyEntries);
+            var argsBList = argsB.Split(new[] { ' ', ',', ':' }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var arg in argsAList)
+            {
+                total++;
+                if (argsB.Contains(arg, StringComparison.OrdinalIgnoreCase)) matches++;
+            }
+            foreach (var arg in argsBList)
+            {
+                if (!argsA.Contains(arg, StringComparison.OrdinalIgnoreCase)) total++;
+            }
+
+            return total > 0 ? (float)matches / total : 0f;
+        }
+
+        // Reset recent commands list
+        private void ResetRecentCmds()
+        {
+            _consoleRecentCmds = new List<string>();
+        }
+
+        // Check if a command is semantically similar to recent ones
+        private bool IsCommandRepeat(string cmdLine, out int similarityCount)
+        {
+            similarityCount = 0;
+            if (string.IsNullOrEmpty(cmdLine) || _consoleRecentCmds == null || _consoleRecentCmds.Count == 0)
+                return false;
+
+            // Check against last N commands (default: 5)
+            int checkCount = Math.Min(5, _consoleRecentCmds.Count);
+            for (int i = 0; i < checkCount; i++)
+            {
+                float sim = CommandSimilarity(cmdLine, _consoleRecentCmds[_consoleRecentCmds.Count - 1 - i]);
+                if (sim >= 0.8f) // High similarity threshold
+                {
+                    similarityCount++;
+                }
+            }
+            return similarityCount >= 2; // Stuck if similar to 2+ recent commands
+        }
+
+        // Add command to recent history
+        private void RecordCommand(string cmdLine)
+        {
+            if (_consoleRecentCmds == null) ResetRecentCmds();
+            _consoleRecentCmds.Add(cmdLine);
+            // Keep only last 10 commands for memory
+            while (_consoleRecentCmds.Count > 10) _consoleRecentCmds.RemoveAt(0);
         }
 
         // ------------------------------------------------------------------
