@@ -190,35 +190,21 @@ namespace KKLLMNPC
                 };
                 string body = Json.Write(payload);
 
-                var req = (HttpWebRequest)WebRequest.Create(endpoint);
-                req.Method = "POST";
-                req.ContentType = "application/json";
-                if (!string.IsNullOrEmpty(apiKey))
-                    req.Headers["Authorization"] = "Bearer " + apiKey;
-                req.Timeout = 120000; req.ReadWriteTimeout = 120000; // vision encode is slow
-                byte[] bytes = Encoding.UTF8.GetBytes(body);
-                req.ContentLength = bytes.Length;
-                using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
-                using (var resp = req.GetResponse())
-                using (var stream = resp.GetResponseStream())
+                // 2 attempts but 60s each, so the worst case (60 + 1s backoff + 60)
+                // stays inside the 120s envelope the single-attempt version had. The
+                // vision worker is gated by _visionBusy, so a 4-minute stall here
+                // would leave steering permanently stale.
+                string json = SafeHttp.Post(endpoint, body, apiKey,
+                    retries: 2, timeout: TimeSpan.FromSeconds(60), maxResponseBytes: 1024 * 1024,
+                    onError: e => Logger.LogWarning("Vision endpoint: " + e));
+                if (json == null) return null;
                 {
-                    if (stream == null) return null;
-                    using (var ms = new MemoryStream())
-                    {
-                        var buf = new byte[8192]; int total = 0, nRead;
-                        while ((nRead = stream.Read(buf, 0, buf.Length)) > 0)
-                        {
-                            total += nRead; if (total > 1024 * 1024) break;
-                            ms.Write(buf, 0, nRead);
-                        }
-                        string json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-                        var root = Json.Parse(json) as Dictionary<string, object>;
-                        var choices = root?.GetValueOrDefault("choices") as List<object>;
-                        if (choices == null || choices.Count == 0) return null;
-                        var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
-                        string content = msg?.GetValueOrDefault("content") as string;
-                        return string.IsNullOrWhiteSpace(content) ? null : content.Trim();
-                    }
+                    var root = Json.Parse(json) as Dictionary<string, object>;
+                    var choices = root?.GetValueOrDefault("choices") as List<object>;
+                    if (choices == null || choices.Count == 0) return null;
+                    var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                    string content = msg?.GetValueOrDefault("content") as string;
+                    return string.IsNullOrWhiteSpace(content) ? null : content.Trim();
                 }
             }
             catch (Exception e) { Logger.LogWarning("vision endpoint: " + e.Message); return null; }

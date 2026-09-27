@@ -446,4 +446,122 @@ namespace KKLLMNPC
             return layers;
         }
     }
+
+    // ------------------------------------------------------------------
+    // GoalResolver — snap a requested goal onto the nearest walkable cell
+    //
+    // Pure search over an abstract grid. Declared without UnityEngine types
+    // (no Vector3) so it compiles standalone; the caller builds the world
+    // position from the returned cell/layer/height.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// The grid operations goal resolution needs. Implemented for free by
+    /// PathGridState, which already exposes all six members.
+    /// </summary>
+    internal interface IGoalGrid
+    {
+        int Cols();
+        int Rows();
+        int Ci(int x, int z);
+        void SampleCell(int ci);   // populate this cell's layer data
+        int LayerNear(int ci, float y);  // layer closest to y, or -1 if none
+        float H(int ci, int l);    // floor height of that layer
+    }
+
+    internal static class GoalResolver
+    {
+        /// <summary>
+        /// How far from the requested goal to search before giving up. Beyond
+        /// this the "goal" is somewhere the body was never trying to go, so
+        /// routing there would be worse than reporting no path.
+        /// </summary>
+        public const int MaxRadius = 6;
+
+        public struct Result
+        {
+            public bool Found;
+            public int Cell;      // cell index
+            public int Layer;     // layer index within the cell
+            public float Height;  // floor height of that layer
+        }
+
+        /// <summary>
+        /// Resolve a requested goal cell to something actually walkable.
+        ///
+        /// If the exact cell has a layer near <paramref name="refY"/>, use it.
+        /// Otherwise expand square rings outward up to <see cref="MaxRadius"/> and
+        /// take the candidate whose floor is closest in height to
+        /// <paramref name="refY"/> — that keeps the body on the storey the player
+        /// meant rather than teleporting its intent to another floor.
+        ///
+        /// The ring loop stops as soon as a ring yields any candidate, so this is
+        /// a nearest-in-plane search with a height tiebreak, not a global optimum.
+        /// </summary>
+        public static Result Resolve(IGoalGrid grid, int gx, int gz, float refY)
+        {
+            var result = new Result { Found = false, Cell = -1, Layer = -1, Height = 0f };
+
+            // Fast path: the requested cell is walkable on the right storey.
+            if (gx < 0 || gz < 0 || gx >= grid.Cols() || gz >= grid.Rows())
+                return result;
+
+            int exact = grid.Ci(gx, gz);
+            grid.SampleCell(exact);
+            int l = grid.LayerNear(exact, refY);
+            if (l >= 0)
+            {
+                result.Found = true;
+                result.Cell = exact;
+                result.Layer = l;
+                result.Height = grid.H(exact, l);
+                return result;
+            }
+
+            // Expanding ring search. Stop at the first ring that yields anything.
+            int bestCell = -1, bestLayer = -1;
+            float bestDelta = float.MaxValue;
+            for (int r = 1; r <= MaxRadius && bestCell < 0; r++)
+            {
+                for (int d = -r; d <= r; d++)
+                {
+                    // Ring cells in the same top/bottom + left/right order the
+                    // original scan used, so tie-breaks are unchanged.
+                    if (TryCell(grid, gx + d, gz - r, refY, ref bestDelta, ref bestCell, ref bestLayer)) continue;
+                    if (TryCell(grid, gx + d, gz + r, refY, ref bestDelta, ref bestCell, ref bestLayer)) continue;
+                    if (TryCell(grid, gx - r, gz + d, refY, ref bestDelta, ref bestCell, ref bestLayer)) continue;
+                    TryCell(grid, gx + r, gz + d, refY, ref bestDelta, ref bestCell, ref bestLayer);
+                }
+            }
+
+            if (bestCell < 0) return result;
+            result.Found = true;
+            result.Cell = bestCell;
+            result.Layer = bestLayer;
+            result.Height = grid.H(bestCell, bestLayer);
+            return result;
+        }
+
+        // Test one cell for a layer near refY; keep it if its height is closer
+        // than the incumbent. Strictly-less keeps the first-seen winner on ties.
+        private static bool TryCell(IGoalGrid grid, int cx, int cz, float refY,
+            ref float bestDelta, ref int bestCell, ref int bestLayer)
+        {
+            if (cx < 0 || cz < 0 || cx >= grid.Cols() || cz >= grid.Rows()) return false;
+            int c = grid.Ci(cx, cz);
+            grid.SampleCell(c);
+            int layer = grid.LayerNear(c, refY);
+            if (layer < 0) return false;
+            float delta = Absf(grid.H(c, layer) - refY);
+            if (delta < bestDelta)
+            {
+                bestDelta = delta;
+                bestCell = c;
+                bestLayer = layer;
+            }
+            return true;
+        }
+
+        private static float Absf(float v) { return v < 0f ? -v : v; }
+    }
 }

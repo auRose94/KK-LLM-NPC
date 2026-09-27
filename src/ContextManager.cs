@@ -1,15 +1,17 @@
 // Written by @auRose94 (https://github.com/auRose94) under MIT license. See LICENSE.txt in this repo for details.
+// Unity-coupled adapter around the pure ContextCore policy (ContextPolicy /
+// ContextMath / ContextCompaction). Everything testable lives in ContextCore.cs.
 using System;
-using System.Collections.Generic;
-using System.Text;
 using BepInEx.Configuration;
 using UnityEngine;
 
 namespace KKLLMNPC
 {
     /// <summary>
-    /// Dynamic context manager for an NPC instance.  Tracks token pressure and
-    /// applies escalating compaction strategies when the context window fills up.
+    /// Dynamic context manager for an NPC instance. Owns the wall clock, the
+    /// ModelProbe lookups, config and the admin-API model switch; every decision
+    /// is delegated to <see cref="ContextPolicy"/> / <see cref="ContextMath"/> /
+    /// <see cref="ContextCompaction"/>, which are pure and unit-tested.
     ///
     /// Compaction levels (in order of escalation):
     ///   0 = normal (full context)
@@ -23,12 +25,8 @@ namespace KKLLMNPC
     {
         private readonly NPCInstance _npc;
         private int _compactionLevel;     // current level (0-5)
-        private int _consecutiveHigh;     // how many turns in a row context was >70%
+        private int _consecutiveHigh;     // how many turns in a row context was >90%
         private float _lastSwitchAttempt; // Time.unscaledTime of last model switch try
-        private const float SwitchCooldown = 120f; // seconds between switch attempts
-
-        // Compaction level thresholds
-        private const int MaxCompactionLevel = 5;
 
         internal ContextManager(NPCInstance npc)
         {
@@ -42,52 +40,33 @@ namespace KKLLMNPC
         internal int CompactionLevel { get { return _compactionLevel; } }
 
         /// <summary>
-        /// Estimate the current fill ratio of the context window based on the
-        /// accumulated payload. Uses a calibrated multiplier that's adjusted
-        /// after each LLM call based on the actual token count reported by the server.
+        /// Feed this turn's fill ratio and get back a human-readable description
+        /// of what changed, or null if nothing did.
         /// </summary>
         internal string Update(float fillRatio)
         {
-            string action = null;
-
-            if (fillRatio > 0.9f)
+            if (ContextPolicy.ShouldEscalate(fillRatio))
             {
                 _consecutiveHigh++;
-                // Escalate faster if it's been high for multiple turns
-                int targetLevel = Math.Min(MaxCompactionLevel, _compactionLevel + (_consecutiveHigh >= 3 ? 2 : 1));
-                if (targetLevel > _compactionLevel)
+                if (ContextPolicy.IsEscalating(_compactionLevel, _consecutiveHigh))
                 {
-                    _compactionLevel = targetLevel;
-                    action = ApplyCompaction();
+                    _compactionLevel = ContextPolicy.NextEscalatedLevel(_compactionLevel, _consecutiveHigh);
+                    return DescribeCurrentLevel();
                 }
+                // Already at the ceiling — stay quiet instead of repeating the
+                // same message every turn.
+                return null;
             }
-            else if (fillRatio < 0.5f && _compactionLevel > 0)
+
+            if (ContextPolicy.ShouldDeEscalate(fillRatio, _compactionLevel))
             {
-                // Context is comfortably under half — de-escalate one level
-                _compactionLevel = Math.Max(0, _compactionLevel - 1);
+                _compactionLevel = ContextPolicy.DeEscalatedLevel(_compactionLevel);
                 _consecutiveHigh = 0;
-                action = "context pressure eased — compaction level → " + _compactionLevel;
-            }
-            else
-            {
-                _consecutiveHigh = 0;
+                return "context pressure eased — compaction level → " + _compactionLevel;
             }
 
-            return action;
-        }
-
-        /// <summary>
-        /// Calibrate token estimation based on the actual token count from the LLM server.
-        /// Call this after each LLM call with the actual token count.
-        /// </summary>
-        private long _estimatedTokens;
-
-        internal void CalibrateEstimate(int actualTokens)
-        {
-            if (actualTokens <= 0) return;
-            // Simple EMA: adjust multiplier so estimated ≈ actual
-            // This converges over time to a more accurate estimate.
-            _estimatedTokens = 0; // reset on calibration
+            _consecutiveHigh = 0;
+            return null;
         }
 
         /// <summary>
@@ -95,148 +74,37 @@ namespace KKLLMNPC
         /// </summary>
         internal float GetFillRatio(int factCount, int histCount, int thoughtCount, int chatCount, int nearbyCount)
         {
-            // Calibrated estimate: ~300 tokens system prompt, ~200 per nearby item,
-            // ~50 per fact, ~30 per history, ~20 per thought, ~15 per chat line.
-            _estimatedTokens = 300 + (nearbyCount * 200) + (factCount * 50) + (histCount * 30) + (thoughtCount * 20) + (chatCount * 15);
-            if (ModelProbe.DetectedContextLength <= 0) return 0f;
-            return (float)_estimatedTokens / ModelProbe.DetectedContextLength;
+            return ContextMath.FillRatio(factCount, histCount, thoughtCount, chatCount,
+                nearbyCount, ModelProbe.DetectedContextLength);
         }
 
+        // ---- dynamic limits (pure policy, see ContextPolicy) ----
+
+        internal int DynamicMaxHistory(int baseMax) { return ContextPolicy.MaxHistory(_compactionLevel, baseMax); }
+        internal int DynamicMaxFacts(int baseMax) { return ContextPolicy.MaxFacts(_compactionLevel, baseMax); }
+        internal int DynamicMaxThoughts(int baseMax) { return ContextPolicy.MaxThoughts(_compactionLevel, baseMax); }
+        internal int DynamicMaxChatLog(int baseMax) { return ContextPolicy.MaxChatLog(_compactionLevel, baseMax); }
+
         /// <summary>
-        /// Apply the current compaction level and return a human-readable description
-        /// of what was done.
+        /// Inject compaction status into the perception JSON so the model knows
+        /// it's running in compressed mode.
         /// </summary>
-        private string ApplyCompaction()
+        internal string CompactionStatusJson()
         {
-            switch (_compactionLevel)
-            {
-                case 1:
-                    return "compaction level 1: trimmed old history and thoughts";
-                case 2:
-                    return "compaction level 2: aggressive fact trimming";
-                case 3:
-                    return "compaction level 3: fact merging + history summary";
-                case 4:
-                    return "compaction level 4: maximum compression — essentials only";
-                case 5:
-                    return AttemptModelSwitch();
-                default:
-                    return null;
-            }
+            return ContextPolicy.StatusJson(_compactionLevel);
         }
 
-        /// <summary>
-        /// Get the dynamic max history count based on current compaction level.
-        /// Level 0 = base limit, each level halves it (minimum 2).
-        /// </summary>
-        internal int DynamicMaxHistory(int baseMax)
-        {
-            int max = baseMax;
-            for (int i = 0; i < _compactionLevel && max > 2; i++)
-                max = Math.Max(2, max / 2);
-            return max;
-        }
+        // ---- the one part that genuinely needs Unity + the network ----
 
         /// <summary>
-        /// Get the dynamic max facts count based on current compaction level.
+        /// Describe the level we just moved to. Levels 1-4 are a fixed string;
+        /// level 5 has to try a model switch, which needs the wall clock, the
+        /// probe results and the admin API.
         /// </summary>
-        internal int DynamicMaxFacts(int baseMax)
+        private string DescribeCurrentLevel()
         {
-            int max = baseMax;
-            // Level 1: keep facts (they're compact)
-            // Level 2+: start trimming
-            for (int i = 1; i < _compactionLevel && max > 3; i++)
-                max = Math.Max(3, max / 2);
-            return max;
-        }
-
-        /// <summary>
-        /// Get the dynamic max thoughts count based on current compaction level.
-        /// </summary>
-        internal int DynamicMaxThoughts(int baseMax)
-        {
-            int max = baseMax;
-            for (int i = 0; i < _compactionLevel && max > 1; i++)
-                max = Math.Max(1, max / 2);
-            return max;
-        }
-
-        /// <summary>
-        /// Get the dynamic max chat log lines based on current compaction level.
-        /// </summary>
-        internal int DynamicMaxChatLog(int baseMax)
-        {
-            int max = baseMax;
-            // Chat log is cheap — only trim at higher compaction levels
-            for (int i = 2; i < _compactionLevel && max > 2; i++)
-                max = Math.Max(2, max / 2);
-            return max;
-        }
-
-        /// <summary>
-        /// At compaction level 3+, merge facts with the same category prefix
-        /// into a single entry (keeping the most recent).  Returns the merged list.
-        /// </summary>
-        internal static List<string> MergeFacts(List<string> facts)
-        {
-            var merged = new Dictionary<string, string>();
-            foreach (var f in facts)
-            {
-                string prefix = f.Split(':')[0];
-                merged[prefix] = f;  // last wins (most recent)
-            }
-            return new List<string>(merged.Values);
-        }
-
-        /// <summary>
-        /// At compaction level 3+, summarize old history entries.
-        /// Keeps recent entries verbatim, summarizes older ones.
-        /// </summary>
-        internal static string SummarizeHistory(List<string> history, int keepRecent)
-        {
-            if (history.Count <= keepRecent)
-            {
-                // Nothing to summarize — return all
-                var sb = new StringBuilder("[");
-                for (int i = 0; i < history.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    sb.Append(Json.Write(history[i]));
-                }
-                sb.Append(']');
-                return sb.ToString();
-            }
-
-            // Split: recent (verbatim) + old (summarized)
-            var result = new StringBuilder("[");
-            int summarizeEnd = history.Count - keepRecent;
-            var oldCounts = new Dictionary<string, int>();
-            for (int i = 0; i < summarizeEnd; i++)
-            {
-                string action = history[i].Split(new[] { ' ' }, 2)[0];
-                int count;
-                oldCounts.TryGetValue(action, out count);
-                oldCounts[action] = count + 1;
-            }
-
-            // Emit summary first
-            bool first = true;
-            foreach (var kv in oldCounts)
-            {
-                if (!first) result.Append(',');
-                first = false;
-                result.Append(Json.Write("(earlier: " + kv.Value + "x " + kv.Key + ")"));
-            }
-
-            // Then recent entries verbatim
-            for (int i = summarizeEnd; i < history.Count; i++)
-            {
-                if (!first) result.Append(',');
-                first = false;
-                result.Append(Json.Write(history[i]));
-            }
-            result.Append(']');
-            return result.ToString();
+            if (_compactionLevel >= ContextPolicy.MaxLevel) return AttemptModelSwitch();
+            return ContextPolicy.Describe(_compactionLevel);
         }
 
         /// <summary>
@@ -246,7 +114,7 @@ namespace KKLLMNPC
         private string AttemptModelSwitch()
         {
             float now = Time.unscaledTime;
-            if (now - _lastSwitchAttempt < SwitchCooldown)
+            if (now - _lastSwitchAttempt < Consts.ContextManagerSwitchCooldown)
                 return "compaction level 5: model switch attempted too recently — waiting";
             _lastSwitchAttempt = now;
 
@@ -278,35 +146,11 @@ namespace KKLLMNPC
                     if (entry != null) apiKey = entry.Value ?? "";
                 }
             }
-            catch (Exception e) { _npc.Logger.LogInfo($"context manager model switch: {e.Message}"); }
+            catch (Exception e) { _npc.Logger.LogInfo("context manager model switch: " + e.Message); }
             if (ModelProbe.TrySwitchModel(bestModel, apiKey))
                 return "compaction level 5: switching to model '" + bestModel + "' (server will restart)";
             else
                 return "compaction level 5: model switch failed for '" + bestModel + "'";
-        }
-
-        /// <summary>
-        /// Inject compaction status into the perception JSON so the model knows
-        /// it's running in compressed mode.
-        /// </summary>
-        internal string CompactionStatusJson()
-        {
-            if (_compactionLevel == 0) return null;
-            return "{\"level\":" + _compactionLevel
-                + ",\"mode\":\"" + CompactionModeName() + "\"}";
-        }
-
-        private string CompactionModeName()
-        {
-            switch (_compactionLevel)
-            {
-                case 1: return "trimmed";
-                case 2: return "aggressive";
-                case 3: return "merged";
-                case 4: return "minimal";
-                case 5: return "switching";
-                default: return "normal";
-            }
         }
     }
 }

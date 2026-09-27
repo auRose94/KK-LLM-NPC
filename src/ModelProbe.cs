@@ -435,18 +435,9 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         private static string HttpGet(string url, string apiKey)
         {
-            var req = (HttpWebRequest)WebRequest.Create(url);
-            req.Method = "GET";
-            req.Timeout = 5000;
-            if (!string.IsNullOrEmpty(apiKey))
-                req.Headers["Authorization"] = "Bearer " + apiKey;
-            using (var resp = req.GetResponse())
-            using (var stream = resp.GetResponseStream())
-            {
-                if (stream == null) return null;
-                using (var reader = new System.IO.StreamReader(stream, Encoding.UTF8))
-                    return reader.ReadToEnd();
-            }
+            // Short timeout, 2 attempts: the probe runs at startup and must not
+            // stall the plugin if the server is down.
+            return SafeHttp.Get(url, apiKey, retries: 2, timeout: TimeSpan.FromSeconds(5));
         }
     }
 }

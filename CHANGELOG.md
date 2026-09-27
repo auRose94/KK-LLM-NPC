@@ -7,7 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **LLM requests now actually retry.** `SafeHttp` built a single `HttpWebRequest` outside its
+  retry loop and called `GetRequestStream()`/`GetResponse()` on it repeatedly. A submitted
+  `HttpWebRequest` can never be resent — the second attempt threw `InvalidOperationException`
+  ("request started") without touching the network — so every retry was a silent no-op that
+  still paid its backoff sleep. A transient 503 cost the NPC 3 seconds of frozen decision
+  loop and still failed.
+- **Wired the retry layer into the real transport.** `SafeHttp` existed but had *no callers*:
+  all four LLM call sites (`Llm.cs`), the vision call (`Vision.cs`) and the model probe
+  (`ModelProbe.cs`) each hand-rolled their own single-shot `HttpWebRequest` with no retry at
+  all. They now all go through `SafeHttp`. This is what makes the retry behavior real rather
+  than theoretical.
+- **Permanent HTTP errors no longer retried.** 400/401/403/404/413 fail after one attempt
+  instead of three, so a bad API key or an over-long context no longer burns backoff sleeps
+  and hammers the server. 5xx, 408, 429 and connect/timeout faults still retry with backoff.
+- **Failed calls report the server's error body.** Previously a non-2xx reply was reduced to a
+  status code and discarded. The log now carries the server's own complaint, which is what
+  makes "context length exceeded" distinguishable from "no model loaded" without a debugger.
+
 ### Added
+- **`src/ContextCore.cs` + 109 tests.** The compaction policy — escalation ladder,
+  de-escalation, per-budget dynamic limits and their floors, token estimation, fact merging,
+  history summarization — is now a pure, Unity-free state machine (`ContextPolicy`,
+  `ContextMath`, `ContextCompaction`). `ContextManager` is a thin adapter holding only the wall
+  clock, the `ModelProbe` lookups and the admin-API model switch. Dynamic compaction was listed
+  as a "Key Design Decision" with zero test coverage because it couldn't be reached without a
+  game install; it now has the most thorough suite in the repo.
+- **`GoalResolver` in `PathCore.cs` + 30 tests.** The goal-snapping ring search was inline in
+  `Pathfinding.ResolveGoal`, coupled to `PathGridState` and therefore untestable. It now runs
+  against an `IGoalGrid` interface that `PathGridState` already satisfied for free (no new
+  members), and is covered headlessly. This pins down two behaviours that were previously
+  implicit: the search is nearest-in-plane with a *height* tiebreak (a ring-1 cell at the wrong
+  floor beats a ring-2 cell at the right one), and equal-height ties resolve to the first cell
+  scanned.
+- **`run_tests.sh`** — one command to compile and run every pure-C# suite, with a per-suite
+  summary and a non-zero exit if anything fails. Previously there was no single entry point and
+  no shared exit-code convention.
+- **`tests/test_safehttp.cs`** — 23 tests driving the real transport against a loopback
+  `HttpListener`. These count actual server-side hits, which is the invariant that broke: the
+  suite asserts a 3-retry sequence reaches the server 3 times, and that a 400 reaches it once.
+- **`check_syntax.sh` + real CI gates.** CI previously compiled nothing and ran nothing — it
+  counted lines and printed file listings, so a syntax error in `src/` merged green. CI now
+  runs the unit suites and a parse check over all of `src/` (a full build still needs a game
+  install, since BepInEx/Unity/Photon aren't redistributable).
+- **`check_build.sh`** — a real compile against a game install, reusing `build.sh`'s exact
+  reference set, and treating warnings as errors. Skips cleanly when no install is present, so
+  it works locally and is a no-op on CI. Added after the parse-only check proved it could not
+  catch a renamed member: `ContextManager.DynamicMaxThoughts` was briefly renamed, the call site
+  in `NPCInstance.cs` was left dangling, and every headless gate stayed green. Only `build.sh`
+  caught it. The limitation is now documented in `check_syntax.sh` itself so it isn't
+  rediscovered.
+- **CI fails on stray sources.** `build.sh` compiles `src/*.cs`, so a `.cs` file dropped into a
+  `src/` subdirectory would be silently excluded from the DLL. CI now rejects that.
+
+### Removed
+- **`tests/test_pathfinding.cs`.** Every one of its ten methods was a `// Placeholder:` comment
+  with no assertion and no `Main()` — it was a TODO list wearing a test file's name. The one
+  piece of real logic it was gesturing at (goal resolution) is now `GoalResolver`, tested.
+- **`tests/test_contextmanager.cs`.** Same anti-pattern as `test_horniness.cs`: it re-implemented
+  the compaction ladder inline ("simulate escalation without a real NPCInstance") and asserted on
+  its own local variables. Superseded by the 109 real tests in `test_contextcore.cs`.
+- **`tests/test_horniness.cs`.** It never referenced `NPCInstance` or any file in `src/` — it
+  re-implemented the horniness arithmetic in local variables and asserted on its own locals.
+  Two of its six cases failed (`HorninessBounds` computed -0.05; `EggLayReadiness` got false)
+  and it still exited 0, so it reported success while red. Its failures described arithmetic
+  production never performs: the real `UpdateHorniness` only ever clamps the upper bound and
+  resets on climax, so `_horny` cannot go negative. Deleting it removes a false signal; the
+  honest fix is to extract the horniness math into a Unity-free `HorninessCore.cs` and test
+  that, the way `PathCore` was extracted. Not done here.
+
+### Documentation
+- Corrected the ambient-commentary claims. `EmitAmbient` has no live callers (all three call
+  sites are commented out), so the README's "moans on stimulation" and ARCHITECTURE's
+  "Ambient commentary (moan on stimulation spike)" described behavior the build does not have.
+  The docs now say it is disabled. Restoring the calls or deleting the dead method is a
+  gameplay decision, so neither was done unilaterally.
+- `tests/README.md` now lists all 7 suites (326 tests). Previously documented as 4 test files, all
+  described as pure C#, while 3 files existed that either needed a game install or asserted
+  nothing at all.
+
+### Known gaps (pre-existing, not addressed here)
+Two compaction features are implemented and unit-tested but never called, so compaction level 3
+advertises more than it does:
+- `ContextCompaction.SummarizeHistory` has no caller — level 3 merges facts but never summarizes
+  history, despite the log text and ARCHITECTURE both saying "fact merging + history summary".
+- `ContextManager.DynamicMaxChatLog` has no caller, so `[LLM] ChatLogLines` is not reduced under
+  compaction.
+
+Both are behaviour changes to wire up (how many chat lines to keep at level 5 is a tuning
+decision), so they were left for a deliberate choice rather than changed silently.
+
+### Added (Console REPL and earlier work)
 - **Console REPL (bash-like AI interface, default ON)** — the LLM now *polls* the game from a shell
   instead of receiving a perception JSON blob every tick: it sends command lines (`ls`, `ps`, `pwd`,
   `whoami`, `cat facts|goal|chat|needs|history|stations|map|body`, `status`, `find`, `look`; `echo

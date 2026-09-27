@@ -298,62 +298,27 @@ namespace KKLLMNPC
         // our elevation; otherwise scans a ring out to 6 cells for the nearest
         // passable landing. Returns the final approach point (projected goal, or
         // the landed cell center for a near-miss).
+        // Snap a requested goal onto the nearest walkable cell. The search itself
+        // is pure (GoalResolver in PathCore.cs) and unit-tested; this only
+        // converts the resolved cell back into a world position.
         private bool ResolveGoal(Vector3 goal, PathGridState grid, int gx, int gz, float refY,
             out int gc, out int gl, out Vector3 goalPoint)
         {
             gc = -1; gl = -1; goalPoint = Vector3.zero;
-            grid.SampleCell(gx, gz);
-            int l = grid.LayerNear(grid.Ci(gx, gz), refY);
-            if (l >= 0)
-            {
-                gc = grid.Ci(gx, gz);
-                gl = l;
-                goalPoint = new Vector3(goal.x, grid.H(gc, l), goal.z);
-                return true;
-            }
-            int bestCi = -1, bestL = -1;
-            float bestDh = 1e12f;
-            for (int r = 1; r <= 6 && bestCi < 0; r++)
-            {
-                // Ring cells: top/bottom rows, left/right columns.
-                for (int d = -r; d <= r; d++)
-                {
-                    int c1, c2, c3, c4; int l1, l2, l3, l4;
-                    bool b1 = NearCell(grid, gx + d, gz - r, refY, out c1, out l1);
-                    bool b2 = NearCell(grid, gx + d, gz + r, refY, out c2, out l2);
-                    bool b3 = NearCell(grid, gx - r, gz + d, refY, out c3, out l3);
-                    bool b4 = NearCell(grid, gx + r, gz + d, refY, out c4, out l4);
-                    if (b1 && AbsDiff(grid.H(c1, l1) - refY) < bestDh) { bestDh = AbsDiff(grid.H(c1, l1) - refY); bestCi = c1; bestL = l1; }
-                    if (b2 && AbsDiff(grid.H(c2, l2) - refY) < bestDh) { bestDh = AbsDiff(grid.H(c2, l2) - refY); bestCi = c2; bestL = l2; }
-                    if (b3 && AbsDiff(grid.H(c3, l3) - refY) < bestDh) { bestDh = AbsDiff(grid.H(c3, l3) - refY); bestCi = c3; bestL = l3; }
-                    if (b4 && AbsDiff(grid.H(c4, l4) - refY) < bestDh) { bestDh = AbsDiff(grid.H(c4, l4) - refY); bestCi = c4; bestL = l4; }
-                }
-            }
-            if (bestCi < 0) return false;
-            gc = bestCi; gl = bestL;
-            goalPoint = grid.CellPos(gc, gl);
+            var r = GoalResolver.Resolve(grid, gx, gz, refY);
+            if (!r.Found) return false;
+            gc = r.Cell; gl = r.Layer;
+            // Keep the caller's X/Z: only the floor height comes from the grid,
+            // so a goal on a walkable cell isn't nudged to the cell centre.
+            goalPoint = new Vector3(goal.x, r.Height, goal.z);
             return true;
         }
-
-        private bool NearCell(PathGridState grid, int cx, int cz, float refY, out int ci, out int l)
-        {
-            ci = 0; l = -1;
-            if (cx < 0 || cz < 0 || cx >= grid.Cols() || cz >= grid.Rows()) return false;
-            int c = grid.Ci(cx, cz);
-            grid.SampleCell(c);
-            l = grid.LayerNear(c, refY);
-            if (l < 0) return false;
-            ci = c;
-            return true;
-        }
-
-        private static float AbsDiff(float v) { return v < 0f ? -v : v; }
     }
 
     // Layered walkability grid (physics hops are memoized per cell). Each cell
     // caches up to MaxLayers distinct floor elevations with their clearance flag,
     // discovered by one downward multi-hit ray per cell.
-    internal class PathGridState : ILayerGrid
+    internal class PathGridState : ILayerGrid, IGoalGrid
     {
         public const int MaxLayers = Consts.PathMaxLayers;
         public int MaxLayerCount() { return MaxLayers; }

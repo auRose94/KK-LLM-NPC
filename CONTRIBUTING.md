@@ -83,14 +83,23 @@ wip/                 — Work-in-progress notes (reverse-engineered game API)
 ### Testing
 
 - Algorithmic tests live in `tests/` — they test pure logic without Unity
-- Run all tests:
+- Run everything (this is also what CI runs):
   ```bash
-  mcs -target:exe -out:/tmp/t.exe tests/test_json.cs tests/test_json_standalone.cs src/Json.cs && mono /tmp/t.exe
-  mcs -target:exe -out:/tmp/t_pf.exe tests/test_pathcore.cs src/PathCore.cs && mono /tmp/t_pf.exe
-  mcs -target:exe -out:/tmp/t_chat.exe tests/test_chat_similarity.cs src/ChatSimilarity.cs && mono /tmp/t_chat.exe
+  ./run_tests.sh
   ```
-- All tests print `PASS` per case and a summary line (`N passed, 0 failed`)
+- `run_tests.sh` exits non-zero if any suite fails. Run it before opening a PR.
+- **Always run `./build.sh` (or `./check_build.sh`) too.** The unit suites and the
+  parse-only check both run without a game install, which means neither can catch a renamed or
+  missing member — they can't resolve types at all. A dangling call site reached main that way.
+  `check_build.sh` skips cleanly when no game install is present, and treats warnings as errors
+  because the build is required to be warning-free.
 - Full integration requires a running KoboldKare instance with BepInEx
+- CI runs `./run_tests.sh`, `./check_syntax.sh` and `./check_build.sh` (the last skips on CI,
+  which has no game install).
+
+New logic should be testable without Unity. If the code you want to test is coupled to
+`UnityEngine`, extract the pure part into its own `src/<Name>Core.cs` (see `PathCore.cs`,
+`ContextCore.cs`) and add a `run_suite` line to `run_tests.sh`.
 
 ### Debugging
 
@@ -101,7 +110,7 @@ wip/                 — Work-in-progress notes (reverse-engineered game API)
 ## Pull Request Guidelines
 
 1. **Describe the change** — what problem it solves
-2. **Test locally** — verify in-game behavior
+2. **Test locally** — `./run_tests.sh` and `./build.sh` both pass, and verify in-game behavior
 3. **Update CHANGELOG.md** — add entries under `[Unreleased]`
 4. **No breaking config changes** — new configs should be opt-in with sensible defaults
 5. **Keep dependencies minimal** — no new external libraries

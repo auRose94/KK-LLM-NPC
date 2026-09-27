@@ -75,7 +75,7 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
 - **Camera anti-clip** — detects the head buried in geometry and auto-crouches until vision clears,
   so first-person isn't teeth-and-eyes.
 - **Body awareness** — knows which station it can use (`interact` reports `cannot_use` with reason),
-  locks gaze on its partner during intimacy, moans on stimulation, gets out of stations via
+  locks gaze on its partner during intimacy, gets out of stations via
   `jump` / `exit_station` (the game's own "cancel" path).
 - **Body control tools** — `thrust` (hip animation), `erection`, `mount`/`unmount`, `orgasm`
   with consent-aware prompt guidance.

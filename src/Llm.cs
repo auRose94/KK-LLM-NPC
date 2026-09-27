@@ -61,33 +61,24 @@ namespace KKLLMNPC
                     ["stream"] = false,
                 };
                 string body = Json.Write(payload);
-                var req = (HttpWebRequest)WebRequest.Create(Val(_cfgEndpoint));
-                req.Method = "POST"; req.ContentType = "application/json";
-                if (!string.IsNullOrEmpty(Val(_cfgApiKey))) req.Headers["Authorization"] = "Bearer " + Val(_cfgApiKey);
-                req.Timeout = 120000; req.ReadWriteTimeout = 120000;
-                byte[] bytes = Encoding.UTF8.GetBytes(body); req.ContentLength = bytes.Length;
-                using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
-                using (var resp = req.GetResponse())
-                using (var stream = resp.GetResponseStream())
+                string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                    retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 512 * 1024,
+                    onError: ReportEndpointError);
+                if (json == null) return;
                 {
-                    if (stream == null) return;
-                    using (var sr = new StreamReader(stream, Encoding.UTF8))
+                    var root = Json.Parse(json) as Dictionary<string, object>;
+                    var choices = root?.GetValueOrDefault("choices") as List<object>;
+                    if (choices != null && choices.Count > 0)
                     {
-                        string json = sr.ReadToEnd();
-                        var root = Json.Parse(json) as Dictionary<string, object>;
-                        var choices = root?.GetValueOrDefault("choices") as List<object>;
-                        if (choices != null && choices.Count > 0)
+                        var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                        string content = msg?.GetValueOrDefault("content") as string;
+                        if (!string.IsNullOrWhiteSpace(content))
                         {
-                            var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
-                            string content = msg?.GetValueOrDefault("content") as string;
-                            if (!string.IsNullOrWhiteSpace(content))
+                            string line = content.Trim().Split('\n')[0].Trim().Trim('"', '"');
+                            if (line.Length > 0 && line.Length < 200)
                             {
-                                string line = content.Trim().Split('\n')[0].Trim().Trim('"', '"');
-                                if (line.Length > 0 && line.Length < 200)
-                                {
-                                    Logger.LogInfo("[" + MyName() + "] muses: " + Sanitize(line));
-                                    try { ToolSay(new TextArgs(Sanitize(line))); } catch (Exception) { }
-                                }
+                                Logger.LogInfo("[" + MyName() + "] muses: " + Sanitize(line));
+                                try { ToolSay(new TextArgs(Sanitize(line))); } catch (Exception) { }
                             }
                         }
                     }
@@ -141,33 +132,22 @@ namespace KKLLMNPC
                     ["stream"] = false,
                 };
                 string body = Json.Write(payload);
-                var req = (HttpWebRequest)WebRequest.Create(Val(_cfgEndpoint));
-                req.Method = "POST"; req.ContentType = "application/json";
-                if (!string.IsNullOrEmpty(Val(_cfgApiKey))) req.Headers["Authorization"] = "Bearer " + Val(_cfgApiKey);
-                req.Timeout = 120000; req.ReadWriteTimeout = 120000;
-                byte[] bytes = Encoding.UTF8.GetBytes(body); req.ContentLength = bytes.Length;
-                using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
-                using (var resp = req.GetResponse())
-                using (var stream = resp.GetResponseStream())
+                string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                    retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 512 * 1024,
+                    onError: ReportEndpointError);
+                if (json == null) return;
                 {
-                    if (stream == null) { _answerBusy = false; return; }
-                    using (var ms = new MemoryStream())
+                    var root = Json.Parse(json) as Dictionary<string, object>;
+                    var choices = root?.GetValueOrDefault("choices") as List<object>;
+                    if (choices != null && choices.Count > 0)
                     {
-                        var buf = new byte[8192]; int total = 0, n;
-                        while ((n = stream.Read(buf, 0, buf.Length)) > 0) { total += n; if (total > 512 * 1024) break; ms.Write(buf, 0, n); }
-                        string json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-                        var root = Json.Parse(json) as Dictionary<string, object>;
-                        var choices = root?.GetValueOrDefault("choices") as List<object>;
-                        if (choices != null && choices.Count > 0)
+                        var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                        string content = msg?.GetValueOrDefault("content") as string;
+                        if (!string.IsNullOrWhiteSpace(content))
                         {
-                            var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
-                            string content = msg?.GetValueOrDefault("content") as string;
-                            if (!string.IsNullOrWhiteSpace(content))
-                            {
-                                _lastAnswer = Sanitize(content.Trim());
-                                RememberFact("Q: " + q + " A: " + _lastAnswer);
-                                Logger.LogInfo("asked: " + q + " => " + _lastAnswer);
-                            }
+                            _lastAnswer = Sanitize(content.Trim());
+                            RememberFact("Q: " + q + " A: " + _lastAnswer);
+                            Logger.LogInfo("asked: " + q + " => " + _lastAnswer);
                         }
                     }
                 }
@@ -292,39 +272,27 @@ namespace KKLLMNPC
                 };
                 string body = Json.Write(payload);
 
-                var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(_cfgEndpoint.Value);
-                req.Method = "POST";
-                req.ContentType = "application/json";
-                if (!string.IsNullOrEmpty(_cfgApiKey.Value))
-                    req.Headers["Authorization"] = "Bearer " + _cfgApiKey.Value;
-                req.Timeout = 25000; req.ReadWriteTimeout = 25000;
-                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(body);
-                req.ContentLength = bytes.Length;
-                using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
-                using (var resp = req.GetResponse())
-                using (var stream = resp.GetResponseStream())
+                string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                    retries: 2, timeout: TimeSpan.FromSeconds(25), maxResponseBytes: 64 * 1024,
+                    onError: ReportEndpointError);
+                if (json == null) return null;
                 {
-                    if (stream == null) return null;
-                    using (var reader = new System.IO.StreamReader(stream, System.Text.Encoding.UTF8))
+                    var root = Json.Parse(json) as Dictionary<string, object>;
+                    if (root == null) return null;
+                    var choices = root.GetValueOrDefault("choices") as List<object>;
+                    if (choices == null || choices.Count == 0) return null;
+                    var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                    if (msg == null) return null;
+                    string content = (msg.GetValueOrDefault("content") as string)?.Trim().Trim('"', '\'', ' ', '\n', '\r', '\t');
+                    // Validate: alphanumeric, 2-10 chars
+                    if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 10
+                        && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9]+$"))
                     {
-                        string json = reader.ReadToEnd();
-                        var root = Json.Parse(json) as Dictionary<string, object>;
-                        if (root == null) return null;
-                        var choices = root.GetValueOrDefault("choices") as List<object>;
-                        if (choices == null || choices.Count == 0) return null;
-                        var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
-                        if (msg == null) return null;
-                        string content = (msg.GetValueOrDefault("content") as string)?.Trim().Trim('"', '\'', ' ', '\n', '\r', '\t');
-                        // Validate: alphanumeric, 2-10 chars
-                        if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 10
-                            && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9]+$"))
-                        {
-                            Logger.LogInfo("[" + MyName() + "] LLM chose name: " + content);
-                            return content;
-                        }
-                        Logger.LogInfo("[" + MyName() + "] LLM name rejected: '" + (content ?? "null") + "' — using fallback");
-                        return null;
+                        Logger.LogInfo("[" + MyName() + "] LLM chose name: " + content);
+                        return content;
                     }
+                    Logger.LogInfo("[" + MyName() + "] LLM name rejected: '" + (content ?? "null") + "' — using fallback");
+                    return null;
                 }
             }
             catch (Exception e)
@@ -448,10 +416,9 @@ namespace KKLLMNPC
                         lock (_facts) { factCount = _facts.Count; }
                         lock (_history) { histCount = _history.Count; }
                         lock (_thoughtHistory) { thoughtCount = _thoughtHistory.Count; }
-                        // Rough estimate: ~300 tokens system prompt, ~200 per nearby item,
-                        // ~50 per fact, ~30 per history, ~20 per thought, ~15 per chat line.
-                        int estTokens = 300 + (10 * 200) + (factCount * 50) + (histCount * 30) + (thoughtCount * 20);
-                        float fill = (float)estTokens / ModelProbe.DetectedContextLength;
+                        // One estimator, in ContextMath — this used to be a third
+                        // hand-rolled copy of the per-bucket token weights.
+                        float fill = _ctxMgr.GetFillRatio(factCount, histCount, thoughtCount, 0, 10);
                         string ctxAction = _ctxMgr.Update(fill);
                         if (ctxAction != null)
                             Logger.LogInfo("[" + MyName() + "] " + ctxAction);
@@ -771,40 +738,42 @@ namespace KKLLMNPC
             try
             {
                 string body = Json.Write(payload);
-                var req = (HttpWebRequest)WebRequest.Create(Val(_cfgEndpoint));
-                req.Method = "POST";
-                req.ContentType = "application/json";
-                if (!string.IsNullOrEmpty(Val(_cfgApiKey)))
-                    req.Headers["Authorization"] = "Bearer " + Val(_cfgApiKey);
-                req.Timeout = 120000; req.ReadWriteTimeout = 120000;
-                byte[] bytes = Encoding.UTF8.GetBytes(body);
-                req.ContentLength = bytes.Length;
-                using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
-                using (var resp = req.GetResponse())
-                using (var stream = resp.GetResponseStream())
-                {
-                    if (stream == null) return null;
-                    string rawResponse;
-                    using (var reader = new StreamReader(stream, Encoding.UTF8))
-                        rawResponse = reader.ReadToEnd();
-                    return ParseChatResponse(rawResponse, out toolName, out toolArgs);
-                }
+                // SafeHttp retries transient failures (5xx/408/429/transport) with
+                // backoff and fails fast on permanent ones, and hands back the error
+                // body so we can tell "no model loaded" from a network blip.
+                // Cap the read: this path streams, so a runaway server can't OOM us.
+                string rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                    retries: 3, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
+                    onRetry: r => Logger.LogDebug("LLM retry: " + r),
+                    onError: ReportEndpointError);
+                if (rawResponse == null) return null;
+                return ParseChatResponse(rawResponse, out toolName, out toolArgs);
             }
             catch (Exception e)
             {
-                string msg = e.Message;
-                // Detect LM Studio "no model loaded" error and provide clear guidance.
-                if (msg.Contains("No models loaded") || msg.Contains("no model"))
+                Logger.LogWarning("LLM endpoint: " + e.Message);
+                return null;
+            }
+        }
+
+        // Turn a failed LLM HTTP call into something actionable in the log. The
+        // error body carries the server's own complaint ("context length
+        // exceeded", "model not found"), which is far more useful than a status code.
+        private void ReportEndpointError(string err)
+        {
+            try
+            {
+                if (err != null && (err.Contains("No models loaded") || err.Contains("no model")))
                 {
                     Logger.LogWarning("LLM endpoint: NO MODEL LOADED on the server! Load a model first.");
                     Logger.LogWarning("  LM Studio: Developer tab → Load Model");
                     Logger.LogWarning("  KoboldCpp: load via GUI or --model flag");
                     Logger.LogWarning("  Ollama: ollama pull <model> then ollama serve");
+                    return;
                 }
-                else
-                    Logger.LogWarning("LLM endpoint: " + msg);
-                return null;
+                Logger.LogWarning("LLM endpoint: " + (err ?? "unknown error"));
             }
+            catch (Exception) { }
         }
 
         // Parse a raw chat-completions response (SSE stream or plain JSON) into the

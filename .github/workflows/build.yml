@@ -7,75 +7,55 @@ on:
     branches: [main, master]
 
 jobs:
-  build:
-    name: Build KKLLMNPC
+  test:
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Check source files
+      - name: Install Mono
         run: |
-          echo "=== Source file count ==="
-          find src -name "*.cs" | wc -l
-          echo "=== Source file sizes ==="
-          for f in src/*.cs; do
-            wc -l "$f"
-          done
-          echo "=== Total lines ==="
-          cat src/*.cs | wc -l
+          sudo apt-get update
+          sudo apt-get install -y mono-complete
 
-      - name: Validate C# syntax (mcs)
+      # The pure-C# suites (Json, PathCore, ChatSimilarity, ConsoleShell,
+      # SafeHttp) compile and run with no game install. This is the gate:
+      # a red suite fails the build.
+      - name: Run unit tests
+        run: ./run_tests.sh
+
+      - name: Build script sanity
+        run: bash -n build.sh
+
+  # The plugin cannot be compiled on CI: BepInEx + UnityEngine + Assembly-CSharp
+  # + Photon are game-provided and not redistributable. check_build.sh therefore
+  # SKIPs here and runs where a game install exists. What CI can still do is
+  # parse every source file and fail on syntax errors.
+  syntax:
+    name: Source syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Mono
         run: |
-          # Check if mcs is available
-          if command -v mcs &> /dev/null; then
-            echo "mcs found, checking syntax..."
-            # We can't fully compile without Unity/BepInEx refs,
-            # but we can at least check the build script exists
-            echo "Build script exists: $(test -f build.sh && echo yes || echo no)"
-          else
-            echo "mcs not available — skipping syntax check"
+          sudo apt-get update
+          sudo apt-get install -y mono-complete
+
+      - name: Parse all C# sources (syntax only)
+        run: ./check_syntax.sh
+
+      - name: Full compile (skips without a game install)
+        run: ./check_build.sh
+
+      - name: Every src file is reachable from the build
+        run: |
+          # build.sh compiles src/*.cs, so a file in a subdirectory would be
+          # silently excluded from the DLL.
+          stray=$(find src -name '*.cs' -mindepth 2 | head -20)
+          if [ -n "$stray" ]; then
+            echo "::error::C# files in src/ subdirectories are NOT compiled by build.sh:"
+            echo "$stray"
+            exit 1
           fi
-
-      - name: Check build script
-        run: |
-          echo "=== build.sh ==="
-          cat build.sh
-          echo ""
-          echo "=== Checking bash syntax ==="
-          bash -n build.sh && echo "build.sh: syntax OK" || echo "build.sh: syntax ERROR"
-
-      - name: Validate config docs
-        run: |
-          echo "=== docs/ contents ==="
-          ls -la docs/
-          echo ""
-          echo "=== CONFIG.md sections ==="
-          grep "^## " docs/CONFIG.md
-
-      - name: Check documentation
-        run: |
-          echo "=== Documentation files ==="
-          for f in README.md CONTRIBUTING.md CODE_OF_CONDUCT.md CHANGELOG.md docs/*.md; do
-            if [ -f "$f" ]; then
-              echo "  ✓ $f ($(wc -l < "$f") lines)"
-            else
-              echo "  ✗ $f (missing)"
-            fi
-          done
-
-      - name: Check tests
-        run: |
-          echo "=== Test files ==="
-          for f in tests/*.cs tests/README.md; do
-            if [ -f "$f" ]; then
-              echo "  ✓ $f ($(wc -l < "$f") lines)"
-            else
-              echo "  ✗ $f (missing)"
-            fi
-          done
-
-      - name: List all files
-        run: |
-          echo "=== Full repository tree ==="
-          find . -not -path './.git/*' -not -path './.github/*' -not -name '*.dll' -not -name '*.cfg' | sort
+          echo "OK: $(find src -maxdepth 1 -name '*.cs' | wc -l) source files, all in src/"

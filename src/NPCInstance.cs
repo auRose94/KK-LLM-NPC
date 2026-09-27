@@ -970,7 +970,7 @@ namespace KKLLMNPC
                 List<FactRec> source = _facts;
                 if (_ctxMgr != null && _ctxMgr.CompactionLevel >= 3)
                 {
-                    var mergedTexts = ContextManager.MergeFacts(_facts.ConvertAll(f => f.Text));
+                    var mergedTexts = ContextCompaction.MergeFacts(_facts.ConvertAll(f => f.Text));
                     source = new List<FactRec>();
                     for (int i = 0; i < mergedTexts.Count; i++)
                         source.Add(new FactRec { Text = mergedTexts[i], Tick = _tick });

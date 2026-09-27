@@ -43,7 +43,8 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 │  • Walk validation (raycast ahead, obstacle steering)           │
 │  • Camera clip detection + auto-crouch                          │
 │  • Horniness update (slow-burn while unstimulated)              │
-│  • Ambient commentary (moan on stimulation spike)               │
+│  • Ambient commentary — DISABLED (EmitAmbient call sites are    │
+│    commented out; the plumbing is in place, no caller fires)   │
 │  • Photon ownership re-assertion                                │
 │  • PhysicsTick hooks (body control)                             │
 │  • Background path worker (A* on separate thread)               │
@@ -72,16 +73,17 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 | `Chat.cs` | Photon chat, speech bubbles, chat log processing |
 | `Pathfinding.cs` | 3D layered A* on walkability grid + background worker |
 | `WorldMap.cs` | Full-scene cached walkability map (shared by all agents) |
-| `PathCore.cs` | Pure A* solver, path policy, adaptive cell sizing (Unity-free) |
+| `PathCore.cs` | Pure A* solver, path policy, adaptive cell sizing, goal resolver (Unity-free) |
 | `Vision.cs` | Background vision caption pass |
 | `BodyControl.cs` | thrust/erection/mount/unmount/orgasm tools + swap awareness |
 | `Farming.cs` | plant/water/harvest/plant_egg tools + farm perception |
 | `Cooking.cs` | feed_blender/grind tools + cooking perception |
 | `Identity.cs` | identity block, rename tool, mailbox/ATM perception |
 | `ChatSimilarity.cs` | Jaccard + Levenshtein similarity (pure C#, testable) |
-| `SafeHttp.cs` | Retry wrapper with exponential backoff |
+| `SafeHttp.cs` | Retry wrapper with exponential backoff — the single HTTP transport for all LLM/vision/probe calls |
 | `Constants.cs` | Named constants for magic numbers |
-| `ContextManager.cs` | Dynamic context window compaction |
+| `ContextCore.cs` | Pure compaction policy, token estimation, fact/history reduction (Unity-free) |
+| `ContextManager.cs` | Thin adapter over `ContextCore`: wall clock, probe lookups, admin-API model switch |
 | `ModelProbe.cs` | Server capability detection |
 | `Json.cs` | Hand-rolled JSON parser/writer |
 | `ModuleRegistry.cs` | Reflection-based module discovery (tools, physics, perception) |
@@ -113,8 +115,11 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 5. **Fuzzy tool matching**: Small models produce misspelled tool names. A
    Levenshtein-distance-based fuzzy matcher recovers valid tool calls.
 
-6. **Dynamic compaction**: `ContextManager` monitors context fill ratio and
+6. **Dynamic compaction**: `ContextCore` monitors context fill ratio and
    escalates compaction (trim history → merge facts → model switch) when needed.
+   The policy is a pure state machine in `ContextPolicy`, so the whole escalation
+   ladder is unit-tested; `ContextManager` only supplies the clock, the probe
+   results and the model switch.
 
 7. **Photon ownership**: The plugin claims PhotonView ownership of possessed
    bodies. Other mods can steal it — hence the 3-second re-assertion watchdog.
@@ -189,7 +194,12 @@ Movement:
 
 ### Error Handling
 
-- All LLM calls retry with exponential backoff (SafeHttp)
+- All LLM, vision and probe calls go through `SafeHttp`, which retries transient failures
+  (5xx, 408, 429, connect/timeout faults) with exponential backoff and **fails fast** on
+  permanent ones (400/401/403/404/413), so a bad API key or an over-long context costs one
+  round-trip instead of three plus backoff sleeps. Failed calls report the server's own error
+  body, which is what makes "context length exceeded" vs "no model loaded" diagnosable from
+  the log.
 - Perception failures return `{ok: false}` instead of crashing the loop
 - Mono string conversion errors are sanitized (surrogate scrubbing)
 - Thread abort/InterruptedException handled gracefully
