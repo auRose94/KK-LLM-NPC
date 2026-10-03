@@ -119,27 +119,51 @@ namespace KKLLMNPC
 
         // Slow-burn horniness (main thread). Climbs only while the body is getting
         // NO stimulation — any ongoing play (game stim, station, penetration)
-        // holds it; a climax (stim swinging from high to ~0) spends it.
+        // holds it; a climax (stim swinging from high to low) spends it.
+        //
+        // VERIFIED against the game (2026-10): kobold.stimulation is a RAW value in
+        // [-20, +10] (stimulationMax=10), and the game only resets it (orgasm) when
+        // energy ≥ 1 — with low energy a play station can saturate it near max and
+        // never climax, which used to mean horniness was held high FOREVER while the
+        // NPC sat in the station, looping. Two fixes: thresholds below are compared
+        // against stim normalized to 0-1 (the Consts.HornyStim* fractions are
+        // normalized by design), and a sustained ≥90%-saturated stretch (no climax,
+        // presumably energy-blocked) bleeds the slow-burn down like a climax does.
         // Thread-safe: written on main thread (FixedUpdate), read on LLM thread.
-        // volatile float is NOT atomic on all platforms; use lock for safety.
         private void UpdateHorniness(float dt)
         {
             if (!IsAlive(_kobold)) return;
             try
             {
-                float stim = _kobold.stimulation;
+                float max = _kobold.stimulationMax > 0f ? _kobold.stimulationMax : 10f;
+                float stimN = Mathf.Clamp01(_kobold.stimulation / max);
                 float rate = _cfgHornyRate != null ? Mathf.Max(0f, _cfgHornyRate.Value) : 5f;
 
-                if (_hornyPrevStim >= 0.8f && stim < 0.3f)
+                if (_hornyPrevStim >= Consts.HornyStimHigh && stimN < Consts.HornyStimLow)
                 {
-                    lock (_stateLock) { _horny = 0.05f; }
-                    _hornyPrevStim = stim;
+                    // Climax: the game swings stimulation from high to (near) zero —
+                    // and resting in a BED also relaxes stimulation down from high.
+                    // Both spend the slow-burn need.
+                    lock (_stateLock) { _horny = Consts.HornyPostClimax; }
+                    _hornyPrevStim = stimN;
+                    _hornySaturatedFor = 0f;
                     return;
                 }
 
-                bool driven = stim >= 0.15f || IsInAnimationStation() || IsPenetrated() || IsDickInside();
+                // Near-max stimulation that never climaxes (low energy): bleed the
+                // need down gradually after a sustained stretch, at twice the climb
+                // rate, so the NPC eventually stops seeking play.
+                if (stimN >= 0.9f)
+                {
+                    _hornySaturatedFor += dt;
+                    if (_hornySaturatedFor > 60f)
+                        lock (_stateLock) { _horny = Mathf.MoveTowards(_horny, Consts.HornyPostClimax, (rate / 60f) * dt * 2f); }
+                }
+                else _hornySaturatedFor = 0f;
+
+                bool driven = stimN >= Consts.HornyStimDriven || IsInAnimationStation() || IsPenetrated() || IsDickInside();
                 if (!driven) lock (_stateLock) { _horny = Mathf.Min(1f, _horny + (rate / 60f) * dt); }
-                _hornyPrevStim = stim;
+                _hornyPrevStim = stimN;
             }
             catch (Exception e) { Logger.LogDebug($"UpdateHorniness: {e.Message}"); }
         }
@@ -194,19 +218,31 @@ namespace KKLLMNPC
                 && Time.unscaledTime - _lastOwnershipTry > 3f)
             {
                 _lastOwnershipTry = Time.unscaledTime;
+                // Re-assert every 3s but warn only every 30s — a persistent fight
+                // would otherwise spam the log forever.
+                bool warn = Time.unscaledTime - _lastOwnershipWarn > 30f;
+                if (warn) _lastOwnershipWarn = Time.unscaledTime;
                 try
                 {
                     string safeNick = _photonView.Owner?.NickName ?? "?";
-                    safeNick = new string(safeNick.Where(c => c >= 32 && c < 127).ToArray());
-                    Logger.LogWarning($"KKLLMNPC: not owner of '{_npcName ?? "?"}' (owner={safeNick}) — re-asserting");
+                    safeNick = TextUtil.AsciiSafe(safeNick);
+                    if (warn) Logger.LogWarning($"KKLLMNPC: not owner of '{_npcName ?? "?"}' (owner={safeNick}) — re-asserting");
                 }
-                catch (Exception) { Logger.LogWarning("KKLLMNPC: not owner — re-asserting"); }
+                catch (Exception) { if (warn) Logger.LogWarning("KKLLMNPC: not owner — re-asserting"); }
                 try { _photonView.TransferOwnership(PhotonNetwork.LocalPlayer); } catch (Exception) { }
                 try { if (!_photonView.IsMine) _photonView.RequestOwnership(); } catch (Exception) { }
             }
 
             float dt = Time.fixedDeltaTime;
             UpdateHorniness(dt);
+            // Grab/carried/thrown awareness + sell-machine danger (main thread).
+            try { PollCarrySense(); } catch (Exception e) { Logger.LogDebug("carry sense: " + e.Message); }
+            // What OUR grabber holds (items or people it accidentally grabbed).
+            try { PollHoldSense(); } catch (Exception e) { Logger.LogDebug("hold sense: " + e.Message); }
+            // Route-proofing: this body standing/walking here upgrades stale "wall"
+            // verdicts in the shared grid (Destiny-style demonstrated paths, e.g. a
+            // room behind a door that was closed when the map baked).
+            try { if (_kobold != null) WorldMap.PatchWalkable(_kobold.transform.position); } catch (Exception) { }
             // Module hooks (BodyControl etc.) — each guarded, never breaks the tick.
             try { ModuleRegistry.RunPhysics(this, dt); } catch (Exception e) { Logger.LogDebug("module physics: " + e.Message); }
             float turnRate = _cfgTurnRate != null ? _cfgTurnRate.Value : 180f;
@@ -250,21 +286,10 @@ namespace KKLLMNPC
                     _followDist = dp;
                     if (dp > 1.8f)
                     {
-                        // Check for a completed background path first.
-                        List<Vector3> fpath = null;
-                        try { fpath = PathWorker.GetResult(_currentKoboldId); } catch (Exception) { }
-
-                        // If no background result, decide whether to replan using milestones.
+                        // Decide whether to replan using milestones (PathPolicy).
                         bool needPath;
                         lock (_stateLock)
                         {
-                            if (_receivedPath != null)
-                            {
-                                fpath = _receivedPath;
-                                _receivedPath = null;
-                                needPath = false;
-                            }
-                            else
                             {
                                 int remaining = _path != null ? Math.Max(0, _path.Count - 1 - _pathIdx) : 0;
                                 float distToGoal = _pathGoalSet ? Vector3.Distance(_pathGoal, new Vector3(ppos.x, 0f, ppos.z)) : 0f;
@@ -285,18 +310,16 @@ namespace KKLLMNPC
 
                         if (needPath && !IsInAnimationStation())
                         {
-                            if (fpath == null)
+                            List<Vector3> fpath = null;
+                            if (WorldMap.Ready)
                             {
-                                if (WorldMap.Ready)
-                                {
-                                    try { fpath = WorldMap.FindPathSmoothed(_kobold.transform.position, ppos); }
-                                    catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
-                                }
-                                if (fpath == null && _cfgPathEnabled.Value)
-                                {
-                                    try { fpath = FindPath(_kobold.transform.position, ppos); }
-                                    catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
-                                }
+                                try { fpath = WorldMap.FindPathSmoothed(_kobold.transform.position, ppos); }
+                                catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
+                            }
+                            if (fpath == null && _cfgPathEnabled.Value)
+                            {
+                                try { fpath = FindPath(_kobold.transform.position, ppos); }
+                                catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
                             }
                             if (fpath != null && fpath.Count >= 2)
                             {
@@ -305,16 +328,42 @@ namespace KKLLMNPC
                                     _path = fpath; _pathIdx = 0;
                                     _pathGoal = new Vector3(ppos.x, 0f, ppos.z);
                                     _pathGoalSet = true;
+                                    _trailJumps = null; // ordinary A* path — no jump replays
                                     _followLastPath = Time.unscaledTime;
                                 }
                             }
                             else
                             {
-                                lock (_stateLock)
+                                // Nothing A* could route (gaps, parkour, a room the
+                                // bake never saw): copy the player's own demonstrated
+                                // route — their actual walked samples, jumps replayed
+                                // as hop bursts by the advance block.
+                                List<Vector3> tpts = null; List<bool> tjumps = null;
+                                bool haveTrail = false;
+                                try { haveTrail = PlayerTrail.TryPath(_kobold.transform.position, ppos, out tpts, out tjumps); }
+                                catch (Exception t) { Logger.LogWarning("follow trail: " + t.Message); }
+                                if (haveTrail && tpts != null && tjumps != null)
                                 {
-                                    _path = null; _pathIdx = 0; _pathGoalSet = false;
+                                    tpts.Add(ppos);
+                                    tjumps.Add(false); // parallel to _path: the jump-replay guard requires equal counts
+                                    lock (_stateLock)
+                                    {
+                                        _path = tpts; _pathIdx = 0;
+                                        _pathGoal = new Vector3(ppos.x, 0f, ppos.z);
+                                        _pathGoalSet = true;
+                                        _trailJumps = tjumps;
+                                        _followLastPath = Time.unscaledTime;
+                                    }
+                                    Logger.LogInfo("follow: using the player's demonstrated trail (" + (tpts.Count - 1) + " posts, " + (tjumps != null && tjumps.Exists(x => x) ? "with jumps" : "no jumps") + ")");
                                 }
-                                _navTarget = ppos; // straight-line steer fallback
+                                else
+                                {
+                                    lock (_stateLock)
+                                    {
+                                        _path = null; _pathIdx = 0; _pathGoalSet = false; _trailJumps = null;
+                                    }
+                                    _navTarget = ppos; // straight-line steer fallback
+                                }
                             }
                         }
                     }
@@ -341,14 +390,27 @@ namespace KKLLMNPC
                     // A* path: advance to the next waypoint (keep going) instead of
                     // declaring arrival while posts remain.
                     bool advance;
+                    bool hop = false;
                     lock (_stateLock)
                     {
                         advance = _path != null && _pathIdx < _path.Count - 1;
-                        if (advance) _pathIdx++;
+                        if (advance)
+                        {
+                            _pathIdx++;
+                            // Player-trail replays: a flagged post is somewhere the
+                            // player leapt to — jump toward it like they did.
+                            if (_trailJumps != null && _trailJumps.Count == _path.Count && _trailJumps[_pathIdx])
+                                hop = true;
+                        }
                     }
                     if (advance)
                     {
                         lock (_stateLock) { _navTarget = _path[_pathIdx]; }
+                        if (hop && Time.unscaledTime - _lastTrailJump > 0.8f)
+                        {
+                            _lastTrailJump = Time.unscaledTime;
+                            SetMove(1f, 0f, true, 0f, 0.5f, true);
+                        }
                         toT = _navTarget.Value - _kobold.transform.position;
                         toT.y = 0;
                         dist = toT.magnitude;
@@ -366,7 +428,7 @@ namespace KKLLMNPC
                 if (_navTarget.HasValue)
                 {
                     // Smooth turning toward nav target instead of snapping.
-                    float yaw = Mathf.Atan2(toT.x, toT.z) * 57.29578f;
+                    float yaw = Mathf.Atan2(toT.x, toT.z) * Consts.Rad2Deg;
                     _yawDeg = MoveAngleTowards(_yawDeg, yaw, turnRate * dt);
                     // Arrival braking: slow down as we approach.
                     float speedScale = Mathf.Clamp01(dist / brakeDist);
@@ -410,10 +472,15 @@ namespace KKLLMNPC
             // don't walk into it — stop forward drive and auto-steer to a clear
             // heading, then report the blockage so the LLM picks a new direction.
             _blockedInfo = null;
-            // Wall-proximity scan every physics frame: short rays in 4 directions
-            // around the body so the model knows "wall on my left" before it hits.
-            _bumpInfo = null;
-            ProbeWallProximity();
+            // Wall-proximity scan: short rays in 4 directions around the body so the
+            // model knows "wall on my left" before it hits. Throttled to 4 Hz — most
+            // physics frames re-derive the same answer; the last scan persists meanwhile.
+            if (Time.unscaledTime - _lastWallProbe > 0.25f)
+            {
+                _lastWallProbe = Time.unscaledTime;
+                _bumpInfo = null;
+                ProbeWallProximity();
+            }
             float fwdOut = Mathf.Clamp(fwd, -1f, 1f);
 
             // "Hit a wall": trying to move but the body barely advances (friction
@@ -523,7 +590,7 @@ namespace KKLLMNPC
             if (_charAnimator != null)
             {
                 bool walking = worldDir.sqrMagnitude > 0.0004f;
-                float eyeYaw = walking ? Mathf.Atan2(worldDir.x, worldDir.z) * 57.29578f : BodyYaw();
+                float eyeYaw = walking ? Mathf.Atan2(worldDir.x, worldDir.z) * Consts.Rad2Deg : BodyYaw();
                 _charAnimator.SetEyeRot(new Vector2(eyeYaw, -_pitchDeg));
             }
             if (_cam != null)
@@ -536,7 +603,13 @@ namespace KKLLMNPC
             // offset, or we collide with something right at the head), the first-person
             // image is uselessly full of face/wall. Ease crouch up to clear it — the
             // camera rides up as the body lowers.
-            CheckCameraClip();
+            // Camera clip probe is the one ray that made the idle cost real — 5 Hz
+            // is plenty for a detector that reacts over 0.4s+ anyway.
+            if (Time.unscaledTime - _lastClipCheck > 0.2f)
+            {
+                _lastClipCheck = Time.unscaledTime;
+                CheckCameraClip();
+            }
 
             // Ambient commentary: react to what's happening even when not in a station.
             MaybeAmbientComment();
@@ -553,8 +626,8 @@ namespace KKLLMNPC
                 {
                     Vector3 to = partner.position - _head.position;
                     Vector3 flat = to; flat.y = 0;
-                    float desiredYaw = Mathf.Atan2(flat.x, flat.z) * 57.29578f;
-                    float desiredPitch = Mathf.Clamp(Mathf.Atan2(-to.y, Mathf.Max(0.2f, flat.magnitude)) * 57.29578f, -89f, 89f);
+                    float desiredYaw = Mathf.Atan2(flat.x, flat.z) * Consts.Rad2Deg;
+                    float desiredPitch = Mathf.Clamp(Mathf.Atan2(-to.y, Mathf.Max(0.2f, flat.magnitude)) * Consts.Rad2Deg, -89f, 89f);
                     _yawDeg = MoveAngleTowards(_yawDeg, desiredYaw, 80f * Time.fixedDeltaTime);
                     _pitchDeg = Mathf.MoveTowards(_pitchDeg, desiredPitch, 80f * Time.fixedDeltaTime);
                 }

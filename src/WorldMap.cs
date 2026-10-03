@@ -72,6 +72,16 @@ namespace KKLLMNPC
             return best;
         }
 
+        // Trail-proofing: a physical body was demonstrated standing/walking on this
+        // layer after the bake, so a wall verdict (2) is now provably stale (a door
+        // closed at bake time, later-built geometry). Downgrades to clear. The build
+        // and grid share these arrays, so the next cache save persists the proof.
+        public void PatchWalkable(int ci, int l)
+        {
+            int b = Node(ci, l);
+            if (_ok[b] == 2) _ok[b] = 1;
+        }
+
         // Neighboring layer reachable from floorA: walkable, at most ClimbStep above,
         // and no bigger a drop than MaxDrop (the body hard-stops on larger falls).
         // Closest-in-height wins.
@@ -316,7 +326,7 @@ namespace KKLLMNPC
             int before = anchors.Count;
             try
             {
-                foreach (var u in UnityEngine.Object.FindObjectsOfType<GenericUsable>())
+                foreach (var u in SceneCache.Find<GenericUsable>(3f))
                 {
                     if (u != null && u.transform != null) anchors.Add(u.transform.position);
                 }
@@ -324,7 +334,7 @@ namespace KKLLMNPC
             catch (Exception) { }
             try
             {
-                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                foreach (var k in SceneCache.Find<Kobold>(2f))
                 {
                     if (k != null && k.transform != null) anchors.Add(k.transform.position);
                 }
@@ -452,15 +462,80 @@ namespace KKLLMNPC
                 {
                     string dir = MapDir();
                     string file = System.IO.Path.Combine(dir, FileNameFor(b.Scene));
-                    if (Save(dir, file, b))
+                    byte[] data = BuildBytes(b);
+                    if (data != null && WriteMapAsync(file, data))
                         LLMNPCPlugin.Log?.LogInfo("KKLLMNPC: world map saved: " + file
-                            + " (" + b.Cols + "x" + b.Rows + " cells) — future sessions load this instantly.");
+                            + " (" + b.Cols + "x" + b.Rows + " cells) — future sessions load this instantly. (write on a background thread — the game may live on a network drive)");
                 }
                 catch (Exception e)
                 {
                     LLMNPCPlugin.Log?.LogWarning("KKLLMNPC: world map save failed: " + e.Message);
                 }
             }
+        }
+
+        // Serialize the whole map into a byte[] (main thread; both this thread and the
+        // patchers live here, so the arrays can't mutate mid-serialize).
+        private static byte[] BuildBytes(WorldMapBuild b)
+        {
+            try
+            {
+                using (var ms = new System.IO.MemoryStream())
+                using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
+                {
+                    lock (_gate)
+                    {
+                        foreach (char c in Magic) w.Write(c);
+                        w.Write(FormatVersion);
+                        w.Write((ushort)b.Scene.Length);
+                        w.Write(b.Scene);
+                        w.Write(b.MinX); w.Write(b.MinZ); w.Write(b.Cell);
+                        w.Write(b.Cols); w.Write(b.Rows);
+                        w.Write((uint)b.MaxLayers);
+                        w.Write((double)DateTime.UtcNow.Ticks);
+                        w.Write((uint)b.Cells);
+                        for (int ci = 0; ci < b.Cells; ci++)
+                        {
+                            byte nl = b.NlayAt(ci);
+                            w.Write(nl);
+                            for (int l = 0; l < nl; l++)
+                            {
+                                w.Write(b.HeightAt(ci, l));
+                                w.Write(b.StateAt(ci, l));
+                            }
+                        }
+                    }
+                    return ms.ToArray();
+                }
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static int _mapWriteInFlight; // 1 = a thread-pool write is queued/running
+
+        // All FILE I/O off the main thread: on a network drive a synchronous write can
+        // stall the main thread for seconds (the observed "game froze"). Serialized
+        // bytes are immutable — safe to hand to the thread pool.
+        private static bool WriteMapAsync(string file, byte[] data)
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref _mapWriteInFlight, 1, 0) != 0)
+                return false;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    string dir = System.IO.Path.GetDirectoryName(file);
+                    if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                        System.IO.Directory.CreateDirectory(dir);
+                    string tmp = file + ".tmp";
+                    WriteAllBytesSafe(tmp, data);
+                    if (System.IO.File.Exists(file)) try { System.IO.File.Delete(file); } catch (Exception) { }
+                    System.IO.File.Move(tmp, file);
+                }
+                catch (Exception) { }
+                finally { System.Threading.Interlocked.Exchange(ref _mapWriteInFlight, 0); }
+            });
+            return true;
         }
 
         // Scene changed (or world reloaded): drop the stale build so EnsureStarted
@@ -490,6 +565,41 @@ namespace KKLLMNPC
             if (b == null || !b.Ready) return false;
             return p.x >= b.MinX && p.x < b.MinX + b.Cols * b.Cell
                 && p.z >= b.MinZ && p.z < b.MinZ + b.Rows * b.Cell;
+        }
+
+        // A body is physically standing at p: if the baked verdict for that spot was
+        // "wall" (a door closed at bake time, geometry placed later), the proof beats
+        // the sample — patch the cell and its same-height ring to walkable. Main
+        // thread. Returns true when at least one cell was downgraded.
+        internal static bool PatchWalkable(Vector3 p)
+        {
+            WorldMapBuild b; WorldMapGrid g;
+            lock (_gate) { b = _build; g = _grid; }
+            if (b == null || !b.Ready || g == null) return false;
+            int cx = Mathf.FloorToInt((p.x - b.MinX) / b.Cell);
+            int cz = Mathf.FloorToInt((p.z - b.MinZ) / b.Cell);
+            if (cx < 0 || cz < 0 || cx >= b.Cols || cz >= b.Rows) return false;
+            int ci = cz * b.Cols + cx;
+            int l = g.LayerNear(ci, p.y);
+            if (l < 0) return false;
+            float h0 = g.H(ci, l);
+            bool patched = false;
+            RingCells(cx, cz, 1, (nx, nz) =>
+            {
+                if (nx < 0 || nz < 0 || nx >= b.Cols || nz >= b.Rows) return;
+                int c2 = nz * b.Cols + nx;
+                int l2 = g.LayerNear(c2, p.y);
+                if (l2 < 0) return;
+                // Only cells at the walker's own floor level count — the height check
+                // is what keeps pillars/balustrades (whose nearest "walkable" layer is
+                // their top surface far above) out of the patch.
+                if (Mathf.Abs(g.H(c2, l2) - h0) < 1.2f && Mathf.Abs(g.H(c2, l2) - p.y) < 1.2f)
+                {
+                    g.PatchWalkable(c2, l2);
+                    patched = true;
+                }
+            });
+            return patched;
         }
 
         // Walk the perimeter of the ring at radius r around (cx,cz), in cell steps.
@@ -608,7 +718,13 @@ namespace KKLLMNPC
             }
         }
 
-        private static bool RayClear(Vector3 a, Vector3 b)
+        // Chest-height line-of-sight between two waypoints, each raised above its own
+        // ground by PathRayHeightOffset (so sloped/ramped segments stay clear). The
+        // single implementation for both path pipelines — the local window grid and
+        // this shared world map used to carry byte-identical copies that had already
+        // drifted subtly apart in their collider rules; paths pass their own rule.
+        // Main-thread only (Physics).
+        internal static bool SegmentClear(Vector3 a, Vector3 b, Func<Collider, bool> reject)
         {
             Vector3 p = new Vector3(a.x, a.y + Consts.PathRayHeightOffset, a.z);
             Vector3 q = new Vector3(b.x, b.y + Consts.PathRayHeightOffset, b.z);
@@ -617,7 +733,12 @@ namespace KKLLMNPC
             if (dist < 0.01f) return true;
             RaycastHit h;
             return !Physics.Raycast(p, dir / dist, out h, dist, ~0, QueryTriggerInteraction.Ignore)
-                || h.collider != null && h.collider.GetComponentInParent<Kobold>() != null;
+                || (h.collider != null && reject(h.collider));
+        }
+
+        private static bool RayClear(Vector3 a, Vector3 b)
+        {
+            return SegmentClear(a, b, c => c.GetComponentInParent<Kobold>() != null);
         }
 
         // ------------------------------------------------------------------
@@ -627,47 +748,7 @@ namespace KKLLMNPC
         // | f32 minX | f32 minZ | f32 cell | i32 cols | i32 rows | u32 maxLayers
         // | f64 builtUtc | u32 cellCount
         // | per cell: u8 nlay [ f32 height u8 state ]*nlay
-        private static bool Save(string dir, string file, WorldMapBuild b)
-        {
-            try
-            {
-                if (!System.IO.Directory.Exists(dir)) System.IO.Directory.CreateDirectory(dir);
-                using (var ms = new System.IO.MemoryStream())
-                using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
-                {
-                    foreach (char c in Magic) w.Write(c);
-                    w.Write(FormatVersion);
-                    w.Write((ushort)b.Scene.Length);
-                    w.Write(b.Scene);
-                    w.Write(b.MinX); w.Write(b.MinZ); w.Write(b.Cell);
-                    w.Write(b.Cols); w.Write(b.Rows);
-                    w.Write((uint)b.MaxLayers);
-                    w.Write((double)DateTime.UtcNow.Ticks);
-                    w.Write((uint)b.Cells);
-                    for (int ci = 0; ci < b.Cells; ci++)
-                    {
-                        byte nl = ReadNlay(b, ci);
-                        w.Write(nl);
-                        for (int l = 0; l < nl; l++)
-                        {
-                            w.Write(ReadH(b, ci, l));
-                            w.Write(ReadOk(b, ci, l));
-                        }
-                    }
-                    string tmp = file + ".tmp";
-                    WriteAllBytesSafe(tmp, ms.ToArray());
-                    if (System.IO.File.Exists(file)) try { System.IO.File.Delete(file); } catch (Exception) { }
-                    System.IO.File.Move(tmp, file);
-                    return true;
-                }
-            }
-            catch (Exception) { return false; }
-        }
-
-        // The build's arrays are private; expose them for the serializer.
-        private static byte ReadNlay(WorldMapBuild b, int ci) { lock (_gate) return b.NlayAt(ci); }
-        private static float ReadH(WorldMapBuild b, int ci, int l) { lock (_gate) return b.HeightAt(ci, l); }
-        private static byte ReadOk(WorldMapBuild b, int ci, int l) { lock (_gate) return b.StateAt(ci, l); }
+        // BuildBytes/WriteMapAsync (above) — serialize on main, write in background.
 
         private static void WriteAllBytesSafe(string path, byte[] data)
         {

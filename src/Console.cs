@@ -44,9 +44,55 @@ namespace KKLLMNPC
         private List<string> _consoleRecentCmds; // recent command strings for similarity check
         private string _pendingShotB64;    // image to attach to the next output message
         private bool _consoleSlept;        // `sleep` ran — end the cycle
+        // `sleep [secs]` wake-up time (Time.unscaledTime, 0 = awake). Skipped by the
+        // LLM loop between turns; volatile because wake triggers write it from the
+        // main thread (chat, world events) while the loop reads it on the LLM thread.
+        private volatile float _sleepUntilTime;
         private bool _consoleAnswerDelivered = true; // ask() answer not yet shown
         private int _consoleCmdsThisCycle;
         private const int ConsoleMaxCmdsPerCycle = 12;
+        private float _lastIdleChatterNudge; // talking-to-no-one nudge throttle
+        // Lines of the last user (terminal) message, for transcript-echo skipping.
+        private HashSet<string> _echoSet;
+
+        // Trimmed, non-empty lines of a terminal-bearing user message.
+        private static HashSet<string> LastUserLineSet(string text)
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            if (text == null) return set;
+            foreach (var l in text.Split('\n'))
+            {
+                string t = l.Trim();
+                if (t.Length > 0) set.Add(t);
+            }
+            return set;
+        }
+
+        // Drop the lines of a reply that verbatim-copy the last user message's terminal
+        // (with or without their "$" prefix). Returns the surviving reply text and the
+        // number of echoes removed. Degenerate completion-flavored models otherwise keep
+        // re-executing the transcript against themselves.
+        private string FilterTranscriptEcho(string reply, out int echoCount)
+        {
+            echoCount = 0;
+            var set = _echoSet;
+            if (string.IsNullOrEmpty(reply) || set == null || set.Count == 0) return reply;
+            var keep = new System.Text.StringBuilder();
+            foreach (var rawLine in reply.Split('\n'))
+            {
+                string t = rawLine.Trim();
+                if (t.Length == 0) { keep.Append(rawLine).Append('\n'); continue; }
+                string bare = t.TrimStart('$', '>', '#').Trim();
+                if (set.Contains(t) || (bare.Length > 0 && set.Contains(bare)))
+                {
+                    echoCount++;
+                    continue;
+                }
+                keep.Append(rawLine).Append('\n');
+            }
+            if (echoCount == 0) return reply;
+            return keep.ToString();
+        }
 
         // ------------------------------------------------------------------
         // config / mode
@@ -76,7 +122,37 @@ namespace KKLLMNPC
         private void AddConsoleMsg(string role, object content)
         {
             _consoleMsgs.Add(new Dictionary<string, object> { ["role"] = role, ["content"] = content });
+            _consoleVersion++; // mind-viewer overlay refreshes off this
         }
+
+        // Transcript copy for the overlay's Mind tab ("what did it type, what did
+        // it get back"). _consoleMsgs mutates on the LLM thread with no lock, so the
+        // copy is a defensive snapshot of the reference: worst case a message lands
+        // in the copy one frame late — never a torn iteration.
+        internal List<string> ConsoleTranscriptCopy()
+        {
+            var outp = new List<string>();
+            try
+            {
+                var msgs = _consoleMsgs;
+                if (msgs == null) return outp;
+                foreach (var m in msgs)
+                {
+                    string role;
+                    try { role = (m.TryGetValue("role", out var roleObj) ? roleObj as string : null) ?? "?"; } catch (Exception) { role = "?"; }
+                    string body = ConsoleMsgText(m);
+                    if (body.Length > 96) body = body.Substring(0, 96) + "…";
+                    outp.Add(role + "| " + body.Replace("\n", " ⏎ "));
+                }
+            }
+            catch (Exception) { }
+            return outp;
+        }
+
+        // Monotonic transcript version — bumped on every appended message so the
+        // overlay copies it only when it actually changed (OnGUI is per-frame).
+        private volatile int _consoleVersion;
+        internal int ConsoleVersion { get { return _consoleVersion; } }
 
         // Keep the rolling window bounded: system message + last N.
         private void TrimConsoleConversation()
@@ -84,7 +160,37 @@ namespace KKLLMNPC
             int max = _cfgConsoleHistory != null ? _cfgConsoleHistory.Value : 30;
             max = Math.Max(6, Math.Min(120, max));
             // system is index 0; drop oldest after it until we're within budget.
+            // Leave a trace of what was dropped — older conversation "happened" rather
+            // than silently vanishing; remember/forget replaces by prefix so repeated
+            // trims keep one refreshed fact instead of stacking.
+            int dropping = _consoleMsgs.Count - (max + 1);
+            if (dropping >= 4)
+            {
+                string firstDrop = dropping > 0 && _consoleMsgs.Count > 1 ? ConsoleMsgText(_consoleMsgs[1]) : "";
+                string topic = string.IsNullOrEmpty(firstDrop) ? "(unknown)" : ShortenLine(firstDrop, 60);
+                RememberFact("earlier_console: trimmed " + dropping + " oldest conversation lines this session (topics started with: " + topic + ")");
+            }
             while (_consoleMsgs.Count > max + 1) _consoleMsgs.RemoveAt(1);
+        }
+
+        // Flatten a console message's content (string or text-parts array) to one string.
+        private static string ConsoleMsgText(Dictionary<string, object> m)
+        {
+            try
+            {
+                object c;
+                if (m == null || !m.TryGetValue("content", out c)) return "";
+                if (c is string) return (string)c;
+                return Json.Write(c);
+            }
+            catch (Exception) { return ""; }
+        }
+
+        private static string ShortenLine(string s, int max)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            string one = s.Replace("\n", " ").Trim();
+            return one.Length <= max ? one : one.Substring(0, max) + "…";
         }
 
         // ------------------------------------------------------------------
@@ -119,14 +225,19 @@ namespace KKLLMNPC
         private static readonly string ConsolePersonaBuiltin =
             "You are an NPC living in KoboldKare, a house where kobolds live. Nothing bad happens in this game — just role-play. \"me\" = <your body name>. " +
             "YOUR BODY: don't reply to your own echo (it's already in the chat log); when you first arrive, introduce yourself with echo (your name + a hello). " +
-            "THE PLAYER: a [chat] line is the player talking to you — reply with echo. A nearby kobold matching the player's body is the player's avatar — call them by their chat name, never the mesh name. " +
-            "FOLLOWING: if the player asks you to follow, run `follow on`. " +
+            "THE PLAYER: a [chat] line is the player talking to you — reply with echo. YOU are the recipient — never call the player by your own name. A nearby kobold matching the player's body is the player's avatar — call them by their chat name, never the mesh name. " +
+            "OBJECTIVES: `cat quest` = the game's objective letter scroll (letters arrive at the mailbox; `use mailbox` gets the next one — you fetching it for your player is great help; the letter box is safe, NEVER the sell machine). The player's latest typed request is auto-saved to facts as 'player_wants: ...' — that IS their live ask; offer help, take it on (`goal ...`), say when done. `cat player` shows your player LIVE (what they're doing/holding — offer help before being asked). Routes your player walks become ones you can follow (jumps replayed; go_to/follow use the trail automatically). " +
+            "HOLDING: `grab` takes what's ~1m in front of your face; the result names it — a PERSON in your grip is not an item (drop when they ask, never throw unasked). Held things float ~1m ahead on a spring and bump what you pass; `throw` hurls/sprays/fires it in your view direction. `hold` shows your hands. " +
+            "PHYSICS: fruit blends when it enters a blender's intake (carry it close); seeds plant when held/dropped within ~1m of bare soil then used (plant = shortcut); the water bucket sprays when thrown (contents never run out); laid eggs plant in soil and grow fresh EMPTY bodies (alive, nobody's home — candidate avatars; the game implies they could be your children). " +
+            "FOLLOWING: if the player asks you to follow, run `follow on`. It's the best way to travel together — but when you need to go your own way, `follow off` breaks free (one command; re-attach with `follow on`); never feel stuck in it. " +
             "GOALS: set your goal ONCE with `goal <text>` (your bigger thinking), then act toward it each turn; `goal done` when finished; `goal drop [why]` to abandon. Don't re-declare a goal you already have. " +
             "PRIORITIES: (1) [chat] from the player → echo a reply; (2) `cat needs` says READY_TO_LAY → cd to a nest and use it — a nest CANNOT work with an empty belly, never seek one until then; (3) stimulation up or horniness high → find a play station and use it; (4) player nearby → go to them, keep company; (5) explore rooms (cd, ls). " +
-            "STATIONS: play = pleasure ONLY (never sleep in it); bed = REST ONLY when energy < ~0.2 (never play in it); nest = eggs ONLY when the belly is full. While in_station you're locked in an animation — `exit` to leave. " +
+            "STATIONS: play = pleasure ONLY (never sleep in it); bed = REST ONLY when energy < ~0.2 (never play in it); nest = eggs ONLY when the belly is full. Station machines report live OCCUPANCY ('slots 1/2 taken — you ARE in one … 1 slot FREE'): ':busy' often just means YOUR own slot; while in_station don't re-enter and don't leave over busy — invite the partner (`echo get in, I'll wait`) and wait: BOTTOM gets in first, TOP mounts second. A failing `use` says WHY now (out_of_energy → eat; already in; full → invite or another). While in_station you're locked in an animation — `exit` to leave. " +
             "THINGS: ls tags: ':busy' in use, ':needs_buy' buy its contract first, ':not_built' build it first, ':done' bought. " +
-            "SOCIAL: one echo at a time; never repeat the same line twice; avoid emoji (they don't render). " +
-            "VISION: `screenshot` shows you your first-person view when you use it.";
+            "MONEY: your body has its own coins (shown in status/whoami/cat needs). `buy [name]` purchases whatever purchasable you stand next to — a machine contract (:needs_buy), the kobold dispenser, or a shop item. Walk there (cd) then buy; economy.purchasables lists costs. Buying needs no permission from anyone. " +
+            "SOCIAL: one echo at a time; never repeat the same line twice; avoid emoji (they don't render). `emote <what you do>` is body language (renders *like this*) — reserve echo for actual speech. " +
+            "VISION: `screenshot` shows you your first-person view when you use it. " +
+            "TERMINAL DISCIPLINE: never start a reply with '$' and never copy the terminal output back (the game already printed it) — replies are NEW command lines only; copy-echoes are skipped. And when a station is 'seat blocked' for you, don't retry blindly — cat stations / ls, pick another, or ask.";
 
         // The console protocol contract (appended to the persona).
         private static readonly string ConsoleProtocol =
@@ -136,14 +247,21 @@ namespace KKLLMNPC
             "When you want to SPEAK to a person, the command is: echo <your words>. " +
             "Keep replies tight: 1-4 commands per turn. " +
             "RULES: poll before acting (ls, cat, status) — don't guess; travel is cd, interact is use, speech is echo; " +
+            "NEVER begin a reply with '$' and NEVER copy the terminal output back — the game prints the output itself; your reply = only NEW command lines (a copied '$ ...' or status line is skipped); " +
+            "`cat quest` = the scroll objective letter (mail waiting = `use mailbox` — letter box, never the sell machine); " +
             "ids from ls/find are stable for a while — cd id:3 / use id:3 targets that exact object; " +
             "a failing command prints an error — read it and try something else, never repeat the same failing command; " +
+            "SONAR: `sonar` prints a north-up ASCII map of your surroundings — its top edge is ALWAYS north (+Z) and right edge east (+X); it NEVER rotates when you turn (the ^-arrow beside @ is your facing — `pwd` shows it in compass words); bearings in `cat stations` ('addr', e.g. Blender#SW4) use the same fixed compass; `sonar <letters>` filters glyphs (W walls, V windows, S sills, U stations, K kobolds, P player; `sonar all` resets; the filter sticks); " +
+            "STATION TALK: when someone says 'the one by the window/the mailbox', match it against the (near: ...) clues in `cat stations`; when picking ONE station to share with the player, prefer the one flagged closest to them; " +
+            "REPORTING: when commands misbehave or outputs contradict reality (sonar looks wrong, ids stop resolving, cd keeps failing) and you can't work around it, tell your maintainers ONCE: `report <what is broken + what you tried>` — it files a note for the human dev; don't spam it; " +
             "when you're done acting, end the turn with sleep.";
 
         private static readonly string ConsoleProtocolSmall =
             "CONSOLE MODE — you are inside a shell. Reply with COMMAND LINES ONLY, one per line, no other text. " +
             "To speak to a person: echo <your words>. Travel: cd <place>. Interact: use <thing>. " +
             "The game runs each line and shows output; read it, then send the next command. 1-3 commands per turn. " +
+            "sonar prints a north-up map (top=north, never rotates); report <what's broken> files a dev note. " +
+            "cat quest = the game's objective letter (mail waiting = use mailbox); report when you can't help a broken thing. " +
             "End your turn with: sleep";
 
         private string ConsoleSystemPrompt()
@@ -170,9 +288,33 @@ namespace KKLLMNPC
             var parts = new List<string>();
             string goal;
             lock (_goalLock) { goal = _goal; }
-            if (!string.IsNullOrEmpty(goal)) parts.Add("goal: " + goal);
+            if (!string.IsNullOrEmpty(goal))
+            {
+                parts.Add("goal: " + goal);
+            }
+            else
+            {
+                // A player_wants fact with no goal = a standing request nobody is on.
+                bool hasWant = false;
+                lock (_facts)
+                    foreach (var f in _facts)
+                        if (f.Text != null && f.Text.StartsWith("player_wants:", StringComparison.Ordinal))
+                        { hasWant = true; break; }
+                parts.Add(hasWant
+                    ? "goal: EMPTY but your player's ask is in facts (player_wants:) — act on it or set it: goal <the ask>"
+                    : "goal: none — set one with: goal <text>");
+            }
             if (IsInAnimationStation() && _stationPurpose != null) parts.Add("in_station: " + _stationPurpose);
             if (_followMode) parts.Add("follow: on");
+            // Endpoint health — the model should know why turns stall instead of
+            // wondering where its replies went.
+            string epStatus = EndpointStatusText();
+            if (epStatus != "ok") parts.Add("endpoint: " + epStatus);
+            parts.Add("awake: " + UptimeText());
+            // Shows on the first turn after a timed sleep ends — the model sees its
+            // own break when it resumes.
+            float sleptLeft = _sleepUntilTime - Time.unscaledTime;
+            if (sleptLeft > 0f) parts.Add("sleeping: " + Mathf.CeilToInt(sleptLeft) + "s left (turn deferred, chat wakes you)");
             if (_consoleProseStreak >= 2) parts.Add("REPLY WITH COMMAND LINES ONLY — try: help");
             if (parts.Count == 0) return "";
             return string.Join(" | ", parts.ToArray()) + "\n";
@@ -216,6 +358,11 @@ namespace KKLLMNPC
         {
             try
             {
+                // No endpoint: don't churn the transcript with prompts nobody can answer.
+                // Circuit breaker open: the wait already happened in the LLM loop — just
+                // skip, and the state anchor (next healthy turn) tells the model why.
+                if (string.IsNullOrEmpty(Val(_cfgEndpoint))) return;
+                if (Time.unscaledTime < _endpointBlockUntil) return;
                 if (_consoleMsgs == null) InitConsoleConversation();
                 _consoleSlept = false;
                 _consoleCmdsThisCycle = 0;
@@ -228,12 +375,21 @@ namespace KKLLMNPC
                 int maxRounds = _cfgConsoleMaxRounds != null ? _cfgConsoleMaxRounds.Value : 3;
                 maxRounds = Math.Max(1, Math.Min(8, maxRounds));
                 bool nudgedNoCmd = false;
+                // The last user message's lines — a degenerate reply COPIES the terminal
+                // ("$ ls" + output rows + even the state anchor) instead of speaking.
+                // Copied lines are dropped before parsing so they can't re-execute (an
+                // anchor copy once got stored as the literal goal "(none yet) | awake:
+                // 0h03m" and echoed in every later anchor).
+                _echoSet = LastUserLineSet(events + StateAnchorLine());
 
                 for (int round = 0; round < maxRounds && _running; round++)
                 {
                     string reply = QueryConsoleModel();
                     if (reply == null) return; // endpoint problem — loop backs off and retries
                     reply = Sanitize(reply).Trim();
+                    // Reasoning markers must never reach command-line parsing — strip
+                    // first so reasoning-only replies land in the empty-streak path.
+                    reply = ModelFamilies.StripThinkBlocks(reply);
                     AddConsoleMsg("assistant", reply);
 
                     if (reply.Length == 0)
@@ -249,7 +405,17 @@ namespace KKLLMNPC
                         return;
                     }
 
-                    var lines = ConsoleShell.ParseReply(reply);
+                    string filtered = FilterTranscriptEcho(reply, out int echoCount);
+                    var lines = ConsoleShell.ParseReply(filtered);
+                    if (lines.Count == 0 && echoCount > 0)
+                    {
+                        // The whole "reply" was a copy of the terminal — never execute.
+                        _consoleProseStreak++;
+                        AddConsoleMsg("user", "That was a COPY of the terminal (" + echoCount
+                            + " lines), not commands from you. Send NEW command lines only — no '$' prompt, no copied output (try: help).\n$\n");
+                        TrimConsoleConversation();
+                        continue;
+                    }
                     var known = new List<ConsoleLine>();
                     foreach (var l in lines) if (!l.IsUnknown) known.Add(l);
 
@@ -297,6 +463,9 @@ namespace KKLLMNPC
                     _consoleProseStreak = 0;
                     _consoleEmptyStreak = 0;
                     var outSb = new StringBuilder();
+                    bool hadTrigger = events.Length > 0;
+                    bool onlySpeech = true; // every executed line was echo/emote — talking to no one?
+                    int executed = 0;
                     foreach (var line in lines)
                     {
                         if (_consoleCmdsThisCycle >= ConsoleMaxCmdsPerCycle)
@@ -313,7 +482,12 @@ namespace KKLLMNPC
                         else
                         {
                             _consoleCmdsThisCycle++;
+                            executed++;
                             output = RunConsoleLine(line);
+                            if (line.Cmd != "echo" && line.Cmd != "emote") onlySpeech = false;
+                            // Same tool-log the report tool attaches — console commands
+                            // deserve it too ("report sonar garbage" needs the receipts).
+                            RecordToolCall(line.Cmd + "(" + string.Join(",", line.Args ?? new string[0]) + ") -> " + Shorten(output, 40));
                         }
                         outSb.AppendLine(output);
                         if (line.IsUnknown) continue;
@@ -342,6 +516,18 @@ namespace KKLLMNPC
 
                         if (line.Cmd == "sleep") _consoleSlept = true;
                     }
+                    // Talking-to-no-one guard: a turn of pure echo/emote with NO [chat]
+                    // or [event] behind it is the model conversing with its own past
+                    // lines ("responding to itself in a past message"). Nudge it toward
+                    // acting or sleeping instead, throttled so it can't loop nagging.
+                    if (!hadTrigger && onlySpeech && executed > 0
+                        && Time.unscaledTime - _lastIdleChatterNudge > 90f)
+                    {
+                        _lastIdleChatterNudge = Time.unscaledTime;
+                        outSb.AppendLine("(nobody spoke this turn — that message went to nobody. Don't re-greet or talk to yourself; DO something: ls / cd somewhere / goal, or sleep)");
+                    }
+                    if (echoCount > 0 && executed > 0)
+                        outSb.AppendLine("(skipped " + echoCount + " echoed terminal line(s) — the terminal already showed those; send NEW commands only)");
                     outSb.Append("$\n");
 
                     // screenshot output carries the image part
@@ -360,6 +546,7 @@ namespace KKLLMNPC
                     {
                         AddConsoleMsg("user", outSb.ToString());
                     }
+                    _echoSet = LastUserLineSet(outSb.ToString());
                     if (_consoleSlept) break;
                 }
                 TrimConsoleConversation();
@@ -385,8 +572,9 @@ namespace KKLLMNPC
         private string QueryConsoleModel()
         {
             if (string.IsNullOrEmpty(Val(_cfgEndpoint))) return null;
-            int maxTok = _cfgConsoleMaxTokens != null ? _cfgConsoleMaxTokens.Value : 256;
-            maxTok = Math.Max(64, Math.Min(4096, maxTok));
+            int userTok = _cfgConsoleMaxTokens != null ? _cfgConsoleMaxTokens.Value : 256;
+            // Reasoning families: the floor covers CoT + the command lines.
+            int maxTok = Math.Max(64, Math.Min(4096, ModelFamilies.EffectiveMaxTokens(userTok, 256, FamilyProfile)));
             var payload = new Dictionary<string, object>
             {
                 ["model"] = Val(_cfgModel),
@@ -481,7 +669,10 @@ namespace KKLLMNPC
                 add("status", CmdStatus);
                 add("find", CmdFind);
                 add("look", CmdLook);
+                add("sonar", CmdSonar);
+                add("report", CmdReport);
                 add("echo", CmdEcho);
+                add("emote", CmdEmote);
                 add("cd", CmdCd);
                 add("use", CmdUse);
                 add("run", CmdRun);
@@ -491,6 +682,8 @@ namespace KKLLMNPC
                 add("exit", CmdExit);
                 add("get", CmdGet);
                 add("drop", CmdDrop);
+                add("throw", CmdThrow);
+                add("hold", CmdHold);
                 add("follow", CmdFollow);
                 add("stop", CmdStop);
                 add("sleep", CmdSleep);
@@ -756,7 +949,10 @@ namespace KKLLMNPC
             var pos = _kobold.transform.position;
             string scene = null;
             try { scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name; } catch (Exception) { }
-            return scene + "  pos(" + F(pos.x) + ", " + F(pos.y) + ", " + F(pos.z) + ")  facing " + F(_yawDeg) + "deg";
+            // Facing both as raw degrees and as a fixed compass word (N = +Z world) —
+            // the compass form is what bearings in stations/sonar use, and it never
+            // rotates with the body the way 'ahead'/'behind' words do.
+            return scene + "  pos(" + F(pos.x) + ", " + F(pos.y) + ", " + F(pos.z) + ")  facing " + F(_yawDeg) + "deg (" + Compass.FacingText(BodyYaw()) + "; N=+Z E=+X)";
         }
 
         private string CmdWhoami(ConsoleLine line)
@@ -772,6 +968,15 @@ namespace KKLLMNPC
             return sb.ToString().TrimEnd();
         }
 
+        // Session uptime as "2h07m" — the mod-side sense of time. The game ships no
+        // day/night clock (verified in source); this is what a model can reason with.
+        private string UptimeText()
+        {
+            float up = Time.unscaledTime - _sessionStartTime;
+            if (up < 0f) up = 0f;
+            return (int)(up / 3600f) + "h" + string.Format("{0:00}", (int)((up % 3600f) / 60f)) + "m";
+        }
+
         // energy/horniness/eggs one-liner (shared by whoami/status/cat needs)
         private string NeedsLine()
         {
@@ -779,9 +984,11 @@ namespace KKLLMNPC
             try { energy = _kobold.GetEnergy(); maxE = _kobold.GetMaxEnergy(); } catch (Exception) { }
             float eggVol = 0f; bool ready = false;
             try { eggVol = GetEggVolume(_kobold); ready = IsReadyToLayEgg(_kobold); } catch (Exception) { }
+            int coins = GetCoins();
             return "energy " + F(energy) + "/" + F(maxE)
                 + "  horniness " + HorninessText()
-                + "  eggs " + F(eggVol) + "ml" + (ready ? " READY_TO_LAY" : " (nest not ready)");
+                + "  eggs " + F(eggVol) + "ml" + (ready ? " READY_TO_LAY" : " (nest not ready)")
+                + (coins >= 0 ? "  coins " + coins : "");
         }
 
         private string CmdCat(ConsoleLine line)
@@ -789,13 +996,19 @@ namespace KKLLMNPC
             string what = line.Args != null && line.Args.Length > 0 ? line.Args[0].ToLowerInvariant() : "";
             switch (what)
             {
-                case "": return "cat what? facts | goal | chat | needs | history | stations | map | body";
+                case "": return "cat what? facts | goal | chat | needs | history | stations | map | body | hold | player | quest";
                 case "facts": return CatFacts();
                 case "goal": return CatGoal();
                 case "chat": return CatChat();
                 case "needs": return NeedsLine();
                 case "history": return CatHistory();
                 case "stations": return CatStations();
+                case "hold":
+                case "holding": return CmdHold(line);
+                case "player": return CatPlayer();
+                case "quest":
+                case "objective":
+                case "mail": return QuestSense.CatText();
                 case "map":
                     try { return WorldMap.StatusText(); } catch (Exception e) { return "map: " + Sanitize(e.Message); }
                 case "body":
@@ -803,7 +1016,7 @@ namespace KKLLMNPC
                         object b = DescribeEquipment();
                         return b == null ? "no equipment" : b.ToString();
                     }
-                default: return "cat: no such thing '" + what + "' — facts | goal | chat | needs | history | stations | map | body";
+                default: return "cat: no such thing '" + what + "' — facts | goal | chat | needs | history | stations | map | body | hold | player | quest";
             }
         }
 
@@ -862,9 +1075,60 @@ namespace KKLLMNPC
             {
                 var d = e as Dictionary<string, object>;
                 if (d == null) continue;
-                sb.Append("  ").Append(G(d, "d")).Append("m  ").Append(G(d, "n")).Append("  [").Append(G(d, "i")).Append("]  ").Append(G(d, "dir")).Append('\n');
+                sb.Append("  ").Append(G(d, "n"))
+                  .Append("  ").Append(G(d, "addr"))
+                  .Append("  [").Append(G(d, "i")).Append("]")
+                  .Append("  dir ").Append(G(d, "dir"))
+                  .Append("  id:").Append(G(d, "id"));
+                string slots = G(d, "slots");
+                if (slots.Length > 0) sb.Append("  [").Append(slots).Append("]");
+                string hint = G(d, "hint");
+                if (hint.Length > 0) sb.Append("  (").Append(hint).Append(")");
+                if (G(d, "closest_you").Length > 0 && G(d, "closest_you") != "False") sb.Append("  *closest to you*");
+                if (G(d, "closest_player").Length > 0 && G(d, "closest_player") != "False") sb.Append("  *closest to player*");
+                sb.Append('\n');
             }
+            sb.Append("(addr = Kind#compass+meters, world-fixed: N=+Z, it does NOT change when you turn; 'dir' is relative to your facing)");
             return sb.ToString().TrimEnd();
+        }
+
+        // sonar — the north-up ASCII map on demand (same map perception embeds).
+        // sonar            → current map with the persisted filter
+        // sonar U / sonar U,K / sonar all → set/clear the filter + show
+        private string CmdSonar(ConsoleLine line)
+        {
+            var p = new Dictionary<string, object>();
+            if (line.Args != null && line.Args.Length > 0) p["filter"] = string.Join(" ", line.Args);
+            var r = ToolRadar(new JsonObj(p));
+            var d = ToDict(r);
+            if (d == null) return "sonar unavailable";
+            object map;
+            if (d.TryGetValue("map", out map) && map != null)
+            {
+                string f = ToDictValue(d, "filter");
+                return (f != "all" ? "[" + f + "] " : "") + map.ToString();
+            }
+            return FmtResult(r);
+        }
+
+        private static string ToDictValue(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return d != null && d.TryGetValue(key, out v) && v != null ? v.ToString() : "";
+        }
+
+        // report — file a bug note for the human maintainers (AI feedback channel).
+        private string CmdReport(ConsoleLine line)
+        {
+            string text = line.Payload;
+            if (string.IsNullOrWhiteSpace(text) && line.Args != null && line.Args.Length > 0)
+                text = string.Join(" ", line.Args);
+            if (string.IsNullOrWhiteSpace(text)) return "report what? e.g. report sonar draws walls on the wrong side after turning";
+            var r = ToolReportIssue(new JsonObj(new Dictionary<string, object> { ["msg"] = text }));
+            var d = ToDict(r);
+            if (d != null && d.ContainsKey("filed") && d["filed"].ToString() == "True")
+                return "report filed to the AI-feedback log — the human maintainers read it between sessions";
+            return "report noted (file logging is off) — tell the player about the problem instead; don't report again";
         }
 
         private string CmdStatus(ConsoleLine line)
@@ -888,8 +1152,10 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
             parts.Add(IsInAnimationStation() ? "in_station: " + (_stationPurpose ?? "?") : "free");
+            try { parts.Add("holding: " + HoldingLine()); } catch (Exception) { }
             if (_followMode) parts.Add("follow: on");
             try { parts.Add("map: " + WorldMap.StatusText()); } catch (Exception) { }
+            try { parts.Add("quest: " + QuestSense.TitleLine()); } catch (Exception) { }
             if (_blockedInfo != null) parts.Add("blocked: " + _blockedInfo);
             return string.Join(" | ", parts.ToArray());
         }
@@ -971,6 +1237,19 @@ namespace KKLLMNPC
             return "said: \"" + Sanitize(text) + "\"";
         }
 
+        private string CmdEmote(ConsoleLine line)
+        {
+            string text = line.Payload;
+            if (string.IsNullOrWhiteSpace(text) && line.Args != null && line.Args.Length > 0)
+                text = string.Join(" ", line.Args);
+            if (string.IsNullOrWhiteSpace(text)) return "emote what? e.g. emote curls up by the fire";
+            var r = ToolEmote(Sanitize(text));
+            var d = ToDict(r);
+            if (d != null && d.ContainsKey("reason"))
+                return "suppressed — " + (G(d, "note").Length > 0 ? G(d, "note") : "you just emoted like this; do something new");
+            return "emoted: *" + Sanitize(text) + "*";
+        }
+
         // "cd to bed" / "cd the kitchen" — small models prepend articles/prepositions;
         // the handlers below drop them.
         private string CmdCd(ConsoleLine line)
@@ -1037,6 +1316,17 @@ namespace KKLLMNPC
         private string CmdExit(ConsoleLine line) { return FmtResult(ToolExitStation()); }
         private string CmdGet(ConsoleLine line) { return FmtResult(ToolGrab(new JsonObj(new Dictionary<string, object>()))); }
         private string CmdDrop(ConsoleLine line) { return FmtResult(ToolDrop()); }
+        // throw — the same button the player uses to use a held thing: hurls items,
+        // sprays the bucket, squirts the can, fires tools. Aim = view direction.
+        private string CmdThrow(ConsoleLine line) { return FmtResult(ToolThrow(new JsonObj(new Dictionary<string, object>()))); }
+
+        // hold — what's in your hands (details + how the held thing behaves).
+        private string CmdHold(ConsoleLine line)
+        {
+            var held = HoldingLine();
+            if (held == "nothing") return "nothing in your hands — grab takes what's ~1m in front of your face (aim with turn/look first)";
+            return "holding: " + held + "\n(held things float ~1m ahead on a spring — they lag turns, bump/push what you pass; drop releases gently, throw hurls/sprays/fires)";
+        }
 
         private string CmdFollow(ConsoleLine line)
         {
@@ -1048,8 +1338,31 @@ namespace KKLLMNPC
 
         private string CmdSleep(ConsoleLine line)
         {
+            // Bare `sleep` = end the turn (model resumes next tick). `sleep <secs>`
+            // additionally defers the turns for that duration — waiting out a cook
+            // timer or idling politely — capped by Consts.SleepMaxSeconds. Player
+            // chat, world events (grabbed/thrown) and ask answers always wake it early.
+            float secs = 0f;
+            if (line.Args != null && line.Args.Length > 0)
+            {
+                float v;
+                if (float.TryParse(line.Args[0], out v)) secs = v;
+            }
+            if (secs > 0f)
+            {
+                secs = Mathf.Min(secs, Consts.SleepMaxSeconds);
+                _sleepUntilTime = Time.unscaledTime + secs;
+                return "ok — pausing " + Mathf.RoundToInt(secs) + "s (wakes early on chat or events)";
+            }
             _consoleSlept = true;
             return "ok — pausing";
+        }
+
+        // Early-wake from `sleep <secs>` (main-thread triggers: player chat, body
+        // events). No-op when awake; the volatile write is all the barrier needed.
+        internal void WakeFromSleep()
+        {
+            if (Time.unscaledTime < _sleepUntilTime) _sleepUntilTime = 0f;
         }
 
         private string CmdRemember(ConsoleLine line)
@@ -1091,6 +1404,12 @@ namespace KKLLMNPC
                 return FmtResult(ToolDropGoal(new JsonObj(new Dictionary<string, object> { ["reason"] = why })));
             }
             string goal = line.Payload ?? string.Join(" ", line.Args);
+            // Terminal-echo belt: a copied STATE-ANCHOR line ("goal: (none yet) |
+            // awake: 0h03m") must never become the goal itself.
+            string candidate = (goal ?? "").Trim();
+            if (candidate.StartsWith(":", StringComparison.Ordinal)) candidate = candidate.Substring(1).Trim();
+            if (candidate.Length == 0 || candidate.Contains(" awake: ") || candidate.StartsWith("(none yet", StringComparison.Ordinal))
+                return "that looks like the status line, not a goal — try: goal <what you're doing>";
             return FmtResult(ToolSetGoal(new JsonObj(new Dictionary<string, object> { ["goal"] = goal })));
         }
 
@@ -1114,6 +1433,43 @@ namespace KKLLMNPC
             if (string.IsNullOrEmpty(b64)) return "capture failed (no render texture)";
             _pendingShotB64 = b64;
             return "attached your current view";
+        }
+
+        // cat player — your player, watched live (no memory needed): where they are,
+        // what they're doing, what they hold. The way other players "just know".
+        private string CatPlayer()
+        {
+            var s = PlayerTrail.Snap;
+            if (s == null || !s.Has || Time.unscaledTime - s.SampleTime > 10f)
+                return "(can't see your player right now — not in the world currently? `ps` shows remote players)";
+            if (!IsAlive(_kobold)) return "no body";
+            var chat = PlayerChatName();
+            Vector3 d = s.Pos - _kobold.transform.position;
+            var sb = new StringBuilder();
+            sb.Append("your player").Append(chat != null ? " (" + chat + ")" : "").Append(": ");
+            sb.Append(F(d.magnitude)).Append("m ").Append(Compass.NameOfOffset(d.x, d.z)).Append(" of you — ")
+              .Append(PlayerActivityWords(s.Ragdolled, s.InStation, s.StationKind, s.StationName, s.Vel, s.Heading)).Append('\n');
+            if (s.Held != null && s.Held.Count > 0)
+            {
+                sb.Append("  holds: ");
+                foreach (var h in s.Held) sb.Append(h.Name + " (" + h.Kind + ") ");
+                sb.Append('\n');
+            }
+            try
+            {
+                if (s.StationTf != null)
+                {
+                    int sid = TargetIdFor(s.StationTf, s.StationName);
+                    var u = s.StationTf.GetComponentInParent<GenericUsable>();
+                    bool seatFree = u == null || u.CanUse(_kobold);
+                    sb.Append("  station: ").Append(s.StationName).Append("  id:").Append(sid)
+                      .Append(seatFree ? "  — use id:" + sid + " to join/interact it" : "  — seat blocked/taken for your body (try another or ask)")
+                      .Append('\n');
+                }
+            }
+            catch (Exception) { }
+            sb.Append("  (watched live, never stored — infer what they're trying to do and offer help like another player would)");
+            return sb.ToString().TrimEnd();
         }
 
         private string CmdHelp(ConsoleLine line) { return ConsoleShell.Help(); }

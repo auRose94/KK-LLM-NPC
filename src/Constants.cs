@@ -129,8 +129,23 @@ namespace KKLLMNPC
         public const float MaxHornyRate = 60f;
         public const float MinHornyBaseline = 0f;
         public const float MaxHornyBaseline = 1f;
-        public const int MaxNPCs = 4;
+        public const int MaxNPCs = 8;
         public const int MinNPCs = 1;
+        // Seconds between top-up spawns (SpawnMissingKobolds).
+        public const float SpawnRetrySeconds = 8f;
+        // CarrySense: release speed above which a release counts as a throw (the
+        // game's own ThrowRoutine threshold), and the radius around a mail/sell
+        // machine inside which a ragdolled body gets auto-recovered (its suck zone
+        // pulls in loose bodies).
+        public const float ThrowThreshold = 3f;
+        public const float SuckDangerRadius = 6f;
+        // Radians→degrees. The literal lives here once (Mathf.Rad2Deg-derived
+        // constants go missing under mcs against this game's UnityEngine build, as
+        // Mathf.PI does; an explicit literal is immune).
+        public const float Rad2Deg = 57.29578f;
+        // Console `sleep [secs]` cap: longest a turn can be deferred. Chat, world
+        // events and ask answers always wake early, so this only bounds idle drift.
+        public const float SleepMaxSeconds = 300f;
         public const int MaxVisMaxTokens = 500;
         public const int MinVisMaxTokens = 10;
 

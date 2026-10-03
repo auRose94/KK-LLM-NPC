@@ -22,154 +22,11 @@ using UnityEngine;
 
 namespace KKLLMNPC
 {
-    // ------------------------------------------------------------------
-    // PathWorker — static background thread that computes paths off the
-    // main thread.  NPCs enqueue (from, to, reason, seq) and the worker
-    // computes A* in the background, posting results to a per-NPC slot.
-    //
-    // Thread safety: all public methods are safe to call from any thread.
-    // The worker is a daemon thread, clean shutdown on unload.
-    // ------------------------------------------------------------------
-    internal static class PathWorker
-    {
-        private static Thread _thread;
-        private static volatile bool _running;
-        private static readonly object _gate = new object();
-
-        // Per-NPC request: what to compute.
-        private struct Request
-        {
-            public int npcId;
-            public Vector3 from;
-            public Vector3 to;
-            public int seq;
-            public float timeBudgetMs;
-            public int nodeBudget;
-        }
-
-        // Per-NPC result slot.
-        private struct Result
-        {
-            public int npcId;
-            public int seq;
-            public List<Vector3> path;
-            public float postedTime;
-        }
-
-        private static Request _pending;
-        private static bool _hasPending;
-        private static readonly Result[] _results = new Result[32];
-        private static readonly object _resultGate = new object();
-
-        public const float DefaultMinRequestInterval = 0.5f;
-
-        public static void Start()
-        {
-            if (_running) return;
-            _running = true;
-            _thread = new Thread(RunLoop) { IsBackground = true, Name = "KKLLMNPC-PathWorker" };
-            _thread.Start();
-        }
-
-        public static void Stop()
-        {
-            _running = false;
-            if (_thread != null) { _thread.Join(2000); _thread = null; }
-        }
-
-        /// <summary>Enqueue a path request from the LLM thread.  Returns true if accepted.</summary>
-        public static bool Enqueue(int npcId, Vector3 from, Vector3 to, int seq, float timeBudgetMs, int nodeBudget)
-        {
-            lock (_gate)
-            {
-                if (!_running) return false;
-                _pending.npcId = npcId;
-                _pending.from = from;
-                _pending.to = to;
-                _pending.seq = seq;
-                _pending.timeBudgetMs = timeBudgetMs;
-                _pending.nodeBudget = nodeBudget;
-                _hasPending = true;
-                return true;
-            }
-        }
-
-        /// <summary>Check for a completed path for this NPC.  Returns null if none ready.</summary>
-        public static List<Vector3> GetResult(int npcId)
-        {
-            lock (_resultGate)
-            {
-                int idx = npcId % _results.Length;
-                if (_results[idx].npcId != npcId) return null;
-                float age = Time.unscaledTime - _results[idx].postedTime;
-                if (age > 5f) { _results[idx].npcId = -1; return null; }
-                var path = _results[idx].path;
-                _results[idx].npcId = -1;
-                return path;
-            }
-        }
-
-        private static void RunLoop()
-        {
-            while (_running)
-            {
-                Request req = new Request();
-                bool has;
-                lock (_gate)
-                {
-                    has = _hasPending;
-                    if (has) { req = _pending; _hasPending = false; }
-                }
-                if (!has) { Thread.Sleep(10); continue; }
-
-                // Compute the path with time budget.
-                List<Vector3> path = ComputePath(req);
-
-                // Post result.
-                lock (_resultGate)
-                {
-                    int idx = req.npcId % _results.Length;
-                    _results[idx].npcId = req.npcId;
-                    _results[idx].seq = req.seq;
-                    _results[idx].path = path;
-                    _results[idx].postedTime = Time.unscaledTime;
-                }
-            }
-        }
-
-        private static List<Vector3> ComputePath(Request req)
-        {
-            try
-            {
-                var sw = Stopwatch.StartNew();
-                int expanded = 0;
-                const int maxNodes = 20000;
-
-                // Simulate time-budgeted computation.
-                // In the real impl, this would run A* on WorldMapGrid.
-                while (sw.ElapsedMilliseconds < req.timeBudgetMs && expanded < maxNodes)
-                {
-                    expanded++;
-                    Thread.Sleep(0);
-                }
-
-                // Return null to signal "use main-thread path" for now.
-                return null;
-            }
-            catch (Exception)
-            {
-                return null;
-            }
-        }
-    }
 
     internal partial class NPCInstance
     {
         // Reusable collider buffer for non-allocating overlap checks.
         internal Collider[] _pathColliderBuf = new Collider[32];
-
-        // Path worker fields.
-        private volatile List<Vector3> _receivedPath;
 
         // Build a grid over the start->goal window and run layered A*. Returns a
         // list of world-space waypoints (each at its floor's real height, the
@@ -282,16 +139,11 @@ namespace KKLLMNPC
 
         // Chest-height line-of-sight between two waypoints, each orbited at its own
         // floor height + PathRayHeightOffset so sloped/ramped segments stay clear.
+        // Delegates to the shared WorldMap.SegmentClear — one implementation for
+        // both path pipelines; this side rejects our own body geometry.
         private bool RayClear(Vector3 a, Vector3 b)
         {
-            Vector3 p = new Vector3(a.x, a.y + Consts.PathRayHeightOffset, a.z);
-            Vector3 q = new Vector3(b.x, b.y + Consts.PathRayHeightOffset, b.z);
-            Vector3 dir = q - p;
-            float dist = dir.magnitude;
-            if (dist < 0.01f) return true;
-            RaycastHit h;
-            return !Physics.Raycast(p, dir / dist, out h, dist, ~0, QueryTriggerInteraction.Ignore)
-                || IsOwnCollider(h.collider);
+            return WorldMap.SegmentClear(a, b, IsOwnCollider);
         }
 
         // Pick the goal cell/layer. Prefers the exact cell on the floor closest to

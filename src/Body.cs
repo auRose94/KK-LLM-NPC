@@ -94,6 +94,7 @@ namespace KKLLMNPC
         // bodies, prefers the nearest free AI kobold, falls back to map-wide if none in range.
         private bool EnsureBody()
         {
+            if (!_running) return false; // retired mid-marshal — never claim after shutdown
             if (_kobold != null && IsAlive(_kobold)) return true;
             if (_kobold != null) TeardownBody(); // possessed body was destroyed
             if (_everBound)
@@ -120,7 +121,7 @@ namespace KKLLMNPC
                 // "exists but not AI-controlled" from "all claimed".
                 int total = 0, ai = 0, claimed = 0, playerControlled = 0;
                 Kobold best = null; float bestD = float.MaxValue;
-                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                foreach (var k in SceneCache.Find<Kobold>(2f))
                 {
                     if (k == null) continue;
                     total++;
@@ -151,10 +152,12 @@ namespace KKLLMNPC
                 Possess(best);
                 if (!ReferenceEquals(_kobold, best))
                 {
-                    // Lost the claim race to another instance (or the body died between
-                    // selection and possession) — don't pretend we have a body.
-                    Logger.LogInfo("KKLLMNPC: claim lost (another instance took '" + best.name + "').");
-                    return false;
+                // Lost the claim race to another instance (or the body died between
+                // selection and possession) — don't pretend we have a body. This is
+                // the DESIGNED race: the claim set is atomic, so the loser backs off
+                // and retries; the winner is the only driver.
+                Logger.LogInfo("KKLLMNPC: claim lost (another instance took '" + best.name + "' — expected race, winner keeps driving; we keep looking).");
+                return false;
                 }
                 return true;
             }
@@ -167,8 +170,10 @@ namespace KKLLMNPC
         private void Possess(Kobold target)
         {
             if (target == null) return;
+            if (!_running) return; // retired mid-marshal — never claim after shutdown
             TeardownBody();
             if (!IsAlive(target)) return; // died between selection and possess
+            if (!_running) return; // Shutdown (reconciler) may have raced this teardown
             int id = target.GetInstanceID();
             // Atomic claim: reject if another instance grabbed it first.
             lock (LLMNPCPlugin.ClaimedKobolds)
@@ -185,15 +190,43 @@ namespace KKLLMNPC
         // name + persona across a bodyswap machine — only its physical body changed.
         private void BindBody(Kobold target, bool reuseIdentity)
         {
+            // Double-bind tripwire: if another live instance already drives this exact
+            // body, something above us failed — log it loudly with both names so the
+            // "two threads fighting over a body" case is diagnosable from the log.
+            try
+            {
+                var other = Plugin.FindOtherInstanceHolding(target, this);
+                if (other != null)
+                    Logger.LogError("KKLLMNPC: DOUBLE BIND — '" + other.GetMyName() + "' and '" + (_npcName ?? "?") + "' both drive body '" + CleanName(target.name) + "'. Send us this log.");
+            }
+            catch (Exception) { }
             _kobold = target;
             _currentKoboldId = target.GetInstanceID();
             _everBound = true;
             if (!reuseIdentity)
             {
+                // A brand-new possession = a brand-new mind. Wipe every trace of the
+                // previous life (facts, goals, chat, console history) so a sold/lost
+                // body's context can never leak into the next claim. (Bodyswap passes
+                // reuseIdentity=true and keeps the mind — that's its whole point.)
+                // Applied SYNCHRONOUSLY here, not queued: this runs inside the LLM
+                // thread's own RunOnMainThread marshal (LLMLoop → EnsureBody), so the
+                // loop is blocked and can't be mid-turn; and a queued wipe would
+                // otherwise fire AFTER TryRestoreBodyMemory and erase the restored
+                // life one think tick later.
+                _pendingMindReset = null;
+                ResetMindNow("fresh body");
                 _npcName = PickName(target);   // base: prefab name — the LLM finalizes
-                _persona = BuildPersona();     // it in FinalizeIdentity (LLM thread) so
+                // A body seen before (same scene save, an earlier session) wakes as
+                // the SAME person: load its saved life instead of rebuilding persona
+                // and re-asking the LLM for a name.
+                if (!TryRestoreBodyMemory(target, BodyKey(target)))
+                {
+                    _persona = BuildPersona(); // it in FinalizeIdentity (LLM thread) so
                                                // the main thread never blocks on HTTP
+                }
             }
+            RegisterAgentBody(_currentKoboldId, _npcName); // siblings can see/hear this agent
             _yawDeg = target.transform.eulerAngles.y; // start from current facing
             _controller = target.GetComponent<KoboldCharacterController>();
             _descriptor = target.GetComponent<CharacterDescriptor>();
@@ -224,7 +257,11 @@ namespace KKLLMNPC
             if (_charAnimator != null) { try { _charAnimator.SetLookEnabled(false); } catch (Exception) { } }
             _navTarget = null; _navTargetName = null; _path = null; _pathIdx = 0; _pathGoalSet = false; _stimSource = null;
             _horny = _cfgHornyBaseline != null ? _cfgHornyBaseline.Value : 0.08f;
-            _hornyPrevStim = target != null ? target.stimulation : 0f;
+            _hornyPrevStim = target != null && target.stimulationMax > 0f
+                ? Mathf.Clamp01(target.stimulation / target.stimulationMax) : 0f;
+            _hornySaturatedFor = 0f;
+            ResetCarrySense();
+            ResetHoldSense();
 
             // Reagent awareness: listen to the belly container for drink/spray/metabolize events.
             _bellySnapshotPending = true; // first OnChange after possessing = baseline, not a gift
@@ -248,6 +285,64 @@ namespace KKLLMNPC
                 }
                 catch (Exception e) { Logger.LogError("BindBody head/cam: " + e); }
             });
+        }
+
+        // Persistent identity key for a body — the kobold's own serialized object
+        // name, which lives in the world save. Two sessions meet the same body here.
+        private static string BodyKey(Kobold k) => TextUtil.AsciiSafe(CleanName(k.name));
+
+        // Snapshot the current body's life to disk (teardown path: sold, lost,
+        // world change). Facts/goal/persona, keyed by the body.
+        private void SaveBodyMemory()
+        {
+            try
+            {
+                if (_kobold == null) return;
+                string bodyKey = BodyKey(_kobold);
+                if (string.IsNullOrEmpty(bodyKey)) return;
+                string goal; lock (_goalLock) { goal = _goal; }
+                // Save even with zero facts if a persona exists — a returned body at
+                // least wakes up as the same person, not a renamed stranger.
+                var facts = new List<string>();
+                lock (_facts) foreach (var f in _facts) facts.Add(f.Text);
+                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal);
+                try { Logger.LogInfo("KKLLMNPC: saved '" + _npcName + "' — " + facts.Count + " facts keyed to body '" + bodyKey + "'"); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
+        // Fresh-bind restore: load the body's saved life. False → no record, wake fresh.
+        private bool TryRestoreBodyMemory(Kobold target, string bodyKey)
+        {
+            try
+            {
+                var rec = MemoryStore.Load(bodyKey);
+                if (rec == null) return false;
+                // The recorded name IS this body's own past name — the flat names
+                // file never releases reservations, so IsTaken would permanently
+                // block every restore. Reclaim it instead (MarkTaken is the
+                // NameRegistry comment's documented "re-claiming our own" path).
+                // A genuinely stolen name (a LIVE different body wearing it) still
+                // refuses below.
+                lock (_facts) if (_facts.Count > 0 || _tick > 3) return false; // already live as someone else
+                int liveBody = BodyIdForAgentName(rec.Name);
+                if (liveBody >= 0 && liveBody != _currentKoboldId) return false; // another agent owns that name right now
+                _npcName = rec.Name;
+                NameRegistry.MarkTaken(_npcName);
+                _persona = rec.Persona;
+                lock (_facts)
+                {
+                    foreach (var t in rec.Facts) _facts.Add(new FactRec { Text = t, Tick = _tick });
+                    while (_facts.Count > FactCap) _facts.RemoveAt(0);
+                }
+                if (!string.IsNullOrEmpty(rec.Goal)) lock (_goalLock) { _goal = rec.Goal; _goalTick = _tick; }
+                _identityFinalized = true; // name already chosen — skip the LLM re-pick
+                // Identity bot may be needed again for chat attribution.
+                RunOnMainThreadAsync(() => { try { EnsureIdentityBot(); } catch (Exception) { } });
+                try { Logger.LogInfo("KKLLMNPC: '" + _npcName + "' woke up here before — restored " + rec.Facts.Count + " facts from a previous life of this body"); } catch (Exception) { }
+                return true;
+            }
+            catch (Exception) { return false; }
         }
 
         // The brain-swap machine swapped our NPC with whoever was on the other pod.
@@ -289,6 +384,8 @@ namespace KKLLMNPC
             // BindBody re-subscribes belly + penetration listeners on the new body
             // (both helpers unsubscribe the old ones first).
             BindBody(next, true);
+            UnregisterAgentBody(oldId);
+            RegisterAgentBody(_currentKoboldId, _npcName); // same mind, new body — keep the sibling registry current
             _persona = BuildPersona(); // physical gender/species changed — rebuild from the new body
         }
 
@@ -436,13 +533,17 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogDebug($"DescribeContents: {e.Message}"); return null; }
         }
 
-        // Drain queued reagent events as a list of strings, clearing them.
+        // Drain queued reagent + world events as a list of strings, clearing them.
+        // World events (CarrySense: picked up/carried/thrown/sell-machine danger)
+        // ride the same [event] channel the console and legacy perception drain.
         private List<object> DrainReagentEvents()
         {
             lock (_reagentEvents)
             {
                 var outp = new List<object>();
                 while (_reagentEvents.Count > 0) outp.Add(_reagentEvents.Dequeue());
+                var world = DrainWorldEvents();
+                if (world != null) outp.AddRange(world);
                 return outp;
             }
         }
@@ -470,6 +571,9 @@ namespace KKLLMNPC
             UnsubscribeBelly();
             UnsubscribePenetrables();
             TryUnhookBodySwap();
+            // The body is leaving us (sold/despawned/world change) — persist the
+            // life it carried so the same body can wake up remembering later.
+            SaveBodyMemory();
             if (_charAnimator != null) { try { _charAnimator.SetLookEnabled(true); } catch (Exception) { } }
             if (_descriptor != null)
             {
@@ -478,7 +582,7 @@ namespace KKLLMNPC
             _kobold = null; _controller = null; _descriptor = null; _grabber = null;
             _charAnimator = null; _head = null; _photonView = null;
             _navTarget = null; _navTargetName = null; _path = null; _pathIdx = 0; _pathGoalSet = false; _stimSource = null;
-            if (_currentKoboldId >= 0) { lock (LLMNPCPlugin.ClaimedKobolds) { LLMNPCPlugin.ClaimedKobolds.Remove(_currentKoboldId); } _currentKoboldId = -1; }
+            if (_currentKoboldId >= 0) { lock (LLMNPCPlugin.ClaimedKobolds) { LLMNPCPlugin.ClaimedKobolds.Remove(_currentKoboldId); } UnregisterAgentBody(_currentKoboldId); _currentKoboldId = -1; }
             StopMove();
         }
 

@@ -185,7 +185,9 @@ namespace KKLLMNPC
                         },
                     },
                     ["max_tokens"] = _cfgVisMaxTokens.Value,
-                    ["temperature"] = 0.2,
+                    // Was hardcoded 0.2; now a config knob ([VisionModel] Temperature)
+                    // — spatial reasoners like ZDTaichu want 0 for grounding work.
+                    ["temperature"] = (double)(_cfgVisTemperature != null ? _cfgVisTemperature.Value : 0.2f),
                     ["stream"] = false,
                 };
                 string body = Json.Write(payload);

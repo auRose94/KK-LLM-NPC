@@ -43,13 +43,15 @@ namespace KKLLMNPC
             { "ps",         "who's around (players + kobolds)" },
             { "pwd",        "where you are (pos, scene, facing)" },
             { "whoami",     "you: name, body, needs (energy, horniness, eggs)" },
-            { "cat",        "read: cat facts | goal | chat | needs | history | stations | map | body" },
+            { "cat",        "read: cat facts | goal | chat | needs | history | stations | map | body | hold | player" },
             { "status",     "one-line snapshot (goal, needs, station, follow, map)" },
             { "find",       "locate a place (find bed) or probe a direction (find 90)" },
             { "look",       "look left | right | up | down | around | <deg>" },
+            { "sonar",      "north-up ASCII map of your surroundings: sonar [filter: W S V U K P | all]" },
 
             // ---- act ----
             { "echo",       "SPEAK out loud: echo <your words> (this is how you talk)" },
+            { "emote",      "body language, not speech: emote <what you do> — renders as *your words*" },
             { "cd",         "travel: cd bed | cd Yipper | cd id:3" },
             { "use",        "interact: use id:2 | use nest" },
             { "run",        "walk short: run [secs] [left|right]" },
@@ -57,11 +59,13 @@ namespace KKLLMNPC
             { "jump",       "hop a ledge / get off a station" },
             { "crouch",     "crouch: crouch [0..1]" },
             { "exit",       "leave the station you're in" },
-            { "get",        "grab a nearby item" },
+            { "get",        "grab a nearby item (whatever is ~1m in front of your face)" },
             { "drop",       "drop what you hold" },
+            { "throw",      "use your held thing: hurls it in view direction; sprays the bucket; fires tools" },
+            { "hold",       "what's in your hands (details + physics)" },
             { "follow",     "follow [on|off] — stay near / release the player" },
             { "stop",       "stop moving" },
-            { "sleep",      "pause (ends your turn): sleep [secs]" },
+            { "sleep",      "end your turn: sleep [secs] (secs also pauses that long; chat/events wake you)" },
 
             // ---- memory & goals ----
             { "remember",   "store a fact: remember <fact>" },
@@ -71,6 +75,7 @@ namespace KKLLMNPC
 
             // ---- misc ----
             { "screenshot", "show yourself your current view (image)" },
+            { "report",     "file a dev bug note: report <what's broken/frustrating> (sonar wrong, cd fails...)" },
             { "help",       "list all commands" },
             { "clear",      "clear the screen (no game effect)" },
         };
@@ -89,8 +94,13 @@ namespace KKLLMNPC
             { "walk", "run" }, { "step", "run" }, { "sprint", "run" }, { "walk_ray", "run" },
             // look
             { "look_around", "look" }, { "scan", "look" }, { "face", "look" },
+            // sonar (the north-up map)
+            { "radar", "sonar" }, { "radar_map", "sonar" }, { "minimap", "sonar" },
             // grab
             { "grab", "get" }, { "pickup", "get" }, { "pick", "get" }, { "take", "get" },
+            // throw / activate held
+            { "toss", "throw" }, { "hurl", "throw" }, { "yeet", "throw" }, { "lob", "throw" },
+            { "activate", "throw" }, { "fire", "throw" }, { "throw_item", "throw" },
             // leave station
             { "leave", "exit" }, { "quit", "exit" }, { "exit_station", "exit" }, { "get_out", "exit" }, { "dismount", "exit" },
             // drop
@@ -110,6 +120,11 @@ namespace KKLLMNPC
             { "stat", "status" }, { "info", "status" }, { "state", "status" }, { "top", "status" },
             { "me", "whoami" }, { "self", "whoami" }, { "id", "whoami" },
             { "where", "pwd" }, { "loc", "pwd" }, { "location", "pwd" },
+            // report (AI feedback to the dev) — deliberately NOT aliasing words that
+            // prose replies often start with ("problem"/"issue"/"bug"), so thinking
+            // out loud never files a report by accident.
+            { "report_issue", "report" }, { "bug_report", "report" }, { "report_bug", "report" },
+            { "complain", "report" }, { "complaint", "report" },
             { "people", "ps" }, { "players", "ps" }, { "who", "ps" },
             { "nearby", "ls" }, { "dir", "ls" }, { "objects", "ls" }, { "things", "ls" },
             { "head", "cat" }, { "read", "cat" }, { "show", "cat" },
@@ -140,7 +155,7 @@ namespace KKLLMNPC
         // commands whose argument is a raw payload (speech/fact/goal/question text)
         private static readonly HashSet<string> PayloadCmds = new HashSet<string>(StringComparer.Ordinal)
         {
-            "echo", "remember", "forget", "goal", "ask",
+            "echo", "remember", "forget", "goal", "ask", "report",
         };
 
         // ------------------------------------------------------------------
@@ -250,6 +265,18 @@ namespace KKLLMNPC
         public static string ParseLine(string raw)
         {
             string s = (raw ?? "").Trim();
+            if (s.Length == 0) return null;
+            // Bare prompt markers alone ("$", "$ $", "$ $ $") are transcript-echo
+            // artifacts (models that copy the terminal); they are not commands and
+            // should vanish silently rather than spam "unknown command". Strip
+            // repeatedly (nesting!) and vanish the line when nothing is left.
+            string prev;
+            while (true)
+            {
+                prev = s;
+                s = s.TrimStart('$', '>', '#').Trim();
+                if (s.Length >= prev.Length) break;
+            }
             if (s.Length == 0) return null;
 
             // "command: cd bed" / "action: go_to(name=bed)" headers
@@ -513,35 +540,22 @@ namespace KKLLMNPC
         {
             switch (cmd)
             {
-                case "ls": case "ps": case "pwd": case "whoami": case "cat": case "status": case "find": case "look":
+                case "ls": case "ps": case "pwd": case "whoami": case "cat": case "status": case "find": case "look": case "sonar":
                     return "READ (poll the game)";
-                case "echo": case "cd": case "use": case "run": case "turn": case "jump": case "crouch": case "exit": case "get": case "drop": case "follow": case "stop": case "sleep":
+                case "echo": case "emote": case "cd": case "use": case "run": case "turn": case "jump": case "crouch": case "exit": case "get": case "drop": case "throw": case "follow": case "stop": case "sleep":
                     return "ACT";
                 case "remember": case "forget": case "goal": case "ask":
                     return "MEMORY & GOALS";
                 default:
+                    if (cmd == "hold") return "READ (poll the game)";
                     return "MISC";
             }
         }
 
         // ------------------------------------------------------------------
-        // Levenshtein (small-model misspellings) — same algorithm as Llm.cs
+        // Levenshtein (small-model misspellings) — one shared implementation in
+        // ChatSimilarity.cs (pure C#, unit-tested there).
         // ------------------------------------------------------------------
-        public static int Levenshtein(string a, string b)
-        {
-            int na = a.Length, nb = b.Length;
-            if (na == 0) return nb;
-            if (nb == 0) return na;
-            var d = new int[na + 1, nb + 1];
-            for (int i = 0; i <= na; i++) d[i, 0] = i;
-            for (int j = 0; j <= nb; j++) d[0, j] = j;
-            for (int i = 1; i <= na; i++)
-                for (int j = 1; j <= nb; j++)
-                {
-                    int cost = a[i - 1] == b[j - 1] ? 0 : 1;
-                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
-                }
-            return d[na, nb];
-        }
+        public static int Levenshtein(string a, string b) => ChatSimilarity.LevenshteinDistance(a, b);
     }
 }

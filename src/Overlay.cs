@@ -1,11 +1,13 @@
-// IMGUI overlay — config editor, live state debug, and per-instance on/off toggle.
-// Toggle with Insert. Lives in every plugin instance (one per NPC), each with its own
+// IMGUI overlay — config editor, live state debug, mind viewer (console transcript),
+// and per-instance on/off toggle. Toggle with F6 (Main.cs binds it; an older doc said
+// Insert). Lives in every plugin instance (one per NPC), each with its own
 // window; drag to move.
 //
 // Unity IMGUI in KoboldKare is limited: no TextField, TextArea, ScrollView,
 // FlexibleSpace, BeginVertical. We implement custom text input via keyboard capture,
 // custom scrollbar via GUI.Button, and use GUI.contentColor for status coloring.
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -50,78 +52,12 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // Main entry points - OnGUI is now in Main.cs (required by Unity)
         // ------------------------------------------------------------------
-
-        private void DrawOverlayWindow(int id)
-        {
-            float x = 10, y = 25, w = _overlayRect.width - 20;
-
-            // --- Tab bar ---
-            y += DrawTabBar(x, y, w);
-
-            // --- Content (scrollable) ---
-            float contentHeight = _activeTab == 1 ? 420 : (_activeTab == 2 ? 200 : 140);
-            float scrollH = _overlayRect.height - y - 10;
-            _configScrollY = Mathf.Clamp(_configScrollY, 0, Mathf.Max(0, contentHeight - scrollH));
-
-            GUI.BeginGroup(new Rect(x, y, w, scrollH), null, null);
-            float cy = -_configScrollY;
-
-            switch (_activeTab)
-            {
-                case 0: cy += DrawStateSection(x, cy, w); break;
-                case 1: cy += DrawConfigSection(x, cy, w); break;
-                case 2: cy += DrawInstancesSection(x, cy, w); break;
-            }
-
-            if (!string.IsNullOrEmpty(_overlayStatus))
-            {
-                GUI.contentColor = new Color(0.8f, 0.9f, 0.4f);
-                GUI.Label(new Rect(6, cy + 4, w, 14), _overlayStatus);
-                GUI.contentColor = Color.white;
-                cy += 16;
-            }
-
-            GUI.EndGroup();
-
-            // Scrollbar (right side)
-            if (contentHeight > scrollH)
-            {
-                float sbX = x + w - 14;
-                float sbY = y;
-                float sbH = scrollH;
-                float sbW = 12;
-                float thumbH = Mathf.Max(20, sbH * (scrollH / contentHeight));
-                float thumbY = sbY + (sbH - thumbH) * (_configScrollY / (contentHeight - scrollH));
-
-                // Track
-                GUI.Box(new Rect(sbX, sbY, sbW, sbH), "");
-
-                // Thumb
-                GUI.Box(new Rect(sbX + 1, thumbY, sbW - 2, thumbH), "");
-
-                // Click on track
-                Rect trackUp = new Rect(sbX, sbY, sbW, thumbY - sbY);
-                Rect trackDown = new Rect(sbX, thumbY + thumbH, sbW, sbY + sbH - thumbY - thumbH);
-                if (Event.current.type == EventType.MouseDown && Event.current.button == 0)
-                {
-                    if (trackUp.Contains(Event.current.mousePosition))
-                        _configScrollY -= scrollH * 0.5f;
-                    if (trackDown.Contains(Event.current.mousePosition))
-                        _configScrollY += scrollH * 0.5f;
-                }
-            }
-
-            // Mouse wheel scroll
-            if (Event.current.type == EventType.ScrollWheel && _overlayRect.Contains(Event.current.mousePosition))
-            {
-                _configScrollY -= Event.current.delta.y * 15;
-                _configScrollY = Mathf.Clamp(_configScrollY, 0, Mathf.Max(0, contentHeight - scrollH));
-                Event.current.Use();
-            }
-
-            // Drag handle at bottom
-            GUI.DragWindow(new Rect(0, _overlayRect.height - 12, _overlayRect.width, 12));
-        }
+        // NOTE: the real draw path is LLMNPCPlugin.OnGUICallback() in Main.cs —
+        // it owns tab routing, scrollbar and wheel handling THERE. A duplicate
+        // "DrawOverlayWindow" used to exist here for a GUI.Window variant that
+        // never shipped; it was deleted 2026-10-02 because dead duplicate routing
+        // kept drifting from the live one (it broke the 4-tab switch once
+        // already). Edit Main.cs for window-level chrome, this file for sections.
 
         // ------------------------------------------------------------------
         // Tab bar
@@ -129,8 +65,8 @@ namespace KKLLMNPC
 
         private float DrawTabBar(float x, float y, float w)
         {
-            string[] tabs = { "State", "Config", "Instances" };
-            float tabW = w / 3f - 4;
+            string[] tabs = { "State", "Mind", "Config", "Instances" };
+            float tabW = w / tabs.Length - 4;
 
             GUILayout.BeginHorizontal();
             for (int i = 0; i < tabs.Length; i++)
@@ -168,8 +104,8 @@ namespace KKLLMNPC
             GUI.contentColor = Color.white;
             y += 16;
 
-            // Content box
-            float boxH = 90;
+            // Content box (8 rows × 14px + padding)
+            float boxH = 120;
             GUI.BeginGroup(new Rect(x, y, w, boxH), null, null);
             GUI.Box(new Rect(0, 0, w, boxH), "");
 
@@ -182,6 +118,10 @@ namespace KKLLMNPC
             {
                 GUI.Label(new Rect(6, cy, w, 14), "thread: " + (_currentInstance.IsThreadAlive ? "running" : "dead") +
                                 "  vision: " + (_currentInstance.VisionBusy ? "busy" : "idle"));
+                cy += 14;
+                GUI.contentColor = _currentInstance.EndpointStatusText().StartsWith("ok") ? new Color(0.3f, 0.9f, 0.3f) : new Color(0.9f, 0.4f, 0.3f);
+                GUI.Label(new Rect(6, cy, w, 14), "endpoint: " + _currentInstance.EndpointStatusText());
+                GUI.contentColor = Color.white;
                 cy += 14;
                 GUI.Label(new Rect(6, cy, w, 14), "blocked: " + (string.IsNullOrEmpty(_currentInstance.BlockedInfo) ? "—" : _currentInstance.BlockedInfo));
                 cy += 14;
@@ -203,6 +143,67 @@ namespace KKLLMNPC
         }
 
         // ------------------------------------------------------------------
+        // Mind tab — the console transcript (what it typed / what came back)
+        // plus the latest vision frame + caption. The NPC's whole mind used to
+        // be visible only in the BepInEx log; this mirrors it in-game live.
+        // ------------------------------------------------------------------
+
+        private List<string> _mindLines;
+        private int _mindVersion = -1;
+
+        private float DrawMindSection(float x, float y, float w)
+        {
+            GUI.Box(new Rect(x, y, w, 16), "— mind — console transcript + eyes —");
+            y += 18;
+
+            var npc = _currentInstance;
+            if (npc == null)
+            {
+                GUI.Label(new Rect(x, y, w, 16), "no active instance");
+                return 22;
+            }
+
+            // Eyes: latest vision caption (this old IMGUI build has no image API —
+            // GUIContent/DrawTexture are stripped — so the frame itself stays in
+            // BepInEx/plugins/KKLLMNPC_frames/ when DebugDumpFrames is on).
+            string caption = npc.VisionCaption ?? "";
+            if (caption.Length > 110) caption = caption.Substring(0, 110) + "…";
+            GUI.contentColor = new Color(0.7f, 0.8f, 0.9f);
+            GUI.Label(new Rect(x, y, w, 16), "eyes: " + (caption.Length > 0 ? caption : "—"));
+            GUI.contentColor = Color.white;
+            y += 22;
+
+            // Transcript: refresh only when the version moved (OnGUI is per-frame).
+            if (_mindLines == null || npc.ConsoleVersion != _mindVersion)
+            {
+                _mindVersion = npc.ConsoleVersion;
+                var copy = npc.ConsoleTranscriptCopy();
+                var keep = new List<string>();
+                for (int i = Math.Max(0, copy.Count - 18); i < copy.Count; i++) keep.Add(copy[i]);
+                _mindLines = keep;
+            }
+
+            GUI.Box(new Rect(x, y, w, 264), "");
+            GUI.BeginGroup(new Rect(x, y, w, 264), null, null);
+            float cy = 3;
+            foreach (var line in _mindLines)
+            {
+                if (cy > 250) break;
+                // role| payload — color the model's own words white, prompts gray.
+                bool isAssistant = line.StartsWith("assistant|");
+                GUI.contentColor = isAssistant ? Color.white
+                    : line.StartsWith("system|") ? new Color(0.5f, 0.5f, 0.6f)
+                    : new Color(0.65f, 0.72f, 0.8f);
+                GUI.Label(new Rect(6, cy, w - 12, 14), line);
+                GUI.contentColor = Color.white;
+                cy += 14;
+            }
+            GUI.EndGroup();
+
+            return 22 + 264 + 6;
+        }
+
+        // ------------------------------------------------------------------
         // Config tab (with live editing)
         // ------------------------------------------------------------------
 
@@ -212,45 +213,75 @@ namespace KKLLMNPC
             GUI.Box(new Rect(x, y, w, 16), "— config (click a value to edit) —");
             y += 18;
 
-            float boxH = 380;
+            // Reflection over every bound config field (_cfg*) — BepInEx handles
+            // serialize/parse, so this covers ALL sections ([LLM], [Console],
+            // [Vision], [Senses], …) instead of a hand-picked 16 that silently
+            // clipped at the box height. This old BepInEx build's ConfigFile has no
+            // public Bindings; the entry objects themselves (ConfigEntryBase:
+            // GetSerializedValue/SetSerializedValue/Definition/SettingType) suffice.
+            var entries = new List<ConfigEntry>();
+            try
+            {
+                var fields = typeof(LLMNPCPlugin).GetFields(
+                    System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                System.Array.Sort(fields, (fa, fb) => string.CompareOrdinal(fa.Name, fb.Name));
+                foreach (var f in fields)
+                {
+                    if (f.Name == null || !f.Name.StartsWith("_cfg")) continue;
+                    object ceb = null;
+                    try { ceb = f.GetValue(this); } catch (Exception) { continue; }
+                    if (ceb == null) continue;
+                    var cebType = ceb.GetType();
+                    var getSer = cebType.GetMethod("GetSerializedValue", Type.EmptyTypes);
+                    var setSer = cebType.GetMethod("SetSerializedValue", new[] { typeof(string) });
+                    var defProp = cebType.GetProperty("Definition");
+                    var typeProp = cebType.GetProperty("SettingType");
+                    if (getSer == null || setSer == null || defProp == null) continue;
+                    string key = "?", section = "?";
+                    Type valueType = typeof(string);
+                    try
+                    {
+                        var def = defProp.GetValue(ceb, null);
+                        if (def != null)
+                        {
+                            key = (def.GetType().GetProperty("Key").GetValue(def, null) as string) ?? key;
+                            section = (def.GetType().GetProperty("Section").GetValue(def, null) as string) ?? section;
+                        }
+                        if (typeProp != null) valueType = (Type)typeProp.GetValue(ceb, null);
+                    }
+                    catch (Exception) { }
+                    bool password = key.Equals("ApiKey", StringComparison.OrdinalIgnoreCase);
+                    bool isBool = valueType == typeof(bool);
+                    // Long text (the system prompts, incl. vision prompt) goes multiline.
+                    bool multiline = key.IndexOf("Prompt", StringComparison.Ordinal) >= 0;
+                    string value = "";
+                    try
+                    {
+                        value = (string)getSer.Invoke(ceb, null) ?? "";
+                    }
+                    catch (Exception) { }
+                    string label = (section == "?" && key == "?" ? f.Name.Substring(3) : section + "." + key);
+                    // BoolGetter/setter: use the captured entry object, not the field.
+                    object entryObj = ceb;
+                    entries.Add(new ConfigEntry(label, value, multiline, password, isBool, () =>
+                    {
+                        try { return (string)getSer.Invoke(entryObj, null) == "True"; } catch (Exception) { return false; }
+                    }, v =>
+                    {
+                        try { setSer.Invoke(entryObj, new object[] { v }); } catch (Exception) { }
+                    }));
+                }
+            }
+            catch (Exception e) { _overlayStatus = "config list: " + e.Message; }
+
+            float boxH = entries.Count * 18 + 10;
+            if (boxH < 40) boxH = 40;
             GUI.BeginGroup(new Rect(x, y, w, boxH), null, null);
             GUI.Box(new Rect(0, 0, w, boxH), "");
 
             float cy = 3;
             int lineH = 18;
-
-            // Config entries
-            ConfigEntry[] entries = new ConfigEntry[]
-            {
-                new ConfigEntry("Endpoint", _cfgEndpoint.Value, false, false, false, () => false, v => { _cfgEndpoint.Value = v; }),
-                new ConfigEntry("Model", _cfgModel.Value, false, false, false, () => false, v => { _cfgModel.Value = v; }),
-                new ConfigEntry("ApiKey", _cfgApiKey.Value, false, true, false, () => false, v => { _cfgApiKey.Value = v; }),
-                new ConfigEntry("System prompt", _cfgSystem.Value, true, false, false, () => false, v => { _cfgSystem.Value = v; }),
-                new ConfigEntry("ThinkInterval", _cfgThinkInterval.Value.ToString("F2", CultureInfo.InvariantCulture), false, false, false, () => false, v => {
-                    if (float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out float f)) _cfgThinkInterval.Value = Mathf.Clamp(f, 0.05f, 10f);
-                }),
-                new ConfigEntry("MaxTokens", _cfgMaxTokens.Value.ToString(CultureInfo.InvariantCulture), false, false, false, () => false, v => {
-                    if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)) _cfgMaxTokens.Value = Mathf.Clamp(n, 64, 32768);
-                }),
-                new ConfigEntry("Temperature", _cfgTemperature.Value.ToString("F2", CultureInfo.InvariantCulture), false, false, false, () => false, v => {
-                    if (float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out float f)) _cfgTemperature.Value = Mathf.Clamp(f, 0f, 2f);
-                }),
-                new ConfigEntry("SendImage", _cfgSendImage.Value.ToString(), false, false, true, () => _cfgSendImage.Value, v => { _cfgSendImage.Value = v == "True"; }),
-                new ConfigEntry("Vision", _cfgVision.Value.ToString(), false, false, true, () => _cfgVision.Value, v => { _cfgVision.Value = v == "True"; }),
-                new ConfigEntry("Vision debug", _cfgVisionDebug.Value.ToString(), false, false, true, () => _cfgVisionDebug.Value, v => { _cfgVisionDebug.Value = v == "True"; }),
-                new ConfigEntry("Vision model", _cfgVisModel.Value, false, false, false, () => false, v => { _cfgVisModel.Value = v; }),
-                new ConfigEntry("Vision endpoint", _cfgVisEndpoint.Value, false, false, false, () => false, v => { _cfgVisEndpoint.Value = v; }),
-                new ConfigEntry("Vision prompt", _cfgVisionPrompt.Value, true, false, false, () => false, v => { _cfgVisionPrompt.Value = v; }),
-                new ConfigEntry("Image size", _cfgImageSize.Value.ToString(CultureInfo.InvariantCulture), false, false, false, () => false, v => {
-                    if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)) _cfgImageSize.Value = Mathf.Max(1, n);
-                }),
-                new ConfigEntry("CamNearClip", _cfgCamNearClip.Value.ToString("F2", CultureInfo.InvariantCulture), false, false, false, () => false, v => {
-                    if (float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out float f)) _cfgCamNearClip.Value = f;
-                }),
-                new ConfigEntry("CamForward", _cfgCamForward.Value.ToString("F2", CultureInfo.InvariantCulture), false, false, false, () => false, v => {
-                    if (float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out float f)) _cfgCamForward.Value = f;
-                }),
-            };
 
             foreach (var entry in entries)
             {
@@ -333,7 +364,8 @@ namespace KKLLMNPC
             GUI.Box(new Rect(x, y, w, 16), "— instances —");
             y += 18;
 
-            float boxH = 140;
+            float boxH;
+            lock (_instancesLock) boxH = _instances.Count * 28 + 56; // rows + say-to row + padding
             GUI.BeginGroup(new Rect(x, y, w, boxH), null, null);
             GUI.Box(new Rect(0, 0, w, boxH), "");
 
@@ -404,9 +436,51 @@ namespace KKLLMNPC
                 }
             }
 
+            // Direct line to the selected NPC — one chat-only instance (the in-game
+            // room chat always broadcasts; addressed lines land on one agent, but
+            // this works even when the NPC doesn't know its own name yet).
+            if (_currentInstance != null)
+            {
+                string targetName = "this NPC";
+                try { targetName = _currentInstance.GetMyName() ?? targetName; } catch (Exception) { }
+                string label = "say to " + targetName + ":";
+                GUI.Label(new Rect(6, cy + 4, 150, 16), label);
+                var injectEntry = new ConfigEntry("inject:" + targetName, "", false, false, false, () => false, v =>
+                {
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(v)) _currentInstance.InjectPlayerChat(v);
+                        _overlayStatus = "sent to " + targetName + ": " + v;
+                    }
+                    catch (Exception) { }
+                });
+                Rect sayRect = new Rect(160, cy, w - 176, 20);
+                bool editing = (_editingFieldId == injectEntry.Hash);
+                GUI.color = editing ? new Color(0.2f, 0.4f, 0.7f, 0.5f) : new Color(0.15f, 0.15f, 0.15f, 0.3f);
+                GUI.Box(sayRect, editing ? _editingValue : "click, type, Enter to send");
+                GUI.color = Color.white;
+                if (!editing && Event.current.type == EventType.MouseDown && sayRect.Contains(Event.current.mousePosition))
+                {
+                    _editingFieldId = injectEntry.Hash;
+                    _editingEntry = injectEntry;
+                    _editingValue = "";
+                    _editingCursor = 0;
+                    _editingSelStart = -1;
+                    _editingSelEnd = -1;
+                    Event.current.Use();
+                }
+                if (editing)
+                {
+                    Rect inputRect = new Rect(sayRect.x + 2, sayRect.y + 2, sayRect.width - 4, sayRect.height - 4);
+                    HandleTextInput(inputRect);
+                    GUI.Label(inputRect, _editingValue);
+                }
+                cy += 24;
+            }
+
             GUI.EndGroup();
 
-            return boxH + 4;
+            return boxH + (cy > boxH ? cy - boxH + 28 : 0) + 4;
         }
 
         // ------------------------------------------------------------------

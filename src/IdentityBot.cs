@@ -35,6 +35,8 @@ namespace KKLLMNPC
         private string _nickName;
         private int _retries;
         private int _backoffSeconds = 2; // exponential backoff: 2s → 4s → 8s … cap 30s
+        private int _startAttempts;
+        private bool _gaveUp;
         private const int MaxBackoffSeconds = 30;
         private DateTime _lastStartUtc = DateTime.MinValue;
         private readonly object _stateLock = new object();
@@ -55,6 +57,21 @@ namespace KKLLMNPC
             lock (_stateLock)
             {
                 if (_inRoom && _roomName == roomName && _nickName == nickName) return;
+                // Give up for the session after repeated failed starts — the fallback
+                // (owner-attributed chat) covers everything, and a bot that can never
+                // reach the room just produces a fresh client + "starting" line per say.
+                if (_gaveUp) return;
+                if (!_inRoom) _startAttempts++;
+                if (_startAttempts > 5)
+                {
+                    _gaveUp = true;
+                    _running = false;
+                    try { if (_client != null) _client.Disconnect(DisconnectCause.DisconnectByClientLogic); } catch (Exception) { }
+                    if (_pump != null) { try { _pump.Join(200); } catch (Exception) { } _pump = null; }
+                    _client = null;
+                    _npc.Logger.LogWarning("[identity-bot] gave up after " + (_startAttempts - 1) + " failed starts — owner-attributed chat for the rest of the session");
+                    return;
+                }
                 // Exponential backoff: while the bot is down, the fallback (owner-attributed
                 // chat) covers us, so there's no point hammering Photon every turn.
                 if ((DateTime.UtcNow - _lastStartUtc).TotalSeconds < _backoffSeconds) return;

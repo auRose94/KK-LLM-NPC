@@ -40,6 +40,17 @@ namespace KKLLMNPC
             t.Start();
         }
 
+        // Console-mode variant: no perception JSON exists here, so the musing prompt
+        // gets the same state anchor the model itself reads (goal/in_station/horny/
+        // follow) plus the needs snapshot — enough for "it's cozy by the fire" tier
+        // remarks without paying a full perception build.
+        private void MaybeCreativeCommentaryConsole()
+        {
+            string anchor = StateAnchorLine();
+            if (string.IsNullOrEmpty(anchor)) return; // idle tick — worker sees "{}", fine: quiet moments get quiet thoughts
+            MaybeCreativeCommentary(anchor.Replace("\n", " "));
+        }
+
         // Ask the model for a short unprompted reaction to its current perception,
         // then say it out loud. No act schema — pure voice.
         private void CreativeCommentaryWorker(string percep)
@@ -147,6 +158,7 @@ namespace KKLLMNPC
                         {
                             _lastAnswer = Sanitize(content.Trim());
                             RememberFact("Q: " + q + " A: " + _lastAnswer);
+                            WakeFromSleep(); // don't sit on an undelivered answer while sleeping
                             Logger.LogInfo("asked: " + q + " => " + _lastAnswer);
                         }
                     }
@@ -214,9 +226,17 @@ namespace KKLLMNPC
             }
             if (finalName == null)
             {
-                string hint = LLMNPCPlugin.InstanceSuffix.Length > 0 ? LLMNPCPlugin.InstanceSuffix : null;
-                finalName = NameRegistry.Unique(baseName, hint);
-                Logger.LogInfo("KKLLMNPC: name selection: unique fallback '" + finalName + "' (LLM unavailable, name collision, or disabled)");
+                // First: a curated flavorful name (a numbered "Kobold-100" reads like
+                // a unit label — the mechanical style is the LAST resort).
+                try { finalName = NameRegistry.TryFlavor(); } catch (Exception) { }
+                if (finalName != null)
+                    Logger.LogInfo("KKLLMNPC: name selection: flavor fallback '" + finalName + "' (LLM unavailable or rejected)");
+                else
+                {
+                    string hint = LLMNPCPlugin.InstanceSuffix.Length > 0 ? LLMNPCPlugin.InstanceSuffix : null;
+                    finalName = NameRegistry.Unique(baseName, hint);
+                    Logger.LogInfo("KKLLMNPC: name selection: unique fallback '" + finalName + "' (LLM unavailable, name collision, or disabled)");
+                }
             }
 
             if (!string.Equals(finalName, _npcName, StringComparison.Ordinal))
@@ -226,6 +246,7 @@ namespace KKLLMNPC
             }
             // Identity bot AFTER the final name so chat attribution is right from
             // the NPC's very first line. Main thread (Photon).
+            RegisterAgentBody(_currentKoboldId, _npcName); // name may have changed — keep the sibling registry current
             try { RunOnMainThread(() => { EnsureIdentityBot(); return true; }, 5000); }
             catch (Exception e) { Logger.LogWarning("identity bot: " + e.Message); }
 
@@ -257,7 +278,8 @@ namespace KKLLMNPC
                     "Species: " + (species ?? "kobold") + ". " +
                     "Personality: " + (traits ?? "unknown") + ". " +
                     (taken.Length > 0 ? "These names are TAKEN, do not use them: " + taken + ". " : "") +
-                    "Reply with ONE name only: 2-12 letters or digits, no spaces, no punctuation, no explanation.";
+                    "Reply with ONE name only: 2-12 letters or digits, no spaces, no punctuation, no explanation. " +
+                    "Never the species name with a number attached (like Kobold2) — invent an actual name.";
 
                 var payload = new Dictionary<string, object>
                 {
@@ -267,7 +289,10 @@ namespace KKLLMNPC
                         new Dictionary<string, object> { ["role"] = "user", ["content"] = prompt },
                     },
                     ["temperature"] = 0.9,
-                    ["max_tokens"] = 16,
+                    // Thinking families need many tokens for reasoning before the
+                    // name — 16 dies inside the marker block, which is why name
+                    // selection historically failed on reasoner models.
+                    ["max_tokens"] = FamilyProfile.EmitsThinkBlocks ? 320 : 16,
                     ["stream"] = false,
                 };
                 string body = Json.Write(payload);
@@ -283,11 +308,34 @@ namespace KKLLMNPC
                     if (choices == null || choices.Count == 0) return null;
                     var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
                     if (msg == null) return null;
-                    string content = (msg.GetValueOrDefault("content") as string)?.Trim().Trim('"', '\'', ' ', '\n', '\r', '\t');
-                    // Validate: alphanumeric, 2-10 chars
-                    if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 10
+                    // Strip reasoning markers first: on reasoner models the content
+                    // must not be validated as a whole (the marker text would never
+                    // match the name pattern).
+                    string content = ModelFamilies.StripThinkBlocks((msg.GetValueOrDefault("content") as string) ?? "");
+                    content = content.Trim().Trim('"', '\'', ' ', '\n', '\r', '\t');
+                    // Validate: alphanumeric, 2-12 chars (matches the prompt)
+                    if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 12
                         && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9]+$"))
                     {
+                        // A name that is just the species ± a digit ("Kobold", "Kobold2",
+                        // "AbsolB3") is a unit label, not a name — reject it and let the
+                        // caller re-roll. (A deliberately robotic persona can still end
+                        // up with one via the mechanical fallback.)
+                        string lower = content.ToLowerInvariant();
+                        string speciesLower = species != null ? species.ToLowerInvariant() : "";
+                        if (speciesLower.Length == 0) speciesLower = MyName().ToLowerInvariant();
+                        bool unitLabel = false;
+                        if (speciesLower.Length > 0 && lower.StartsWith(speciesLower))
+                        {
+                            string tail = content.Substring(speciesLower.Length).TrimStart('-');
+                            unitLabel = tail.Length == 0
+                                || (tail.Length > 0 && System.Text.RegularExpressions.Regex.IsMatch(tail, "^[0-9]+$"));
+                        }
+                        if (unitLabel)
+                        {
+                            Logger.LogInfo("[" + MyName() + "] LLM name rejected (species unit label): '" + content + "'");
+                            return null;
+                        }
                         Logger.LogInfo("[" + MyName() + "] LLM chose name: " + content);
                         return content;
                     }
@@ -318,6 +366,16 @@ namespace KKLLMNPC
             {
                 try
                 {
+                    // Mind wipe requested while we were mid-turn? Apply it HERE — the
+                    // boundary between turns is the only place where transcript, facts,
+                    // chat and target maps aren't being read by anything.
+                    string pendingWhy = _pendingMindReset;
+                    if (pendingWhy != null)
+                    {
+                        _pendingMindReset = null;
+                        ResetMindNow(pendingWhy);
+                    }
+
                     // Wait until we have a main-thread context before doing anything.
                     if (!MainReady) { Thread.Sleep(1000); continue; }
 
@@ -363,9 +421,28 @@ namespace KKLLMNPC
                     // for exactly the data it needs, in a command → output → command stream.
                     if (ConsoleEnabled())
                     {
+                        // `sleep <secs>` deferral: no turn, no vision pass — the model
+                        // asked to be left alone until this time (or a chat/world event
+                        // wakes it early). Poll on the normal interval.
+                        if (Time.unscaledTime < _sleepUntilTime)
+                        {
+                            Thread.Sleep((int)(GetDynamicThinkInterval() * 1000));
+                            continue;
+                        }
+                        // Circuit breaker: endpoint failing — wait it out instead of
+                        // paying a full retry run per tick.
+                        if (EndpointBlocked())
+                        {
+                            Thread.Sleep(2000);
+                            continue;
+                        }
                         if (_cfgVision.Value) MaybeStartVisionPass(); // keep captions/facts flowing
                         ConsoleTurn();
                         UpdateActivity();
+                        // Free commentary lives here too now (legacy mode kept its own call
+                        // below). Console mode never builds a perception JSON, so give the
+                        // musing worker the tiny state line instead of "{}".
+                        MaybeCreativeCommentaryConsole();
                         Thread.Sleep((int)(GetDynamicThinkInterval() * 1000));
                         continue;
                     }
@@ -405,6 +482,10 @@ namespace KKLLMNPC
                     if (_cfgVision.Value) MaybeStartVisionPass();
                     MaybeCreativeCommentary(userJson);
 
+                    // Skip the whole legacy round while the circuit breaker is open —
+                    // perception building costs main-thread time the dead endpoint
+                    // isn't worth.
+                    if (EndpointBlocked()) { Thread.Sleep(1000); continue; }
                     string reply = QueryLLM(userJson, imageB64);
                     if (reply == null) { Thread.Sleep((int)(GetDynamicThinkInterval() * 1000)); continue; }
 
@@ -565,7 +646,7 @@ namespace KKLLMNPC
             string persona = !string.IsNullOrEmpty(_persona) ? "\n" + _persona : "";
             return "You are an NPC in KoboldKare. Reply with ONE JSON object only. No markdown, no prose, no explanation." + vision + persona +
                 "\nJSON shape: {\"progress\":\"done|blocked|ongoing|changed\",\"why\":\"<short>\",\"thought\":\"<next step>\",\"action\":\"<tool>\",...tool params...,\"plan\":[{\"action\":\"...\",...}]}" +
-                "\nTools: go_to(name|id,at) walk(duration,turn_deg,jump) follow(on) survey look_around look(yaw,pitch) exit_station crouch interact(id) grab drop say remember(mem) forget(mem) set_goal(goal) complete_goal(note) drop_goal(reason) ask(q) status stop none" +
+                "\nTools: go_to(name|id,at) walk(duration,turn_deg,jump) follow(on) survey look_around look(yaw,pitch) grab drop throw radar(filter) exit_station crouch interact(id) say remember(mem) forget(mem) set_goal(goal) complete_goal(note) drop_goal(reason) ask(q) report_issue(msg) status stop none" +
                 "\nRules: progress/why/thought required. action must be a tool name. Use go_to for ALL travel (it routes 3D: stairs/ramps/floors, whole scene). walk = short nudge only. Use id from nearby for specific objects. Keep plan steps ≤4. 'say' posts to chat." +
                 "\nGOAL: you have ONE stored goal (perception 'goal'). set_goal ONCE, then each turn take the next step; complete_goal when done; drop_goal to abandon. Don't re-declare it. If 'nudge' appears, change what you do." +
                 "\nPriorities: (1) player talked → say, (2) needs.eggs says READY_TO_LAY → nest (with an empty belly a nest CANNOT work — never seek one then), (3) horny → play station, (4) player nearby → go_to+say, (5) explore." +
@@ -576,6 +657,7 @@ namespace KKLLMNPC
                 "\nIf perception has 'model_error', fix your JSON format. Never repeat the same failed action." +
                 "\nStation rules: When in_station=true, stay unless your NEW goal differs from the station type. Player 'stay' = stay until they say 'leave'. exit_station or walk(jump) leaves a station." +
                 "\nNearby tags: ':busy'=in use, ':needs_buy'=must buy contract first, ':not_built'=machine not constructed yet, ':done'=already bought." +
+                "\nMoney: your body carries coins (needs block/economy perception). Buy contracts/shop items with buy(name or id) once within arm's reach — walk there first. Coins are yours; no one approves purchases." +
                 "\nFood: blenders don't make food from nothing — drop a food item into it. If ':not_built', find its ConstructionContract first." +
                 "\nCompaction: if 'compaction' appears in perception, your context is being compressed — be extra terse, use fewer facts, shorter thoughts.";
         }
@@ -688,12 +770,17 @@ namespace KKLLMNPC
                     },
                     ["response_format"] = responseFormat,
                     ["temperature"] = Math.Round((double)_cfgTemperature.Value, 2),
-                    ["max_tokens"] = _cfgMaxTokens.Value,
+                    // Reasoning families burn tokens on hidden CoT before the action
+                    // JSON — the floor covers reasoning plus the answer.
+                    ["max_tokens"] = ModelFamilies.EffectiveMaxTokens(_cfgMaxTokens.Value, 1024, FamilyProfile),
                     ["stream"] = true,
                 };
                 string toolName = null, toolArgs = null;
                 string fullContent = PostChatPayload(payload, out toolName, out toolArgs);
                 if (fullContent == null) return null;
+                // Reasoning markers must never reach tool/JSON parsing — strip early
+                // so reasoning-only replies land in the empty-content retry path.
+                fullContent = ModelFamilies.StripThinkBlocks(fullContent);
 
                 var message = new Dictionary<string, object> { ["role"] = "assistant" };
                 if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;
@@ -746,7 +833,8 @@ namespace KKLLMNPC
                     retries: 3, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
                     onRetry: r => Logger.LogDebug("LLM retry: " + r),
                     onError: ReportEndpointError);
-                if (rawResponse == null) return null;
+                if (rawResponse == null) { NoteEndpointFail(); return null; }
+                NoteEndpointOk(); // reachable — reset the cross-tick breaker even if parsing then fails
                 return ParseChatResponse(rawResponse, out toolName, out toolArgs);
             }
             catch (Exception e)
@@ -774,6 +862,46 @@ namespace KKLLMNPC
                 Logger.LogWarning("LLM endpoint: " + (err ?? "unknown error"));
             }
             catch (Exception) { }
+        }
+
+        // ---- endpoint circuit breaker ----
+        // SafeHttp retries a single query; these gate the think LOOP between queries
+        // so a dead/offline server costs a periodic probe instead of a full retry
+        // run every think tick. Console and legacy loop both call EndpointBlocked().
+        private void NoteEndpointFail()
+        {
+            _endpointFails++;
+            // 5, 10, 20, 40 → capped at 30s. Pure C# math (no Mathf.Pow doubt).
+            float block = Mathf.Min(30f, 5f * (1 << Math.Min(3, _endpointFails - 1)));
+            _endpointBlockUntil = Time.unscaledTime + block;
+            if (_endpointFails == 1 || _endpointFails % 5 == 0)
+                Logger.LogWarning("[" + MyName() + "] endpoint unreachable (" + _endpointFails +
+                    " consecutive fails) — deferring queries for " + Mathf.RoundToInt(block) + "s");
+        }
+
+        private void NoteEndpointOk()
+        {
+            if (_endpointFails != 0)
+            {
+                Logger.LogInfo("[" + MyName() + "] endpoint healthy again (was " + _endpointFails + " consecutive fails)");
+                _endpointFails = 0;
+                _endpointBlockUntil = 0f;
+            }
+        }
+
+        private bool EndpointBlocked()
+        {
+            return Time.unscaledTime < _endpointBlockUntil;
+        }
+
+        // One-line endpoint health for overlays/status commands.
+        internal string EndpointStatusText()
+        {
+            if (string.IsNullOrEmpty(Val(_cfgEndpoint))) return "not configured";
+            float left = _endpointBlockUntil - Time.unscaledTime;
+            if (left > 0f) return "DOWN — retrying in " + Mathf.RoundToInt(left) + "s (" + _endpointFails + " fails)";
+            if (_endpointFails > 0) return "flaky (" + _endpointFails + " fails)";
+            return "ok";
         }
 
         // Parse a raw chat-completions response (SSE stream or plain JSON) into the
@@ -941,7 +1069,7 @@ namespace KKLLMNPC
             if (progress.Length > 0 || why.Length > 0)
                 PushHistory("eval", progress + (why.Length > 0 ? " (" + why + ")" : ""));
 
-            Logger.LogInfo($"act: thought=\"{_lastThought}\"");
+            Logger.LogDebug($"act: thought=\"{_lastThought}\"");
 
             // Fuzzy match the root action for small models.
             string rootAction = args.S("action", "none");
@@ -1002,7 +1130,7 @@ namespace KKLLMNPC
             string action = args.S("action", "none");
             string say = args.S("say", "");
             _lastAction = action;
-            Logger.LogInfo($"  step action={action}" + (say.Length > 0 ? $" say=\"{say}\"" : ""));
+            Logger.LogDebug($"  step action={action}" + (say.Length > 0 ? $" say=\"{say}\"" : ""));
             if (!string.IsNullOrEmpty(say))
             {
                 try { RunTool("say", new TextArgs(say)); } catch (Exception e) { Logger.LogWarning("say: " + e.Message); }
@@ -1012,6 +1140,9 @@ namespace KKLLMNPC
                 object result = RunTool(action, args);
                 string summary = SummarizeResult(action, result);
                 PushHistory(action, summary);
+                // Tool-log ring: attached to report_issue blocks so the dev sees what
+                // the model tried right before it got frustrated.
+                RecordToolCall(action + "(" + ToolArgsBrief(args) + ") -> " + (string.IsNullOrEmpty(summary) ? "ok" : summary));
                 // Notable outcomes become facts the model can recall later.
                 if (action == "interact" && summary != null && summary.StartsWith("used ", StringComparison.Ordinal))
                 {
@@ -1125,7 +1256,7 @@ namespace KKLLMNPC
                              : null;
                     }
                     // Single action like {"walk": {"speed":1}} — treat first known key as action.
-                    foreach (var k in new[] { "go_to", "walk", "follow", "walk_ray", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "say", "status" })
+                    foreach (var k in new[] { "go_to", "walk", "follow", "walk_ray", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "throw", "say", "emote", "status", "radar", "report_issue" })
                         if (parsed.ContainsKey(k))
                         {
                             var inner = new Dictionary<string, object> { ["action"] = k, ["thought"] = "implicit" };
@@ -1237,7 +1368,7 @@ namespace KKLLMNPC
             // action from a known tool key when no explicit action line was present.
             if (action == null)
             {
-                string[] knownTools = new[] { "say", "go_to", "walk", "follow", "walk_ray", "survey", "remember", "ask", "look_around", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "status", "none" };
+                string[] knownTools = new[] { "say", "emote", "go_to", "walk", "follow", "walk_ray", "survey", "remember", "ask", "look_around", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "throw", "status", "radar", "report_issue", "none" };
                 foreach (var k in knownTools)
                 {
                     string v;
@@ -1266,6 +1397,8 @@ namespace KKLLMNPC
                                     else if (bool.TryParse(content2.Trim(), out onVal))
                                         fields["on"] = onVal.ToString();
                                 }
+                                else if (k == "report_issue") { if (!fields.ContainsKey("msg")) fields["msg"] = content2; }
+                                else if (k == "radar") { if (!fields.ContainsKey("filter")) fields["filter"] = content2; }
                             }
                         }
                         break;
@@ -1339,6 +1472,15 @@ namespace KKLLMNPC
                 case "complete_goal":
                 case "drop_goal":
                 case "forget":
+                case "radar":
+                case "sonar":
+                case "report_issue":
+                case "report":
+                case "bug_report":
+                case "complain":
+                case "throw":
+                case "toss":
+                case "activate":
                 case "none": return true;
                 default: return false;
             }
@@ -1407,7 +1549,7 @@ namespace KKLLMNPC
             if (aliases.TryGetValue(s, out alias)) return alias;
             // Substring containment: "go" in a blob → go_to, "walk" in a blob → walk, etc.
             // Order matters: check longer matches first to avoid "go" matching before "go_to".
-            var orderedList = new List<string> { "complete_goal", "set_goal", "drop_goal", "exit_station", "look_around", "walk_ray", "go_to", "follow", "move_to", "interact", "remember", "forget", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "say", "stop", "status", "none", "ask" };
+            var orderedList = new List<string> { "complete_goal", "set_goal", "drop_goal", "exit_station", "look_around", "walk_ray", "go_to", "follow", "move_to", "interact", "remember", "forget", "survey", "walk", "look", "jump", "crouch", "grab", "drop", "throw", "say", "stop", "status", "radar", "report_issue", "none", "ask" };
             foreach (var mt in ModuleRegistry.ModuleToolNames()) if (!orderedList.Contains(mt)) orderedList.Add(mt);
             string[] ordered = orderedList.ToArray();
             foreach (var tool in ordered)
@@ -1453,26 +1595,21 @@ namespace KKLLMNPC
                 case "complete_goal":
                 case "drop_goal":
                 case "forget":
+                case "radar":
+                case "sonar":
+                case "report_issue":
+                case "report":
+                case "bug_report":
+                case "complain":
+                case "throw":
+                case "toss":
+                case "activate":
                 case "none": return true;
                 default: return false;
             }
         }
 
-        private static int Levenshtein(string a, string b)
-        {
-            int na = a.Length, nb = b.Length;
-            if (na == 0) return nb; if (nb == 0) return na;
-            var d = new int[na + 1, nb + 1];
-            for (int i = 0; i <= na; i++) d[i, 0] = i;
-            for (int j = 0; j <= nb; j++) d[0, j] = j;
-            for (int i = 1; i <= na; i++)
-                for (int j = 1; j <= nb; j++)
-                {
-                    int cost = a[i - 1] == b[j - 1] ? 0 : 1;
-                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
-                }
-            return d[na, nb];
-        }
+        private static int Levenshtein(string a, string b) => ChatSimilarity.LevenshteinDistance(a, b);
 
         // Strip leading chat-template control/role tokens from a reply, e.g.
         // "self<|message|>progress: ongoing..." or "<|user|>...". Repeatedly removes
@@ -1607,7 +1744,7 @@ namespace KKLLMNPC
             if (string.IsNullOrEmpty(text)) return null;
             string lower = text.ToLowerInvariant();
             // Try each known tool and see if it appears in the text with args.
-            string[] tools = new[] { "go_to", "walk", "follow", "walk_ray", "survey", "interact", "move_to", "look_around", "look", "remember", "say", "ask", "jump", "exit_station", "crouch", "grab", "drop", "stop", "status", "none" };
+            string[] tools = new[] { "go_to", "walk", "follow", "walk_ray", "survey", "interact", "move_to", "look_around", "look", "remember", "say", "ask", "jump", "exit_station", "crouch", "grab", "drop", "throw", "stop", "status", "report_issue", "radar", "none" };
             foreach (var tool in tools)
             {
                 // Look for "tool(args...)" pattern.
@@ -1636,6 +1773,8 @@ namespace KKLLMNPC
                         else if (tool == "go_to" && !d.ContainsKey("name")) d["name"] = payload;
                         else if (tool == "remember" && !d.ContainsKey("mem")) d["mem"] = payload;
                         else if (tool == "ask" && !d.ContainsKey("q")) d["q"] = payload;
+                        else if (tool == "report_issue" && !d.ContainsKey("msg")) d["msg"] = payload;
+                        else if (tool == "radar" && !d.ContainsKey("filter")) d["filter"] = payload;
                         else if (tool == "follow")
                         {
                             // Parse "on:true" / "on:false" into the dict.
@@ -1733,7 +1872,17 @@ namespace KKLLMNPC
                     case "interact": return ToolInteract(p);
                     case "grab": return ToolGrab(p);
                     case "drop": return ToolDrop();
+                case "radar":
+                case "sonar": return ToolRadar(p);
+                case "report_issue":
+                case "bug_report":
+                case "complain":
+                case "report": return ToolReportIssue(p);
+                case "throw":
+                case "toss":
+                case "activate": return ToolThrow(p);
                     case "say": return ToolSay(p);
+                    case "emote": return ToolEmote(p.S("text", p.S("say", p.S("message", ""))));
                     case "status": return ToolStatus();
                     case "none": return new { ok = true };
                     default:
@@ -1745,7 +1894,7 @@ namespace KKLLMNPC
                                 return moduleResult;
                         }
                         // Model was asked for act= but produced a legacy/unknown name.
-                        SetModelError("Invalid action '" + name + "'. Valid actions: go_to, walk, follow, stop, survey, look_around, look, exit_station, crouch, interact, grab, drop, say, remember, forget, set_goal, complete_goal, drop_goal, ask, status, none, " + string.Join(", ", ModuleRegistry.ModuleToolNames()) + ".");
+                        SetModelError("Invalid action '" + name + "'. Valid actions: go_to, walk, follow, stop, survey, look_around, look, exit_station, crouch, interact, grab, drop, say, emote, buy, remember, forget, set_goal, complete_goal, drop_goal, ask, status, none, " + string.Join(", ", ModuleRegistry.ModuleToolNames()) + ".");
                         Logger.LogWarning("unknown action: " + name);
                         return new { ok = false, reason = "unknown_tool", tool = name };
                 }
@@ -1804,7 +1953,7 @@ namespace KKLLMNPC
             // Module-registered tools extend the action enum and the param schema —
             // each module ships its own file, no edits to this method needed.
             var extra = ModuleRegistry.ModuleToolNames();
-            var enumVals = new List<object> { "go_to", "walk", "follow", "stop", "survey", "remember", "ask", "look_around", "look", "exit_station", "crouch", "interact", "grab", "drop", "say", "status", "none" };
+            var enumVals = new List<object> { "go_to", "walk", "follow", "stop", "survey", "remember", "ask", "look_around", "look", "exit_station", "crouch", "interact", "grab", "drop", "throw", "say", "emote", "radar", "report_issue", "status", "none" };
             foreach (var e in extra) if (!enumVals.Contains(e)) enumVals.Add(e);
 
             var props = new Dictionary<string, object>
@@ -1814,6 +1963,7 @@ namespace KKLLMNPC
                 // movement/say params) first means even a truncated call still acts.
                 ["action"] = new Dictionary<string, object> { ["type"] = "string", ["enum"] = enumVals.ToArray() },
                 ["say"] = Str("say", "optional <10 words — posts to the real in-game chat window AND a speech bubble"),
+                ["text"] = Str("text", "emote: what your body does, spoken as *action* not dialog (e.g. 'curls up by the fire')"),
                 ["name"] = Str("name", "go_to: place to reach by name — 'bed' 'toilet' 'bath' 'nest' 'sex' 'seat' 'door' 'bodyswap', a PLAYER'S chat name (host or from 'people'), or any usable's name"),
                 ["id"] = Num("id", "go_to/interact: the numeric 'id' of a specific object from your 'nearby' or survey result — use this to target an exact object instead of matching by name (e.g. go_to id:3, interact id:2)"),
                 ["at"] = Num("at", "go_to: stop this many meters SHORT of the target (default 1 — so you reach the object, not bump it; 0 = go right up to it)"),
@@ -1831,6 +1981,8 @@ namespace KKLLMNPC
                 ["yaw_deg"] = Num("yaw_deg", "look abs yaw"),
                 ["pitch_deg"] = Num("pitch_deg", "look abs pitch"),
                 ["sweep"] = Num("sweep", "look_around: degrees to sweep around (default 120)"),
+                ["filter"] = Str("filter", "radar: glyphs to show in the sonar map, e.g. 'U,P' or words (wall/sill/window/usable/kobold/player) — 'all' clears; a set filter also applies to the perception sonar until cleared"),
+                ["msg"] = Str("msg", "report_issue: ONE line — what is broken/frustrating and what you tried (e.g. 'go_to(name=blender) kept picking the far blender'); files a note the human maintainers read later"),
             };
             // Merge module-registered tool parameters (thrust, erection, plant, ...).
             foreach (var kv in ModuleRegistry.ModuleParamSchemas())

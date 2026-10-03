@@ -69,7 +69,7 @@ namespace KKLLMNPC
                     || IsDickInside();
                 int throttleTicks = active ? 1 : 2;
                 bool useCache = _tick - _lastFullPerceptionTick < throttleTicks && _cachedPerception != null;
-                if (useCache) Logger.LogInfo($"perception cache hit (active={active}, throttle={throttleTicks})");
+                if (useCache) Logger.LogDebug($"perception cache hit (active={active}, throttle={throttleTicks})");
                 if (useCache)
                 {
                     // Lightweight update: keep cached perception but refresh dynamic fields
@@ -78,6 +78,7 @@ namespace KKLLMNPC
                     {
                         cached["tick"] = _tick;
                         cached["yaw"] = F(_yawDeg);
+                        cached["facing"] = Compass.FacingText(BodyYaw());
                         // Update needs quickly without full raycast
                         var needs = new
                         {
@@ -85,6 +86,7 @@ namespace KKLLMNPC
                             horniness = HorninessText(),
                             eggs = F(GetEggVolume(_kobold)) + (IsReadyToLayEgg(_kobold) ? " ready_to_lay" : ""),
                             crouch = F(_crouch),
+                            awake = UptimeText(),
                         };
                         cached["needs"] = needs;
                         try { ModuleRegistry.RunPerception(this, cached); } catch (Exception e) { Logger.LogDebug("module perception (cache): " + e.Message); }
@@ -94,7 +96,7 @@ namespace KKLLMNPC
                 var full = BuildPerceptionSafe(includeImage);
                 _lastFullPerceptionTick = _tick;
                 _cachedPerception = full is Dictionary<string, object> d ? d : null;
-                if (!useCache) Logger.LogInfo($"perception full build (active={active})");
+                if (!useCache) Logger.LogDebug($"perception full build (active={active})");
                 return full;
             }
             catch (Exception e) { return new { ok = false, reason = "perception_error", msg = e.Message }; }
@@ -138,22 +140,17 @@ namespace KKLLMNPC
                         {
                             if (hit.collider != null)
                             {
-                                // Physical footprint of the thing the ray hit — the model
-                                // can tell a wall from a chair from a kobold by dimensions,
-                                // and plan around corners, not just names.
-                                var rend = hit.collider.GetComponentInChildren<Renderer>();
-                                if (rend != null) { size = rend.bounds.size; wpos = rend.bounds.center; }
-                                facingDeg = hit.collider.transform.eulerAngles.y;
-
-                                var kb = hit.collider.GetComponentInParent<Kobold>();
-                                var usable = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
-                                if (kb != null) { kind = IsPlayerKobold(kb) ? "p" : "k"; name = kb.name; }
-                                else if (usable != null) { kind = "u"; name = usable.name; }
-                                else
+                                // Name/kind/size/facing are memoized per collider
+                                // (GetRayHitInfo) — the render-bounds walk cost a full
+                                // child-hierarchy traversal per ray per build otherwise.
+                                // The sill check stays per hit: it reads the ray's own
+                                // hit point, which varies with aim.
+                                var info = GetRayHitInfo(hit.collider);
+                                size = info.Size; facingDeg = info.Facing;
+                                if (info.HasRender) wpos = info.Center;
+                                name = info.Name; kind = info.Kind;
+                                if (name.Length == 0)
                                 {
-                                    // Low anonymous geometry — sill/window, step-over and
-                                    // climbable — NOT an obstacle worth narrating. Neutral
-                                    // letter so models don't dramatize it as a "barrier".
                                     float topH = ProbeSurfaceTop(hit.point);
                                     if (topH < 1.35f) kind = "s";
                                 }
@@ -211,8 +208,32 @@ namespace KKLLMNPC
             result["body"] = DescribeEquipment();
             result["pos"] = new { x = F(pos.x), y = F(pos.y), z = F(pos.z) };
             result["yaw"] = F(_yawDeg);
-            if (_cfgRadarEnabled != null && _cfgRadarEnabled.Value)
-                result["radar"] = BuildRadarMap(rays);
+            // Facing in fixed compass words (N = +Z world): readable even when the
+            // degree number itself means nothing to the model.
+            result["facing"] = Compass.FacingText(BodyYaw());
+            var nearby = DescribeNearby();
+            result["nearby"] = nearby;
+            bool radarOn = _cfgRadarEnabled != null && _cfgRadarEnabled.Value;
+            if (radarOn) result["radar"] = BuildSonarMap(nearby, _radarFilter);
+            if (radarOn && _radarFilter != null && _radarFilter.Count > 0)
+                result["radar_filter"] = string.Join(",", new List<string>(_radarFilter).ToArray());
+            // What's in OUR hands (HoldSense): the only window the model has onto its
+            // own grip — items float ~1m ahead on a spring; grabbing a person matters.
+            var held = HeldScan();
+            if (held.Count > 0)
+            {
+                var heldList = new List<object>();
+                foreach (var h in held)
+                    heldList.Add(new { n = h.Name, kind = h.Kind, d = F(h.Dist), x = F(h.Pos.x), y = F(h.Pos.y), z = F(h.Pos.z),
+                        what = h.Victim != null ? (h.IsPlayerVictim ? "THE PLAYER's body — limp while held; let go when they ask" : "a PERSON (" + h.Name + ") — drop when they ask; never throw unasked") : null });
+                result["holding"] = heldList;
+            }
+            // Watched, not memorized: what your player is visibly doing right now.
+            // Other players know objectives by watching — this gives the AI the same
+            // capacity without a single fact or memory.
+            try { var pa = BuildPlayerActivity(); if (pa != null) result["player_activity"] = pa; } catch (Exception) { }
+            // The game's real quest chain: the objective letter scroll (DragonMail).
+            try { var q = QuestSense.Perceive(); if (q != null) result["quest"] = q; } catch (Exception) { }
             result["blocked"] = _blockedInfo;
             result["walls"] = _bumpInfo;
             result["ground"] = ground;
@@ -231,11 +252,22 @@ namespace KKLLMNPC
                     ? F(eggVol) + "ml READY_TO_LAY — belly full, find a nest now"
                     : F(eggVol) + "ml belly not full — a nest WON'T work yet; seek a nest ONLY when it says READY_TO_LAY",
                 crouch = F(_crouch),
+                // The game ships no day/night clock (verified in the game source) —
+                // "how long has this body been awake in this session" is the honest
+                // stand-in a model can reason with ("I've been here 2h, time to nap").
+                awake = UptimeText(),
             };
             // Shared full-scene walk map state (all agents): building %, or ready.
             try { result["map"] = WorldMap.StatusText(); } catch (Exception) { }
-            // Follow state (if active the body stays near the host player).
-            result["follow"] = new { on = _followMode, player_d = (_followMode && _followDist >= 0f) ? F(_followDist) : null };
+            // Follow state (if active the body stays near the host player). Breaking
+            // free is a real, teachable action — models got stuck in follow feeling
+            // unable to move their own way.
+            result["follow"] = new
+            {
+                on = _followMode,
+                player_d = (_followMode && _followDist >= 0f) ? F(_followDist) : (object)null,
+                note = _followMode ? "you're attached to the player — follow(on:false) frees your own movement (follow(on:true) re-attaches)" : null,
+            };
             result["consumed"] = DrainReagentEvents();
             result["in_station"] = IsInAnimationStation();
             bool inStn = IsInAnimationStation();
@@ -246,6 +278,16 @@ namespace KKLLMNPC
                     : elapsed < 3600f ? ((int)(elapsed / 60)) + "m" + ((int)(elapsed % 60)) + "s"
                     : ((int)(elapsed / 3600)) + "h" + ((int)((elapsed % 3600) / 60)) + "m";
                 result["station_use"] = _stationPurpose + " (" + PurposeFor(_stationPurpose) + ") for " + elapsedStr;
+                // Occupancy of the set you're animating in: your slot + the partner's.
+                try
+                {
+                    if (_charAnimator != null && _charAnimator.TryGetAnimationStationSet(out var curSet))
+                    {
+                        string slots = StationSlotsForSet(curSet, true);
+                        if (slots != null) result["station_slots"] = slots;
+                    }
+                }
+                catch (Exception) { }
             }
             else result["station_use"] = null;
             result["station_stay"] = _stayInStation;
@@ -263,8 +305,6 @@ namespace KKLLMNPC
             if (nudge != null) result["nudge"] = nudge;
             result["grabbed"] = _kobold.grabbed;
             result["rays"] = rays;
-            var nearby = DescribeNearby();
-            result["nearby"] = nearby;
             // Other players in the room: chat name + body mesh + where they are, so the
             // model can recognize and address them (and go_to their name) without
             // mistaking them for the host player or for wild kobolds.
@@ -320,54 +360,158 @@ namespace KKLLMNPC
             return _yawDeg;
         }
 
-        // ASCII radar: top-down grid from level-row rays.  Center = '@' (self).
-        // Row 0 = farthest forward (in front of the kobold).
-        private string BuildRadarMap(List<object> rays)
+        // ------------------------------------------------------------------
+        // sonar — the north-up ASCII map (never rotates with facing)
+        // ------------------------------------------------------------------
+        // The old radar plotted the camera-FOV ray fan, so the drawn cone rotated
+        // and went blank as the body turned — the "sonar slides around" complaint.
+        // This version: a fixed 16-ray COMPASS sweep (absolute world bearings) plus
+        // the exact 'nearby' entries, both plotted into a grid whose top edge is
+        // always north (+Z). The map never rotates; only the dots slide as the
+        // body moves, and the model's facing is the arrow beside @.
+        private sealed class CompassSweep
         {
-            int S = _cfgRadarSize != null && _cfgRadarSize.Value > 0 ? _cfgRadarSize.Value : 10;
-            float scale = _cfgRadarScale != null && _cfgRadarScale.Value > 0f ? _cfgRadarScale.Value : 1.2f;
+            public float Time, Range;
+            public Vector3 Origin;
+            public float[] Dist = new float[16];
+            public string[] Kind = new string[16];
+            public string[] Name = new string[16];
+        }
+
+        private CompassSweep _compassSweep;
+
+        // Raycast the 16 compass directions (N, NNE, ... NNW) from chest height.
+        // Memoized 0.5s so perception + an on-demand console `sonar` cost one sweep.
+        // Main thread (Physics), like the rest of perception.
+        private CompassSweep RunCompassSweep()
+        {
+            if (!IsAlive(_kobold) || !IsAlive(_head)) return null;
+            if (_compassSweep != null && Time.unscaledTime - _compassSweep.Time < 0.5f)
+                return _compassSweep;
+            var sw = new CompassSweep
+            {
+                Time = Time.unscaledTime,
+                Range = Mathf.Min(_cfgRayRange != null ? _cfgRayRange.Value : 25f, 15f),
+                Origin = _head.position + Vector3.up * -0.15f, // chest height
+            };
+            for (int i = 0; i < 16; i++)
+            {
+                float ang = i * 22.5f; // absolute world bearing, 0 = +Z = north
+                sw.Dist[i] = sw.Range;
+                sw.Kind[i] = "open";
+                var dir = Quaternion.Euler(0, ang, 0) * Vector3.forward;
+                RaycastHit hit;
+                if (!Physics.Raycast(sw.Origin, dir, out hit, sw.Range, ~0, QueryTriggerInteraction.Ignore)
+                    || IsOwnCollider(hit.collider))
+                    continue;
+                sw.Dist[i] = hit.distance;
+                try
+                {
+                    var info = GetRayHitInfo(hit.collider);
+                    string nm = info.Name ?? "";
+                    string ik = info.Kind ?? "w";
+                    if (ik == "w" && nm.Length == 0 && ProbeSurfaceTop(hit.point) < 1.35f)
+                        ik = "s"; // low sill — window sill / counter edge
+                    switch (ik)
+                    {
+                        case "p": sw.Kind[i] = "player"; break;
+                        case "k": sw.Kind[i] = "kobold"; break;
+                        case "u": sw.Kind[i] = "usable"; break;
+                        case "s": sw.Kind[i] = "sill"; break;
+                        case "V": sw.Kind[i] = "window"; break;
+                        default: sw.Kind[i] = "wall"; break;
+                    }
+                    sw.Name[i] = nm;
+                }
+                catch (Exception) { sw.Kind[i] = "wall"; }
+            }
+            _compassSweep = sw;
+            return sw;
+        }
+
+        private static char SonarGlyph(string kind)
+        {
+            switch (kind)
+            {
+                case "wall": return 'W';
+                case "sill": return 'S';
+                case "usable": return 'U';
+                case "player": return 'P';
+                case "kobold": return 'K';
+                case "window": return 'V';
+                default: return '?';
+            }
+        }
+
+        // Build the sonar: north-up fixed grid + facing arrow + inline legend
+        // (the "table of contents" for the map). The filter is a set of allowed
+        // glyph letters (W/S/U/K/P/V) — null/empty shows everything.
+        private string BuildSonarMap(List<object> nearbyList, HashSet<string> filter)
+        {
+            if (!IsAlive(_kobold)) return null;
+            CompassSweep sw = RunCompassSweep();
+
+            int S = _cfgRadarSize != null && _cfgRadarSize.Value > 0 ? _cfgRadarSize.Value : Consts.DefaultRadarSize;
+            float scale = _cfgRadarScale != null && _cfgRadarScale.Value > 0f ? _cfgRadarScale.Value : Consts.DefaultRadarScale;
             char[,] grid = new char[S * 2 + 1, S * 2 + 1];
             for (int r = 0; r <= S * 2; r++)
                 for (int c = 0; c <= S * 2; c++)
                     grid[r, c] = '.';
-            grid[S, S] = '@';
+            Vector3 me = _kobold.transform.position;
 
-            float yaw = _yawDeg;
-            foreach (var obj in rays)
+            // Plot: world offset (meters from body) → cell. Row decreases toward
+            // +Z (north = up), column increases toward +X (east = right).
+            if (sw != null)
             {
-                if (!(obj is Dictionary<string, object> ray)) continue;
-                string p = ""; string k = "n";
-                float a = 0, d = 999;
-                if (ray.ContainsKey("p")) p = ray["p"].ToString();
-                if (ray.ContainsKey("k")) k = ray["k"].ToString();
-                if (ray.ContainsKey("a")) { try { a = Convert.ToSingle(ray["a"]); } catch { } }
-                if (ray.ContainsKey("d")) { try { d = Convert.ToSingle(ray["d"]); } catch { } }
-                if (p != "l" || k == "n") continue;
-
-                float worldAngle = yaw + a;
-                float rad = worldAngle * (float)(Math.PI / 180.0);
-                float gx = Mathf.Sin(rad) * d / scale;   // +X = right in Unity
-                float gz = Mathf.Cos(rad) * d / scale;
-                int col = Mathf.RoundToInt(gx) + S;
-                int row = S - Mathf.RoundToInt(gz);
-                if (row < 0 || row > S * 2 || col < 0 || col > S * 2) continue;
-                if (row == S && col == S) continue;
-
-                char ch;
-                switch (k)
+                for (int i = 0; i < 16; i++)
                 {
-                    case "w": ch = 'W'; break;
-                    case "u": ch = 'U'; break;
-                    case "k": ch = 'K'; break;
-                    case "p": ch = 'P'; break;
-                    case "barrier":
-                    case "s": ch = 'S'; break;
-                    default: ch = '?'; break;
+                    if (sw.Kind[i] == "open") continue;
+                    float angRad = i * 22.5f * (float)(Math.PI / 180.0);
+                    Vector3 at = me + new Vector3(Mathf.Sin(angRad), 0f, Mathf.Cos(angRad)) * sw.Dist[i];
+                    SonarPlot(grid, S, scale, me, at, SonarGlyph(sw.Kind[i]), filter);
                 }
-                grid[row, col] = ch;
+            }
+            // Exact neighbor positions (from the 'nearby' list) beat the sweep's
+            // surface points — draw them after so they win the cell.
+            if (nearbyList != null)
+            {
+                foreach (var obj in nearbyList)
+                {
+                    var d = obj as Dictionary<string, object>;
+                    if (d == null) continue;
+                    float x, z;
+                    if (!SonarTryF(d, "x", out x) || !SonarTryF(d, "z", out z)) continue;
+                    string lbl = "";
+                    try { if (d.ContainsKey("k") && d["k"] != null) lbl = d["k"].ToString().ToLowerInvariant(); } catch (Exception) { }
+                    char ch = lbl.Contains("player") ? 'P' : lbl.Contains("kobold") ? 'K' : 'U';
+                    SonarPlot(grid, S, scale, me, new Vector3(x, me.y, z), ch, filter);
+                }
+            }
+
+            // Self marker + facing arrow (first free cell along the quantized facing;
+            // the exact angle is in the header line).
+            grid[S, S] = '@';
+            float yaw = BodyYaw();
+            int fdx, fdz;
+            Compass.OffsetOf(Compass.IndexOf(yaw), out fdx, out fdz);
+            char arrow = Compass.GlyphOf(yaw);
+            for (int step = 1; step <= 2; step++)
+            {
+                int row = S - fdz * step, col = S + fdx * step;
+                if (row < 0 || row > S * 2 || col < 0 || col > S * 2) break;
+                if (grid[row, col] != '.') continue;
+                grid[row, col] = arrow;
+                break;
             }
 
             var sb = new System.Text.StringBuilder();
+            sb.Append("sonar: NORTH-UP, FIXED (never rotates) — top=N(+Z) right=E(+X); cell=" + F(scale) + "m; dots slide only when you move");
+            if (filter != null && filter.Count > 0)
+                sb.Append("; filter:" + string.Join("", new List<string>(filter).ToArray()));
+            sb.Append('\n');
+            sb.Append("you=@ facing ").Append(Compass.FacingText(BodyYaw()))
+              .Append(" (arrow beside @)").Append(" | @=you ^=facing W=wall S=sill U=usable K=kobold P=player V=window .=clear")
+              .Append('\n');
             for (int r = 0; r <= S * 2; r++)
             {
                 for (int c = 0; c <= S * 2; c++)
@@ -375,6 +519,28 @@ namespace KKLLMNPC
                 if (r < S * 2) sb.AppendLine();
             }
             return sb.ToString();
+        }
+
+        // One dot onto the sonar grid; bounds-checked, respects the filter.
+        private static void SonarPlot(char[,] grid, int S, float scale, Vector3 me, Vector3? at, char ch, HashSet<string> filter)
+        {
+            if (filter != null && filter.Count > 0 && !filter.Contains(ch.ToString())) return;
+            if (!at.HasValue) return;
+            int col = S + Mathf.RoundToInt((at.Value.x - me.x) / scale);
+            int row = S - Mathf.RoundToInt((at.Value.z - me.z) / scale);
+            if (row < 0 || row > S * 2 || col < 0 || col > S * 2) return;
+            if (row == S && col == S) return;
+            grid[row, col] = ch;
+        }
+
+        // Float-from-dict helper (nearby entries store F()-formatted strings).
+        private static bool SonarTryF(Dictionary<string, object> d, string key, out float v)
+        {
+            v = 0f;
+            object o;
+            if (d == null || !d.TryGetValue(key, out o) || o == null) return false;
+            return float.TryParse(o.ToString(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out v);
         }
 
         // True when k is the local human player's body (not an AI/wild kobold).
@@ -411,7 +577,7 @@ namespace KKLLMNPC
                 catch (Exception) { }
                 string nick = pv.Owner.NickName;
                 if (string.IsNullOrEmpty(nick)) return null;
-                nick = new string(nick.Where(c => c >= 32 && c < 127).ToArray()).Trim();
+                nick = TextUtil.AsciiSafe(nick).Trim();
                 return nick.Length > 0 ? nick : null;
             }
             catch (Exception) { return null; }
@@ -519,6 +685,65 @@ namespace KKLLMNPC
             RaycastHit h;
             return Physics.Raycast(origin, dir, out h, range, ~0, QueryTriggerInteraction.Ignore) && !IsOwnCollider(h.collider);
         }
+
+        // ------------------------------------------------------------------
+        // Ray-hit cache. Perception rays need name/kind/size/facing of whatever
+        // they struck; resolving that costs GetComponentInChildren<Renderer> (a
+        // child-hierarchy walk) plus two GetComponentInParent hops PER RAY PER
+        // BUILD. Memoize by collider instance id with a short TTL so entity
+        // changes (a kobold becoming player-possessed, a machine being named)
+        // are re-derived rather than frozen forever.
+        // ------------------------------------------------------------------
+        private sealed class RayHitInfo
+        {
+            public string Name = "";
+            public string Kind = "w";
+            public Vector3 Size;
+            public Vector3 Center;
+            public float Facing;
+            public bool HasRender;
+            public float Born;
+        }
+        private readonly Dictionary<int, RayHitInfo> _rayHitCache = new Dictionary<int, RayHitInfo>(256);
+        private const float RayHitInfoTtl = 5f;
+        private const int RayHitInfoCacheCap = 512;
+
+        // Main-thread only (perception builds already run there).
+        private RayHitInfo GetRayHitInfo(Collider c)
+        {
+            int id = c.GetInstanceID();
+            RayHitInfo info;
+            if (_rayHitCache.TryGetValue(id, out info) && Time.unscaledTime - info.Born <= RayHitInfoTtl)
+                return info;
+
+            info = new RayHitInfo { Born = Time.unscaledTime };
+            try
+            {
+                var kb = c.GetComponentInParent<Kobold>();
+                var usable = c.GetComponent<GenericUsable>() ?? c.GetComponentInParent<GenericUsable>();
+                if (kb != null) { info.Kind = IsPlayerKobold(kb) ? "p" : "k"; info.Name = kb.name; }
+                else if (usable != null) { info.Kind = "u"; info.Name = usable.name; }
+                else
+                {
+                    // Window/glass fixtures: named geometry, so classify by name and
+                    // flag it — the model then knows 'V' can't be walked through the
+                    // way a doorway can (this is what made "the one by the window"
+                    // impossible to match before).
+                    string fw = FixtureWordOf(c);
+                    if (fw != null && IsWindowWord(fw)) { info.Kind = "V"; info.Name = fw; }
+                }
+                var rend = c.GetComponentInChildren<Renderer>();
+                if (rend != null) { info.Size = rend.bounds.size; info.Center = rend.bounds.center; info.HasRender = true; }
+                info.Facing = c.transform.eulerAngles.y;
+            }
+            catch (Exception) { }
+            if (_rayHitCache.Count >= RayHitInfoCacheCap) _rayHitCache.Clear();
+            _rayHitCache[id] = info;
+            return info;
+        }
+
+        // Drop all memoized ray-hit state (world reload, body loss).
+        internal void ClearRayHitCache() { _rayHitCache.Clear(); }
 
         // Prose description of the surrounding area, aimed at visionless models:
         // a full 360° chest-height sweep that reports how far each cardinal direction
@@ -671,7 +896,7 @@ namespace KKLLMNPC
         {
             to.y = 0;
             if (to.sqrMagnitude < 0.0001f) return "here";
-            float ang = Mathf.Atan2(to.x, to.z) * 57.29578f;
+            float ang = Mathf.Atan2(to.x, to.z) * Consts.Rad2Deg;
             float rel = Mathf.DeltaAngle(BodyYaw(), ang);
             float a = Mathf.Abs(rel);
             if (a < 22.5f) return "ahead";
@@ -687,7 +912,7 @@ namespace KKLLMNPC
         {
             to.y = 0;
             if (to.sqrMagnitude < 0.0001f) return 0f;
-            float ang = Mathf.Atan2(to.x, to.z) * 57.29578f;
+            float ang = Mathf.Atan2(to.x, to.z) * Consts.Rad2Deg;
             return Mathf.DeltaAngle(BodyYaw(), ang);
         }
 
@@ -751,6 +976,9 @@ namespace KKLLMNPC
                 || s.Contains("mattress") || s.Contains("nap") || s.Contains("rest")) return "bed";
             if (s.Contains("toilet") || s.Contains("potty") || s.Contains("bathroom")) return "toilet";
             if (s.Contains("tub") || s.Contains("bath") || s.Contains("shower")) return "bath";
+            // The objective LETTER BOX — explicitly distinct from the sell machine
+            // (MailMachine): the letterbox is where DragonMail letters arrive.
+            if (s.Contains("mailbox") || s.Contains("letterbox") || s.Contains("postbox")) return "mailbox";
             // "ovi" catches OvipositionSpot/OviSpot (egg-laying station).
             if (s.Contains("laying") || s.Contains("ovip") || s.Contains("ovi") || s.Contains("nest") || s.Contains("egg")) return "nest";
             if (s.Contains("kitchen") || s.Contains("stove") || s.Contains("blender") || s.Contains("food") || s.Contains("cook")) return "food";
@@ -774,6 +1002,7 @@ namespace KKLLMNPC
                 case "machine": return "mounted play/farming";
                 case "toilet": return "relief";
                 case "bath": return "clean";
+                case "mailbox": return "the objective LETTERBOX — interact it to get mail/objective letters (safe; NOT the sell machine)";
                 case "seat": return "just a seat";
                 case "door": return "passage";
                 case "food": return "cook/eat — drop items into blender to make edible food";
@@ -818,18 +1047,28 @@ namespace KKLLMNPC
                     string nm = k != null ? k.name : u.name;
                     bool isPlayer = k != null && IsPlayerKobold(k);
                     if (isPlayer) { label = "player"; sawPlayer = true; nm = CleanName(nm); }
+                    else if (k != null && LLMNPCPlugin.IsClaimedByAnyLLM(k.GetInstanceID()))
+                    {
+                        // A sibling agent — name it, so the model can tell fellow
+                        // NPC minds from wild kobolds and address them in chat.
+                        string agentName = AgentNameForBody(k.GetInstanceID());
+                        if (!string.IsNullOrEmpty(agentName) && !string.Equals(agentName, MyName(), StringComparison.OrdinalIgnoreCase))
+                        { label = "kobold-agent"; nm = agentName; }
+                    }
                     string hrel = d.y > 0.5f ? "above" : d.y < -0.5f ? "below" : "level";
 
                     // Bounds + world position + facing so the model can plan around it
                     // (a chair you can slide past vs. a cabinet you route around).
+                    // Memoized per collider (GetRayHitInfo) — same cache as the rays.
                     Vector3 bsize = Vector3.zero;
                     Vector3 bpos = c.transform.position;
                     float bfacing = 0f;
                     try
                     {
-                        var rend = c.GetComponentInChildren<Renderer>();
-                        if (rend != null) { bsize = rend.bounds.size; bpos = rend.bounds.center; }
-                        bfacing = c.transform.eulerAngles.y;
+                        var rhi = GetRayHitInfo(c);
+                        bsize = rhi.Size;
+                        if (rhi.HasRender) bpos = rhi.Center;
+                        bfacing = rhi.Facing;
                     }
                     catch (Exception) { }
 
@@ -878,6 +1117,14 @@ namespace KKLLMNPC
 
                         info = kind + stateTag + (canUse ? "" : ":busy")
                                + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : "");
+                        // Live occupancy for station machines ("slots 1/2 taken — you ARE
+                        // in one") so ':busy' can't be misread as 'no room for me'.
+                        try
+                        {
+                            string slots = StationSlotsFor(u);
+                            if (slots != null) info += " | " + slots;
+                        }
+                        catch (Exception) { }
                         // Landmark memory: remember where things are once seen.
                         if (canUse) RememberFact(kind + " is " + RelBearing(d) + " here");
                     }
@@ -951,11 +1198,32 @@ namespace KKLLMNPC
             {
                 string hostName = null;
                 try { if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null) hostName = pp.kobold.name; } catch (Exception) { }
-                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                foreach (var k in SceneCache.Find<Kobold>(2f))
                 {
                     if (k == null || k == _kobold) continue;
                     string nick = KoboldOwnerNick(k);
-                    if (string.IsNullOrEmpty(nick)) continue; // wild/AI body or another NPC
+                    if (string.IsNullOrEmpty(nick))
+                    {
+                        // A fellow AGENT (one of this plugin's NPC bodies) is visible by
+                        // its chat name — siblings can address each other in chat.
+                        int kId = k.GetInstanceID();
+                        if (!LLMNPCPlugin.IsClaimedByAnyLLM(kId)) continue; // wild/AI body
+                        string agentName = AgentNameForBody(kId);
+                        if (string.IsNullOrEmpty(agentName) || string.Equals(agentName, MyName(), StringComparison.OrdinalIgnoreCase)) continue;
+                        nick = agentName;
+                        Vector3 da = k.transform.position - _kobold.transform.position;
+                        list.Add(new Dictionary<string, object>
+                        {
+                            ["name"] = nick,
+                            ["body"] = CleanName(k.name),
+                            ["d"] = F(da.magnitude),
+                            ["dir"] = RelBearing(da),
+                            ["dir_deg"] = F(RelBearingDeg(da)),
+                            ["who"] = "another agent kobold (an LLM NPC) — a person like you; address them with: their name + a comma",
+                        });
+                        if (list.Count >= 8) break;
+                        continue;
+                    }
                     Vector3 d = k.transform.position - _kobold.transform.position;
                     bool isHost = hostName != null && string.Equals(k.name, hostName, StringComparison.Ordinal);
                     var entry = new Dictionary<string, object>
@@ -975,9 +1243,255 @@ namespace KKLLMNPC
             return list;
         }
 
+        // ------------------------------------------------------------------
+        // landmark hints — what stands near a station, in words ("window, mailbox")
+        // ------------------------------------------------------------------
+        // The player says "the one by the window" and the NPC needs machine-readable
+        // clues to match it. For each station we scan a small radius for named
+        // fixtures/neighbors and remember the closest distinct words, memoized per
+        // station object (machines don't move — the scan is cheap after the first).
+        private static readonly string[] FixtureKeywords =
+        {
+            "window", "glass", "pane", "mirror", "mailbox", "mail", "fridge", "refrigerator",
+            "sink", "shelf", "rack", "bench", "counter", "table", "stair", "lamp",
+            "rug", "carpet", "fence", "gate", "trailer", "shed", "silo", "barn",
+            "poster", "screen", "crate", "barrel", "sign", "vent", "pillar", "tree",
+            "stove", "toilet", "tub",
+        };
+        private static readonly Dictionary<string, string> FixtureCanonical = new Dictionary<string, string>
+        {
+            { "glass", "window" }, { "pane", "window" }, { "mail", "mailbox" },
+            { "refrigerator", "fridge" }, { "carpet", "rug" },
+        };
+        // Words that never name a real landmark (Unity boilerplate).
+        private static readonly HashSet<string> FixtureJunk = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "collider", "mesh", "gameobject", "plane", "cube", "sphere", "cylinder", "capsule",
+            "quad", "object", "trigger", "empty", "bone", "hitbox", "collision", "box",
+            "point", "light", "camera", "canvas", "terrain", "water", "statue", "model",
+            "geometry", "collision", "parent", "root", "child", "group",
+        };
+
+        // First fixture-ish keyword found in an object name ("SM_Window_01" →
+        // "window"), canonicalized; null when the name carries no landmark word.
+        internal static string FixtureWordFor(string anyName)
+        {
+            string s = CleanName(anyName ?? "").ToLowerInvariant();
+            if (s.Length < 3) return null;
+            foreach (var k in FixtureKeywords)
+            {
+                if (!s.Contains(k)) continue;
+                string w;
+                return FixtureCanonical.TryGetValue(k, out w) ? w : k;
+            }
+            return null;
+        }
+
+        // Nearest fixture keyword across the collider's parent chain (windows and
+        // furniture live on parent nodes, colliders on leaves).
+        internal static string FixtureWordOf(Collider c)
+        {
+            try
+            {
+                for (var t = c != null ? c.transform : null; t != null; t = t.parent)
+                {
+                    string w = FixtureWordFor(t.gameObject.name);
+                    if (w != null) return w;
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        // Letters-only leftover of a name ("Blender-2" → "blender"); null when empty.
+        internal static string NameWord(string name)
+        {
+            string s = CleanName(name ?? "").ToLowerInvariant();
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char ch in s) if (char.IsLetter(ch)) sb.Append(ch);
+            string w = sb.ToString();
+            if (w.Length < 3 || FixtureJunk.Contains(w)) return null;
+            return w;
+        }
+
+        // The window-family fixture words that classify as a 'V' (window/glass)
+        // ray kind — solid geometry the model must not try to walk through.
+        internal static bool IsWindowWord(string w)
+        {
+            return w == "window" || w == "glass" || w == "pane" || w == "mirror";
+        }
+
+        private struct LandmarkHintMemo { public float SavedAt; public string Hints; }
+        private readonly Dictionary<int, LandmarkHintMemo> _landmarkHints = new Dictionary<int, LandmarkHintMemo>(64);
+        private readonly Collider[] _hintScanBuf = new Collider[64]; // per-instance: commands run on the LLM thread
+        private const float LandmarkHintTtl = 15f;
+        private const float LandmarkHintRadius = 4.5f;
+
+        // Scan around a station for the 1-2 closest distinct landmark words.
+        // Main thread (Physics); memoized per station object.
+        private string LandmarkHintsFor(GenericUsable u)
+        {
+            try
+            {
+                if (u == null || u.transform == null) return null;
+                int key = u.GetInstanceID();
+                LandmarkHintMemo memo;
+                if (_landmarkHints.TryGetValue(key, out memo) && Time.unscaledTime - memo.SavedAt < LandmarkHintTtl)
+                    return memo.Hints;
+
+                Vector3 pos = u.transform.position;
+                int n = Physics.OverlapSphereNonAlloc(pos, LandmarkHintRadius, _hintScanBuf, ~0, QueryTriggerInteraction.Collide);
+                var bestDist = new Dictionary<string, float>(StringComparer.Ordinal);
+                for (int i = 0; i < n; i++)
+                {
+                    Collider c = _hintScanBuf[i];
+                    if (c == null || IsOwnCollider(c)) continue;
+                    Kobold kb = null;
+                    try { kb = c.GetComponentInParent<Kobold>(); } catch (Exception) { }
+                    if (kb != null) continue; // bodies move — never a stable clue
+                    string word = null;
+                    try
+                    {
+                        var ou = c.GetComponent<GenericUsable>() ?? c.GetComponentInParent<GenericUsable>();
+                        if (ou != null && ou.transform != null && ou.GetInstanceID() == key) continue; // the station itself
+                        if (ou != null)
+                        {
+                            string cn = CleanName(ou.name);
+                            word = FixtureWordFor(cn) ?? (ClassifyUsable(cn) != "usable" ? ClassifyUsable(cn) : NameWord(cn));
+                        }
+                        else word = FixtureWordOf(c);
+                    }
+                    catch (Exception) { continue; }
+                    if (string.IsNullOrEmpty(word) || word.Length < 3) continue;
+                    float d = Vector3.Distance(c.transform.position, pos);
+                    float prev;
+                    if (!bestDist.TryGetValue(word, out prev) || d < prev) bestDist[word] = d;
+                }
+                // Closest distinct words first, at most two — hints are for matching
+                // a player's description ("the one by the window"), not a census.
+                var ordered = new List<string>(bestDist.Keys);
+                ordered.Sort((a, b) => bestDist[a].CompareTo(bestDist[b]));
+                while (ordered.Count > 2) ordered.RemoveAt(ordered.Count - 1);
+                string hints = ordered.Count > 0
+                    ? "near " + string.Join(", ", ordered.ToArray())
+                    : null;
+                if (_landmarkHints.Count > 256) _landmarkHints.Clear();
+                _landmarkHints[key] = new LandmarkHintMemo { SavedAt = Time.unscaledTime, Hints = hints };
+                return hints;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // Stable short address the model (and the player!) can refer to:
+        // "Blender#SW4" = kind + world compass bearing + meters. Bearing is
+        // world-fixed (north = +Z): it does NOT rotate when the body turns.
+        internal static string StationAddr(string name, Vector3 from, Vector3 to)
+        {
+            Vector3 d = to - from; d.y = 0;
+            float m = d.magnitude;
+            string word = NameWord(name);
+            if (word == null) word = "station";
+            if (m < 0.5f) return word + "#here";
+            return word + "#" + Compass.NameOfOffset(d.x, d.z) + Math.Max(1, (int)Math.Round(m));
+        }
+
         // Every station/usable in the scene, classified with purpose and distance —
         // the model's station map. Cached ~5s (FindObjectsOfType is a scene-wide find)
-        // and shared by all instances.
+        // and shared by all instances. Each entry also gets: a stable numeric 'id'
+        // (go_to/interact target), an addr like "Blender#SW4" (compass + distance —
+        // the ID Ornith asked for), a world-fixed compass 'bearing', landmark 'hint'
+        // ("near window, mailbox"), and per-kind closest_you/closest_player flags so
+        // "which station do we use?" has a decisive answer.
+        private List<object> DescribeStations()
+        {
+            var list = new List<object>();
+            if (!IsAlive(_kobold)) return list;
+            try
+            {
+                Vector3 pos = _kobold.transform.position;
+                Vector3 playerPos = Vector3.zero;
+                bool hasPlayer = false;
+                try
+                {
+                    if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null && IsAlive(pp.kobold))
+                    {
+                        playerPos = pp.kobold.transform.position;
+                        hasPlayer = true;
+                    }
+                }
+                catch (Exception) { }
+
+                // First pass: gather every station with its data.
+                var stations = new List<System.Tuple<float, string, bool, Vector3, float, GenericUsable>>(); // dist, nm, canUse, pos, playerDist, u
+                foreach (var u in StationList())
+                {
+                    if (u == null || u.transform == null) continue;
+                    string nm = CleanName(u.name);
+                    if (nm.Length == 0) continue;
+                    bool canUse = true;
+                    try { canUse = u.CanUse(_kobold); } catch (Exception) { }
+                    Vector3 p = u.transform.position;
+                    Vector3 d = p - pos;
+                    float playerDist = hasPlayer ? Vector3.Distance(p, playerPos) : -1f;
+                    stations.Add(System.Tuple.Create(d.magnitude, nm, canUse, p, playerDist, u));
+                }
+
+                // Per-kind minimums (self + player) — computed across ALL stations so
+                // the flags stay true even when the display cap cuts the list.
+                var minSelf = new Dictionary<string, float>(StringComparer.Ordinal);
+                var minPlayer = new Dictionary<string, float>(StringComparer.Ordinal);
+                foreach (var t in stations)
+                {
+                    string kind = ClassifyUsable(t.Item2);
+                    float ds; if (!minSelf.TryGetValue(kind, out ds) || t.Item1 < ds) minSelf[kind] = t.Item1;
+                    if (t.Item5 >= 0f)
+                    {
+                        float dp; if (!minPlayer.TryGetValue(kind, out dp) || t.Item5 < dp) minPlayer[kind] = t.Item5;
+                    }
+                }
+
+                stations.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+                int cap = 16;
+                for (int i = 0; i < stations.Count && i < cap; i++)
+                {
+                    var t = stations[i];
+                    string nm = t.Item2;
+                    string kind = ClassifyUsable(nm);
+                    Vector3 p = t.Item4;
+                    Vector3 d = p - pos;
+                    var entry = new Dictionary<string, object>
+                    {
+                        ["id"] = TargetIdFor(t.Item6.transform, nm),
+                        ["n"] = nm,
+                        ["addr"] = StationAddr(nm, pos, p),
+                        ["i"] = kind + (t.Item3 ? "" : ":busy") + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : ""),
+                        ["d"] = F(d.magnitude),
+                        // 'bearing' = world compass (N/SW...), stable while you turn;
+                        // 'dir' = facing-relative, for pointing/walking right now.
+                        ["bearing"] = Compass.NameOfOffset(d.x, d.z),
+                        ["dir"] = RelBearing(d),
+                        ["h"] = d.y > 1f ? "above" : (d.y < -1f ? "below" : "level"),
+                        ["x"] = F(p.x),
+                        ["y"] = F(p.y),
+                        ["z"] = F(p.z),
+                    };
+                    string hints = LandmarkHintsFor(t.Item6);
+                    if (hints != null) entry["hint"] = hints;
+                    string slots = StationSlotsFor(t.Item6);
+                    if (slots != null) entry["slots"] = slots;
+                    float ms; if (minSelf.TryGetValue(kind, out ms) && t.Item1 <= ms + 0.05f) entry["closest_you"] = true;
+                    if (t.Item5 >= 0f)
+                    {
+                        float mp; if (minPlayer.TryGetValue(kind, out mp) && t.Item5 <= mp + 0.05f) entry["closest_player"] = true;
+                        entry["player_d"] = F(t.Item5);
+                    }
+                    list.Add(entry);
+                }
+            }
+            catch (Exception e) { Logger.LogWarning("stations: " + e.Message); }
+            return list;
+        }
+
         private static List<GenericUsable> _stationCache;
         private static float _stationCacheTime = -99f;
         private static readonly object _stationLock = new object();
@@ -1001,43 +1515,118 @@ namespace KKLLMNPC
             }
         }
 
-        private List<object> DescribeStations()
+        // The plain activity wording (shared by the perception object and the console).
+        private string PlayerActivityWords(bool ragdolled, bool inStation, string stKind, string stName, float vel, float heading)
         {
-            var list = new List<object>();
-            if (!IsAlive(_kobold)) return list;
+            if (ragdolled) return "ragdolled (limp — anyone could pick them up)";
+            if (inStation)
+            {
+                string kind = string.IsNullOrEmpty(stKind) ? "station" : stKind;
+                string word = kind == "food" ? "cooking/feeding the blender"
+                    : kind == "bed" ? "resting on a bed (only bother them for real reasons)"
+                    : kind == "play" ? "at a PLAY station (pleasure)"
+                    : kind == "nest" ? "at the nest (laying/attending eggs)"
+                    : kind == "toilet" ? "on the toilet"
+                    : kind == "bath" ? "bathing"
+                    : kind == "seat" ? "sitting down"
+                    : kind == "door" ? "passing through a door"
+                    : kind == "machine" ? "working a machine"
+                    : "using a " + kind + " station";
+                return word + (!string.IsNullOrEmpty(stName) ? " (" + stName + ")" : "");
+            }
+            if (vel > 0.6f) return "walking " + Compass.PreciseNameOf(heading) + " at " + F(vel) + " m/s";
+            return "standing still";
+        }
+
+        // Live observation of the host player — position relative to you, what they're
+        // doing (station/heading), what they hold. This is the player's "current
+        // objective" the way OTHER PLAYERS know it: read off their behavior, fresh
+        // every moment, never stored as a fact or memory.
+        private object BuildPlayerActivity()
+        {
+            var s = PlayerTrail.Snap;
+            if (s == null || !s.Has || Time.unscaledTime - s.SampleTime > 10f) return null;
+            Vector3 d = s.Pos - _kobold.transform.position;
+            var holds = new List<string>();
+            if (s.Held != null)
+                foreach (var h in s.Held)
+                    holds.Add(h.Name + " (" + h.Kind + ")");
+            // "Use the station I'm in" — give the exact station and whether the partner
+            // seat is free for THIS body, with an id in the same namespace as 'ls' ids.
+            int stationId = -1;
+            string seat = null;
+            if (s.StationTf != null)
+            {
+                try
+                {
+                    stationId = TargetIdFor(s.StationTf, s.StationName);
+                    var u = s.StationTf.GetComponentInParent<GenericUsable>();
+                    if (u != null)
+                        seat = u.CanUse(_kobold) ? "seat free — use id:" + stationId + " to join them" : "seat blocked/taken for your body (other station or wrong side)";
+                }
+                catch (Exception) { stationId = -1; seat = null; }
+            }
+            return new
+            {
+                activity = PlayerActivityWords(s.Ragdolled, s.InStation, s.StationKind, s.StationName, s.Vel, s.Heading),
+                d = F(d.magnitude),
+                bearing = Compass.NameOfOffset(d.x, d.z),
+                station_id = stationId,
+                seat = seat,
+                holds = holds.Count > 0 ? (object)holds.ToArray() : null,
+            };
+        }
+
+        // ------------------------------------------------------------------
+        // station slots — occupancy of animation-station machines, in words
+        // ------------------------------------------------------------------
+        // Play/bed stations are IAnimationStationSet machines with per-slot occupants
+        // (AnimationStation.info.user). Models kept misreading the station's own
+        // ":busy" (their presence making CanUse false) as "the station is full" and
+        // leaving — so occupancy comes as explicit text: who's in, you included.
+        // Main thread (components).
+        private string StationSlotsForSet(IAnimationStationSet set, bool youAreIn)
+        {
+            if (set == null) return null;
             try
             {
-                Vector3 pos = _kobold.transform.position;
-                var items = new List<System.Tuple<float, Dictionary<string, object>>>();
-                foreach (var u in StationList())
+                var stations = set.GetAnimationStations();
+                if (stations == null || stations.Count == 0) return null;
+                int taken = 0;
+                var who = new List<string>();
+                foreach (var st in stations)
                 {
-                    if (u == null || u.transform == null) continue;
-                    string nm = CleanName(u.name);
-                    if (nm.Length == 0) continue;
-                    string kind = ClassifyUsable(nm);
-                    bool canUse = true;
-                    try { canUse = u.CanUse(_kobold); } catch (Exception) { }
-                    Vector3 p = u.transform.position;
-                    Vector3 d = p - pos;
-                    var entry = new Dictionary<string, object>
-                    {
-                        ["n"] = nm,
-                        ["i"] = kind + (canUse ? "" : ":busy") + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : ""),
-                        ["d"] = F(d.magnitude),
-                        ["dir"] = RelBearing(d),
-                        ["h"] = d.y > 1f ? "above" : (d.y < -1f ? "below" : "level"),
-                        ["x"] = F(p.x),
-                        ["y"] = F(p.y),
-                        ["z"] = F(p.z),
-                    };
-                    items.Add(System.Tuple.Create(d.magnitude, entry));
+                    Kobold user = null;
+                    try { user = st.info.user; } catch (Exception) { }
+                    if (user == null) continue;
+                    taken++;
+                    if (user == _kobold) continue; // counted in taken; separately said below
+                    try { who.Add(IsPlayerKobold(user) ? "the player" : CleanName(user.name)); }
+                    catch (Exception) { who.Add("someone"); }
                 }
-                items.Sort((a, b) => a.Item1.CompareTo(b.Item1));
-                int cap = 16;
-                for (int i = 0; i < items.Count && i < cap; i++) list.Add(items[i].Item2);
+                if (taken == 0 && !youAreIn) return null;
+                var sb = new System.Text.StringBuilder();
+                sb.Append("slots ").Append(taken).Append('/').Append(stations.Count).Append(" taken");
+                if (youAreIn) sb.Append(" — YOU ARE in one (that's why the station itself can read busy; your slot exists)");
+                if (who.Count > 0) sb.Append("; occupied by ").Append(string.Join(", ", who.ToArray()));
+                if (taken < stations.Count) sb.Append("; ").Append(stations.Count - taken).Append(" slot(s) FREE");
+                else sb.Append(" (full for now)");
+                return sb.ToString();
             }
-            catch (Exception e) { Logger.LogWarning("stations: " + e.Message); }
-            return list;
+            catch (Exception) { return null; }
+        }
+
+        // Slot text for a station usable (null when it has no station set).
+        private string StationSlotsFor(GenericUsable u)
+        {
+            try
+            {
+                if (u == null) return null;
+                var set = u.GetComponentInParent<IAnimationStationSet>();
+                if (set == null) set = u.GetComponentInChildren<IAnimationStationSet>();
+                return StationSlotsForSet(set, false);
+            }
+            catch (Exception) { return null; }
         }
 
         private string CaptureImageB64()

@@ -54,6 +54,7 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgVisEndpoint;
         internal ConfigEntry<string> _cfgVisApiKey;
         internal ConfigEntry<int> _cfgVisMaxTokens;
+        internal ConfigEntry<float> _cfgVisTemperature;
         internal ConfigEntry<int> _cfgRayCount;
         internal ConfigEntry<float> _cfgRayRange;
         internal ConfigEntry<float> _cfgAutoFindRange;
@@ -82,6 +83,8 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgRadarEnabled;
         internal ConfigEntry<int> _cfgRadarSize;
         internal ConfigEntry<float> _cfgRadarScale;
+        // AI feedback channel: report_issue(...) appends to a file when enabled.
+        internal ConfigEntry<bool> _cfgAIReportLog;
         internal ConfigEntry<float> _cfgHornyRate;
         internal ConfigEntry<float> _cfgHornyBaseline;
         internal ConfigEntry<string> _cfgModelTier;
@@ -117,6 +120,43 @@ namespace KKLLMNPC
         internal volatile bool BodyLost;
         private bool _bodyLostLogged;
 
+        // ---- agent registry (static: lets sibling NPCs see each other) ----
+        // Bound body id → the chat name of the agent mind riding it. Maintained by
+        // bind/unbind and identity finalization (names change after the LLM pick).
+        private static readonly Dictionary<int, string> _agentNamesByBody = new Dictionary<int, string>();
+        private static readonly object _agentNamesLock = new object();
+        internal static void RegisterAgentBody(int koboldId, string name)
+        {
+            if (koboldId < 0 || string.IsNullOrEmpty(name)) return;
+            lock (_agentNamesLock) _agentNamesByBody[koboldId] = name;
+        }
+        internal static void UnregisterAgentBody(int koboldId)
+        {
+            if (koboldId < 0) return;
+            lock (_agentNamesLock) _agentNamesByBody.Remove(koboldId);
+        }
+        internal static string AgentNameForBody(int koboldId)
+        {
+            if (koboldId < 0) return null;
+            lock (_agentNamesLock)
+            {
+                string n;
+                return _agentNamesByBody.TryGetValue(koboldId, out n) ? n : null;
+            }
+        }
+        // Which live body currently rides the given agent chat name (-1 = free) —
+        // memory restore must not wake a name someone else is wearing right now.
+        internal static int BodyIdForAgentName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return -1;
+            lock (_agentNamesLock)
+            {
+                foreach (var kv in _agentNamesByBody)
+                    if (string.Equals(kv.Value, name, StringComparison.OrdinalIgnoreCase)) return kv.Key;
+            }
+            return -1;
+        }
+
         // The possessed body + its drivable parts.
         private int _currentKoboldId = -1;
         private Kobold _kobold;
@@ -131,6 +171,7 @@ namespace KKLLMNPC
         private RenderTexture _rtR;
         private PhotonView _photonView;
         private float _lastOwnershipTry;
+        private float _lastOwnershipWarn = -99f; // warn every 30s while re-asserting every 3s
         private float _lastRelaunchTry;
         private float _lastNoBodyLog = -99f;
 
@@ -167,8 +208,22 @@ namespace KKLLMNPC
         private string _lastThought = "just woke up";
         private string _lastAction = "none";
         private int _tick;
-        private string _blockedInfo;
-        private string _modelError;
+        // Movement-phase state written on the main thread (FixedUpdate walk
+        // validation), read on the LLM thread (perception/memory assembly).
+        private volatile string _blockedInfo;
+        // Structural reply failure signal (empty/plain-text/unknown tool in legacy
+        // mode); volatile so ResetMind's cross-thread null write is safe too.
+        private volatile string _modelError;
+
+        // ---- endpoint circuit breaker (loop-level, outside SafeHttp's in-query
+        // retries) ---- // consecutive failed chat queries; 0 = healthy. Written on
+        // the LLM thread, read by the overlay (main) and the state anchor.
+        private volatile int _endpointFails;
+        // Don't issue a chat query until this Time.unscaledTime (escalating idle
+        // after consecutive failures — a dead server otherwise costs a full
+        // 3-attempt SafeHttp run every think tick forever).
+        private volatile float _endpointBlockUntil;
+
         private int _lastCommentaryTick = -999;
         private float? _ledgeDrop;
         private string _npcName;
@@ -278,12 +333,24 @@ namespace KKLLMNPC
         private float _manualCrouchSet = -99f;
         private float _clipSince = -99f;
         private float _lastClipFix;
+        // Physics-tick throttles: the wall-proximity scan (4 rays) and the camera
+        // clip probe (1 ray) run unconditionally per FixedUpdate otherwise — most
+        // frames re-derive the same answer.
+        private float _lastWallProbe;
+        private float _lastClipCheck;
         private float _yawOffsetDeg;
         private float _pitchDeg;
         private float _yawDeg;
-        private readonly ReaderWriterLockSlim _stateLock = new ReaderWriterLockSlim();
+        // Plain monitor — hold times are nanoseconds and every site (LLM thread and
+        // main thread) takes lock() on this object. Do NOT "upgrade" to
+        // ReaderWriterLockSlim or mix mechanisms: EnterWriteLock guards an internal
+        // RWLS lock, lock() takes the object's monitor — the two would exclude
+        // nothing from each other and every lock() site would be unsynchronized.
+        private readonly object _stateLock = new object();
         private float _lastBumpTime = -99f;
-        private string _bumpInfo;
+        // Written by wall-proximity scans on the main thread; surfaced into
+        // perception/state lines that also run on the LLM thread.
+        private volatile string _bumpInfo;
         private int _lastDoorTried;
         private float _lastDoorTryTime = -99f;
         // Activity tracking for dynamic think interval
@@ -306,6 +373,31 @@ namespace KKLLMNPC
         private int _consecutiveValidJson;
         private bool IsSmallModel { get { EnsureTierResolved(); return _resolvedTier == "small"; } }
         private bool IsLargeModel { get { EnsureTierResolved(); return _resolvedTier == "large"; } }
+
+        // ---- model family (auto-detected from the model name; no config) ----
+        // Classifies the loaded model into a quirk profile (reasoning markers,
+        // token headroom, payload tightness). Name source: probe → config →
+        // generic. Benign race on lazy init: classification is deterministic and
+        // idempotent, so double-compute across threads converges on the same
+        // profile.
+        private ModelFamilyProfile _familyProfile;
+        private bool _familyResolved;
+        internal ModelFamilyProfile FamilyProfile
+        {
+            get
+            {
+                if (!_familyResolved)
+                {
+                    _familyResolved = true;
+                    string name = ModelProbe.DetectedModelName;
+                    if (string.IsNullOrEmpty(name)) name = Val(_cfgModel);
+                    _familyProfile = ModelFamilies.Classify(name);
+                    Logger.LogInfo("[" + MyName() + "] model family '" + (string.IsNullOrEmpty(_familyProfile.Family) ? "generic" : _familyProfile.Family)
+                        + "' from '" + (string.IsNullOrEmpty(name) ? "?" : name) + "' — " + _familyProfile.Note);
+                }
+                return _familyProfile;
+            }
+        }
 
         private void EnsureTierResolved()
         {
@@ -330,8 +422,19 @@ namespace KKLLMNPC
                 }
                 else
                 {
-                    _resolvedTier = "small";
-                    Logger.LogInfo("[" + MyName() + "] model tier defaulting to 'small' (no probe data — server offline?)");
+                    // No probe (server offline / name-only): trust the family
+                    // classifier's sizing for known families, else default small.
+                    string famTier = FamilyProfile.PreferredTier;
+                    if (!string.IsNullOrEmpty(famTier))
+                    {
+                        _resolvedTier = famTier;
+                        Logger.LogInfo("[" + MyName() + "] model tier '" + _resolvedTier + "' from family '" + FamilyProfile.Family + "'");
+                    }
+                    else
+                    {
+                        _resolvedTier = "small";
+                        Logger.LogInfo("[" + MyName() + "] model tier defaulting to 'small' (no probe data — server offline?)");
+                    }
                 }
             }
         }
@@ -368,12 +471,18 @@ namespace KKLLMNPC
         // Written on the main thread (FixedUpdate), read by perception on the LLM
         // thread — volatile float is 32-bit atomic.
         internal volatile float _horny = 0.08f;
+        // Previous tick's stimulation, NORMALIZED 0-1 (see UpdateHorniness), and how
+        // long stimulation has been sustained near max without a climax.
         private float _hornyPrevStim = 0f;
+        private float _hornySaturatedFor;
 
-        // Vision.
+        // Vision. Caption is written by the vision worker thread, read by the LLM
+        // thread and state-anchor assembly.
         private string _sceneDesc = "unknown";
-        private string _lastVisionCaption = "";
+        private volatile string _lastVisionCaption = "";
         private volatile string _lastVisionB64;
+        internal string VisionCaption { get { return _lastVisionCaption; } }
+        internal string VisionFrameB64 { get { return _lastVisionB64; } }
         private readonly System.Collections.Generic.List<string> _pastImages = new System.Collections.Generic.List<string>();
         // Texture pool for capture
         private Texture2D _texPoolL;
@@ -438,6 +547,7 @@ namespace KKLLMNPC
             _cfgVisEndpoint = plugin._cfgVisEndpoint;
             _cfgVisApiKey = plugin._cfgVisApiKey;
             _cfgVisMaxTokens = plugin._cfgVisMaxTokens;
+            _cfgVisTemperature = plugin._cfgVisTemperature;
             _cfgRayCount = plugin._cfgRayCount;
             _cfgRayRange = plugin._cfgRayRange;
             _cfgAutoFindRange = plugin._cfgAutoFindRange;
@@ -466,6 +576,7 @@ namespace KKLLMNPC
             _cfgRadarEnabled = plugin._cfgRadarEnabled;
             _cfgRadarSize = plugin._cfgRadarSize;
             _cfgRadarScale = plugin._cfgRadarScale;
+            _cfgAIReportLog = plugin._cfgAIReportLog;
             _cfgHornyRate = plugin._cfgHornyRate;
             _cfgHornyBaseline = plugin._cfgHornyBaseline;
             _cfgModelTier = plugin._cfgModelTier;
@@ -491,8 +602,7 @@ namespace KKLLMNPC
             _running = true;
             _sessionStartTime = Time.unscaledTime;
             _ctxMgr = new ContextManager(this);
-            _llmThread = new Thread(LLMLoop) { IsBackground = true, Name = "KKLLMNPC-LLM-" + (_npcName ?? "??") };
-            _llmThread.Start();
+            lock (_threadStartLock) StartThreadLocked();
             Logger.LogInfo("KKLLMNPC: LLM loop started for '" + (_npcName ?? "?") + "'.");
         }
 
@@ -535,28 +645,45 @@ namespace KKLLMNPC
 
         internal bool IsThreadAlive => _running && _llmThread != null && _llmThread.IsAlive;
 
+        // Does THIS live instance currently drive this body? (double-bind tripwire)
+        internal bool HoldsBody(Kobold k)
+        {
+            if (!_running || k == null) return false;
+            var b = _kobold;
+            return b != null && b == k;
+        }
+
+        // One restart at a time, and NEVER a second thread while one is alive — two
+        // LLM threads on one instance means two minds interleaving one conversation
+        // and one body's tools (the "AI fighting itself / replying to its own past
+        // lines" symptom). Both watchdog (Update) and overlay force-restart funnel
+        // through this lock and re-check IsAlive under it.
+        private readonly object _threadStartLock = new object();
+
+        private bool StartThreadLocked()
+        {
+            if (!_running || (_llmThread != null && _llmThread.IsAlive)) return false;
+            _llmThread = new Thread(LLMLoop) { IsBackground = true, Name = "KKLLMNPC-LLM-" + (_npcName ?? "??") };
+            _llmThread.Start();
+            return true;
+        }
+
         // Force-restart the LLM thread (no cooldown) — used by the overlay kill-switch.
         internal void ForceRestartThread()
         {
-            if (_running && (_llmThread == null || !_llmThread.IsAlive))
-            {
-                _llmThread = new Thread(LLMLoop) { IsBackground = true, Name = "KKLLMNPC-LLM-" + (_npcName ?? "??") };
-                _llmThread.Start();
-            }
+            lock (_threadStartLock) StartThreadLocked();
         }
 
         internal void MaybeRestartThread()
         {
             if (!_running || (_llmThread != null && _llmThread.IsAlive)) return;
-            if (Time.unscaledTime - _lastRelaunchTry > 5f)
+            if (Time.unscaledTime - _lastRelaunchTry <= 5f) return;
+            lock (_threadStartLock)
             {
+                if (!_running || (_llmThread != null && _llmThread.IsAlive)) return;
                 _lastRelaunchTry = Time.unscaledTime;
                 Logger.LogWarning("KKLLMNPC: LLM thread died — relaunching for '" + (_npcName ?? "?") + "'.");
-                try
-                {
-                    _llmThread = new Thread(LLMLoop) { IsBackground = true, Name = "KKLLMNPC-LLM-" + (_npcName ?? "??") };
-                    _llmThread.Start();
-                }
+                try { StartThreadLocked(); }
                 catch (Exception e) { Logger.LogError("relaunch: " + e); }
             }
         }
@@ -622,13 +749,77 @@ namespace KKLLMNPC
             return msg.StartsWith(myPrefix, StringComparison.OrdinalIgnoreCase);
         }
 
+        // ---- addressing (FT-02/FT-03) ----
+
+        // Is this line addressed to ME? ("Fern, come here" / "Fern: hi" / "@Fern hey" /
+        // "Fern hello"). Sets `rest` to the line with the address stripped so command
+        // words inside ("follow me") still parse. Only fires at a word boundary —
+        // "Ashtray, come here" doesn't address an NPC called Ash.
+        internal bool IsAddressedBy(string msg, out string rest)
+        {
+            rest = msg;
+            try
+            {
+                string name = MyName();
+                if (string.IsNullOrEmpty(msg) || string.IsNullOrEmpty(name)) return false;
+                string t = msg.TrimStart();
+                if (t.Length > 0 && t[0] == '@') t = t.Substring(1).TrimStart();
+                if (!t.StartsWith(name, StringComparison.OrdinalIgnoreCase)) return false;
+                string tail = t.Substring(name.Length);
+                if (tail.Length == 0) return false;
+                char c0 = tail[0];
+                if (c0 != ' ' && c0 != ':' && c0 != ',' && c0 != '-' && c0 != '!' && c0 != '.' && c0 != '?') return false;
+                rest = tail.TrimStart(' ', ':', ',', '-');
+                return true;
+            }
+            catch (Exception) { rest = msg; return false; }
+        }
+
+        // Cross-agent speech safety valve: another NPC's line reaches us only when
+        // it addressed us AND at most twice a minute — two chatty NPCs can't duet
+        // forever (each reply would be a stimulus for the next).
+        private readonly List<float> _botChatDeliveries = new List<float>(4);
+        internal bool BotChatAllowed()
+        {
+            lock (_botChatDeliveries)
+            {
+                float now = Time.unscaledTime;
+                while (_botChatDeliveries.Count > 0 && now - _botChatDeliveries[0] > 60f) _botChatDeliveries.RemoveAt(0);
+                if (_botChatDeliveries.Count >= 2) return false;
+                _botChatDeliveries.Add(now);
+                return true;
+            }
+        }
+
+        // Direct injection of a player-chat line into THIS instance only (overlay /
+        // addressed routing use it; unaddressed lines still broadcast).
+        internal void InjectPlayerChat(string text)
+        {
+            try { HandleChat(text, "player", true); } catch (Exception) { }
+        }
+
         internal void HandleChat(string msg, string senderName, bool isLocal)
         {
+            // The game's chat can carry CRLF (Windows); trailing \r corrupts exact
+            // compares (stay/leave detection) and pollutes the transcript feed.
+            msg = (msg ?? "").Replace("\r", "").Trim();
             string heard = (isLocal ? "player" : (senderName ?? "someone")) + ": " + msg;
             _playerChat = heard;
             _playerChatTime = Time.unscaledTime;
+            WakeFromSleep(); // being addressed ends `sleep <secs>` early
             Logger.LogInfo("heard chat: " + heard);
             RecordChatEntry(isLocal ? "player" : (senderName ?? "someone"), msg);
+
+            // The player's current objective is ONLY ever in their chat (the game has
+            // no quest/task system — verified in the game source) and the raw line
+            // evaporates from context after ~30s. Persist the latest ask as a fact so
+            // "can you help?" survives until it's handled.
+            if (isLocal && !string.IsNullOrWhiteSpace(msg))
+            {
+                string t = msg.Trim();
+                if (t.Length >= 4 && t.Length <= 140 && !t.StartsWith("/", StringComparison.Ordinal))
+                    RememberFact("player_wants:" + t);
+            }
 
             // Detect stay/leave commands from the player.
             if (isLocal && msg != null)
@@ -692,11 +883,34 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // clear all memory on world reload
         // ------------------------------------------------------------------
-        internal void ClearLogs()
+        internal void ClearLogs() => ResetMind("world reloaded");
+
+        // Queued when a mind wipe is requested while the LLM loop is mid-turn — the
+        // loop applies it at the turn boundary (the only thread-safe place to clear
+        // transcript/facts/lists it is actively reading). Volatile: main thread
+        // writes, loop reads/clears.
+        private volatile string _pendingMindReset;
+
+        // Entry point for the two wipe callers (world reload, fresh-body bind) —
+        // both on the main thread. Live LLM loop ⇒ defer to the turn boundary;
+        // dead/no loop ⇒ apply immediately.
+        internal void ResetMind(string why)
         {
-            _stateLock.EnterWriteLock();
-            try { _moveLocalZ = 0f; _moveJump = false; _moveUntilTime = 0f; _yawOffsetDeg = 0f; }
-            finally { _stateLock.ExitWriteLock(); }
+            var t = _llmThread;
+            if (t != null && t.IsAlive && _running)
+            {
+                if (string.IsNullOrEmpty(_pendingMindReset)) _pendingMindReset = why;
+            }
+            else ResetMindNow(why);
+        }
+
+        // Full memory/state wipe. Applied either directly (no live loop) or at the
+        // LLM loop's turn boundary. A new body wakes up with NO inherited memory
+        // unless the body move is an identity-reusing bodyswap: the identity dies
+        // with the sold/lost body, exactly like the old body did.
+        internal void ResetMindNow(string why)
+        {
+            lock (_stateLock) { _moveLocalZ = 0f; _moveJump = false; _moveUntilTime = 0f; _yawOffsetDeg = 0f; }
             lock (_history) { _history.Clear(); }
             lock (_thoughtHistory) { _thoughtHistory.Clear(); }
             lock (_facts) { _facts.Clear(); }
@@ -704,7 +918,7 @@ namespace KKLLMNPC
             _playerChat = null; _lastDeliveredChat = null;
             lock (_chatEntries) { _chatEntries.Clear(); }
             _seenChatAcks.Clear();
-            // Reset the console REPL conversation (fresh boot on world reload).
+            // Reset the console REPL conversation (fresh boot).
             _consoleMsgs = null;
             _consoleProseStreak = 0;
             _consoleEmptyStreak = 0;
@@ -713,10 +927,14 @@ namespace KKLLMNPC
             if (_consoleRecentCmds != null) _consoleRecentCmds.Clear();
             _pendingShotB64 = null;
             _consoleSlept = false;
+            _sleepUntilTime = 0f;
             _consoleAnswerDelivered = true;
             _pendingSayNudge = false;
             _emptyContentRetry = false;
             _lastSays.Clear();
+            ResetCarrySense();
+            ResetHoldSense();
+            ClearRayHitCache(); // stale entity kinds/names must not survive the wipe
             BodyLost = false; _bodyLostLogged = false;
             lock (_goalLock)
             {
@@ -731,9 +949,16 @@ namespace KKLLMNPC
             _lastBellySummary = "";
             _cachedPerception = null;
             _lastFullPerceptionTick = -999;
-            // World reload may mean a new room — drop the identity bot so it re-joins fresh.
-            if (_identityBot != null) { try { _identityBot.Stop(); } catch (Exception) { } _identityBot = null; }
-            try { Logger.LogInfo("KKLLMNPC: world reloaded — cleared NPC logs/memory."); } catch (Exception) { }
+            // World reload may mean a new room — drop the identity bot so it re-joins
+            // fresh. Stop() touches Photon and can be called from the LLM loop thread
+            // when applied at the turn boundary, so marshal it to the main thread.
+            if (_identityBot != null)
+            {
+                var bot = _identityBot;
+                _identityBot = null;
+                RunOnMainThreadAsync(() => { try { bot.Stop(); } catch (Exception) { } });
+            }
+            try { Logger.LogInfo("KKLLMNPC: " + why + " — cleared NPC logs/memory."); } catch (Exception) { }
         }
 
         // ------------------------------------------------------------------
@@ -744,11 +969,23 @@ namespace KKLLMNPC
         internal void EnsureIdentityBot()
         {
             if (_cfgIdentityBot == null || !_cfgIdentityBot.Value) return;
+            string roomName;
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
-                string roomName = PhotonNetwork.CurrentRoom.Name;
-                if (string.IsNullOrEmpty(roomName)) return;
+                // No real network = no room for a second client to join. Offline mode
+                // ("offline room" — single-player before/without a Photon connection)
+                // would have the bot spinning a fresh connection attempt per say,
+                // forever logging "[identity-bot] starting" — the owner-attributed
+                // fallback works fine offline, so just don't start the bot here.
+                try
+                {
+                    if (PhotonNetwork.OfflineMode || !PhotonNetwork.IsConnectedAndReady) return;
+                    roomName = PhotonNetwork.CurrentRoom.Name;
+                    if (string.IsNullOrEmpty(roomName)) return;
+                    if (string.Equals(roomName, "offline room", StringComparison.OrdinalIgnoreCase)) return;
+                }
+                catch (Exception) { return; }
                 if (_identityBot != null)
                 {
                     if (_identityBot.RoomName != roomName)
@@ -894,6 +1131,15 @@ namespace KKLLMNPC
             lock (_history)
             {
                 if (_history.Count == 0) return "[]";
+                // Level 3+ compaction: everything older than the dynamic recent
+                // window collapses into "(earlier: Nx action)" counts (the tested
+                // ContextCompaction policy) instead of just taking the newest N.
+                if (_ctxMgr != null && _ctxMgr.CompactionLevel >= 3)
+                {
+                    var snapshot = new List<string>();
+                    foreach (var h in _history) snapshot.Add(h);
+                    return ContextCompaction.SummarizeHistory(snapshot, Math.Max(2, MaxHistory / 2));
+                }
                 var parts = new StringBuilder("[");
                 bool first = true;
                 foreach (var h in _history)

@@ -107,6 +107,36 @@ namespace KKLLMNPC
                 }
             }
 
+            // Flavorful fallback names for when the LLM name pick fails entirely — a
+            // numbered "Kobold-100" reads like a unit label, so try real names first.
+            // Common-word kobold-ish names (farm/house/nature flavored), no collisions
+            // with known in-game assets intended.
+            internal static readonly string[] FlavorNames = new[]
+            {
+                "Yip", "Ember", "Cinder", "Ash", "Soot", "Maple", "Juniper", "Basil",
+                "Clove", "Pepper", "Moss", "Fern", "Bramble", "Flint", "Cobble", "Wisp",
+                "Puff", "Tumble", "Scamper", "Nib", "Sable", "Rusty", "Pip", "Gnarl",
+                "Sprout", "Thistle", "Puddle", "Snug", "Bumble", "Parch",
+            };
+
+            // Try to reserve a random flavor name; null when every one is taken.
+            internal static string TryFlavor()
+            {
+                lock (_lock)
+                {
+                    Init();
+                    // Deterministic shuffle by rotating from a ticking seed so two
+                    // freshly-spawned agents don't always reach for the same name.
+                    int start = (int)(System.DateTime.UtcNow.Ticks % FlavorNames.Length);
+                    for (int i = 0; i < FlavorNames.Length; i++)
+                    {
+                        string cand = FlavorNames[(start + i) % FlavorNames.Length];
+                        if (!_taken.Contains(cand)) return TryReserve(cand) ? cand : null;
+                    }
+                    return null;
+                }
+            }
+
             // Guaranteed-unique fallback name: base, then base+suffix, then base-NNN.
             internal static string Unique(string baseName, string hint)
             {
@@ -187,8 +217,11 @@ namespace KKLLMNPC
                         if (now - _chatEntries[i].Time > MaxChatEntriesAge)
                             _chatEntries.RemoveAt(i);
                     }
-                    // Cap to newest N entries.
+                    // Cap to newest N entries — compaction levels 2+ shrink the
+                    // dynamic limit (chat is the cheapest memory to lose, see
+                    // ContextPolicy.MaxChatLog).
                     int keep = Math.Min(_cfgChatLogLines.Value, MaxChatEntriesCount);
+                    if (_ctxMgr != null) keep = Math.Min(keep, _ctxMgr.DynamicMaxChatLog(keep));
                     while (_chatEntries.Count > keep)
                         _chatEntries.RemoveAt(0);
                 }
@@ -314,6 +347,12 @@ namespace KKLLMNPC
             if (text.Length == 0) text = p.S("message", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
             text = Sanitize(text);
+            // Acknowledge the conversation FIRST, before any repeat-suppression can
+            // bounce the reply: suppression is anti-spam for the world, but ack
+            // bookkeeping is what stops `heard` from re-serving the same old player
+            // line every tick. Suppressed reply + unacked line = the model "responds
+            // to a past message" over and over — ack regardless of suppression.
+            MarkChatAcks(text);
             // Repeat suppression: check exact match, Jaccard, and Levenshtein ratio
             // against the last 3 says to catch near-duplicate loops.
             lock (_sayLock)
@@ -332,7 +371,7 @@ namespace KKLLMNPC
                     double levRatio = ChatSimilarity.LevenshteinRatio(text, prev);
                     if (jaccard > 0.65 || levRatio > 0.8)
                     {
-                        Logger.LogInfo("[NPC] say suppressed (similar to recent): jaccard=" + jaccard.ToString("0.00") + " lev=" + levRatio.ToString("0.00") + " text=" + text);
+                        Logger.LogDebug("[NPC] say suppressed (similar to recent): jaccard=" + jaccard.ToString("0.00") + " lev=" + levRatio.ToString("0.00") + " text=" + text);
                         _pendingSayNudge = true;
                         return new { ok = true, said = text, reason = "say_repeat", note = "you just said something very similar — say something different or take an action" };
                     }
@@ -343,8 +382,7 @@ namespace KKLLMNPC
                 _lastSayText = text;
                 _lastSayTime = Time.unscaledTime;
             }
-            // Mark unseen chat entries that this say fuzzy-matches as "seen" (ack).
-            MarkChatAcks(text);
+            // (Ack already handled at the top — see the note there.)
             string who = _kobold != null ? CleanName(_kobold.name) : "NPC";
             Logger.LogInfo("[NPC] " + who + ": " + text); // always visible in the console/log
             RunOnMainThreadAsync(() =>
@@ -361,7 +399,12 @@ namespace KKLLMNPC
                             if (!chatter.gameObject.activeSelf) chatter.gameObject.SetActive(true);
                             var node = chatter.transform;
                             for (var par = node.parent; par != null; par = par.parent) if (!par.gameObject.activeSelf) par.gameObject.SetActive(true);
-                            chatter.DisplayMessage(text, 4f);
+                            // Bubble duration proportional to length: the game extends
+                            // duration by text-length already (min 2s internally), but a
+                            // flat 4s base truncated long lines too early and held short
+                            // ones too long. 2.5s base + 1s per 12 chars, 3–10s.
+                            float bubbleDur = Mathf.Clamp(2.5f + text.Length / 12f, 3f, 10f);
+                            chatter.DisplayMessage(text, bubbleDur);
                         }
                     }
                     catch (Exception e) { Logger.LogWarning("say bubble: " + e.Message); }

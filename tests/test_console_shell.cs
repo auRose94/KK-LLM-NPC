@@ -49,6 +49,11 @@ static class ConsoleShellTests
         Assert(ConsoleShell.Canonical("stat") == "status", "stat -> status");
         Assert(ConsoleShell.Canonical("who") == "ps", "who -> ps");
         Assert(ConsoleShell.Canonical("shot") == "screenshot", "shot -> screenshot");
+        Assert(ConsoleShell.Canonical("sonar") == "sonar", "sonar exact");
+        Assert(ConsoleShell.Canonical("radar") == "sonar", "radar -> sonar");
+        Assert(ConsoleShell.Canonical("report") == "report", "report exact");
+        Assert(ConsoleShell.Canonical("report_issue") == "report", "report_issue -> report");
+        Assert(ConsoleShell.Canonical("complain") == "report", "complain -> report");
     }
 
     static void CanonicalFuzzy()
@@ -79,6 +84,38 @@ static class ConsoleShellTests
         Assert(ConsoleShell.Canonical(null) == null, "null -> null");
     }
 
+    // prose guard 2: words common at the start of a prose sentence must NOT map to
+    // the report command — thinking out loud should never file a dev bug note
+    static void ProseGuardReport()
+    {
+        Assert(ConsoleShell.Canonical("problem") == null, "'problem' is not a command");
+        Assert(ConsoleShell.Canonical("issue") == null, "'issue' is not a command");
+        Assert(ConsoleShell.Canonical("bug") == null, "'bug' is not a command");
+        Assert(ConsoleShell.Canonical("feedback") == null, "'feedback' is not a command");
+    }
+
+    static void ParseSonarArgs()
+    {
+        var l = ConsoleShell.Parse("sonar U");
+        Assert(l.Cmd == "sonar" && l.Args.Length == 1 && l.Args[0] == "U", "sonar U arg");
+        var ls = ConsoleShell.Parse("sonar U,P");
+        Assert(ls.Cmd == "sonar" && ls.Args.Length == 1 && ls.Args[0] == "U,P", "sonar U,P single token (filter splits commas)");
+        var lk = ConsoleShell.Parse("radar(filter=\"U,P\")");
+        Assert(lk.Cmd == "sonar" && lk.Args.Length == 1 && lk.Args[0] == "U,P",
+            "radar(filter=\"U,P\") quoted keeps the comma list");
+        var la = ConsoleShell.Parse("sonar all");
+        Assert(la.Cmd == "sonar" && la.Args.Length == 1 && la.Args[0] == "all", "sonar all resets");
+    }
+
+    static void ParseReportPayload()
+    {
+        var l = ConsoleShell.Parse("report sonar shows garbage after turning");
+        Assert(l.Cmd == "report" && l.Payload == "sonar shows garbage after turning", "report keeps payload");
+        var c = ConsoleShell.Parse("report_issue(cd keeps failing on the blender)");
+        Assert(c.Cmd == "report" && c.Payload == "cd keeps failing on the blender", "report_issue(...) payload");
+        Assert(ConsoleShell.IsPayloadCommand("report"), "report is a payload command");
+    }
+
     // ---- IsCommandWord ----
 
     static void IsCommandWordTest()
@@ -106,6 +143,12 @@ static class ConsoleShellTests
         Assert(ConsoleShell.Parse("* cd kitchen").Cmd == "cd", "star bullet prefix");
         Assert(ConsoleShell.Parse("• status").Cmd == "status", "round bullet prefix");
         Assert(ConsoleShell.Parse("# cat facts").Cmd == "cat", "hash prefix");
+        // transcript-echo artifacts: bare prompt lines must vanish (not "unknown")
+        Assert(ConsoleShell.Parse("$") == null, "bare $ vanishes");
+        Assert(ConsoleShell.Parse("$ $") == null, "bare $$ vanishes");
+        Assert(ConsoleShell.Parse(">") == null, "bare > vanishes");
+        Assert(ConsoleShell.Parse("#") == null, "bare # vanishes");
+        Assert(ConsoleShell.Parse("$ ") == null, "bare $ space vanishes");
     }
 
     static void ParseLineHeaders()
@@ -255,6 +298,7 @@ static class ConsoleShellTests
         CanonicalLegacyAliases();
         CanonicalFuzzy();
         ProseGuard();
+        ProseGuardReport();
         CanonicalUnknown();
         IsCommandWordTest();
         ParseLineBasic();
@@ -263,6 +307,8 @@ static class ConsoleShellTests
         ParseLinePayload();
         ParseLineQuoted();
         ParseLineGoalSubcommands();
+        ParseSonarArgs();
+        ParseReportPayload();
         ParseLineCallStyle();
         ParseReplyMultiLine();
         ParseReplyFences();

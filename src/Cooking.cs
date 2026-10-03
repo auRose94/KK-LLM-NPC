@@ -146,7 +146,7 @@ namespace KKLLMNPC
             {
                 Vector3 pos = _kobold.transform.position;
 
-                foreach (var b in UnityEngine.Object.FindObjectsOfType<ElectricBlender>())
+                foreach (var b in SceneCache.Find<ElectricBlender>(3f))
                 {
                     if (b == null) continue;
                     float d = Vector3.Distance(pos, b.transform.position);
@@ -154,7 +154,7 @@ namespace KKLLMNPC
                     cookingList.Add(new { name = CleanName(b.name), kind = "blender", d = F(d) });
                 }
 
-                foreach (var g in UnityEngine.Object.FindObjectsOfType<GrinderManager>())
+                foreach (var g in SceneCache.Find<GrinderManager>(3f))
                 {
                     if (g == null) continue;
                     float d = Vector3.Distance(pos, g.transform.position);
@@ -170,40 +170,10 @@ namespace KKLLMNPC
 
         // ---- Helpers ----
 
-        private ElectricBlender FindNearestBlender(float radius)
-        {
-            if (_kobold == null) return null;
-            ElectricBlender best = null;
-            float bestD = float.MaxValue;
-            try
-            {
-                foreach (var b in UnityEngine.Object.FindObjectsOfType<ElectricBlender>())
-                {
-                    if (b == null) continue;
-                    float d = Vector3.Distance(_kobold.transform.position, b.transform.position);
-                    if (d < radius && d < bestD) { bestD = d; best = b; }
-                }
-            }
-            catch (Exception) { }
-            return best;
-        }
+        // Marshalled + cache-scanned finders (see Farming.FindNearestOf) — the feed/
+        // grind tools call these on the LLM thread, so the Unity work hops to main.
+        private ElectricBlender FindNearestBlender(float radius) { return FindNearestOf<ElectricBlender>(radius); }
 
-        private GrinderManager FindNearestGrinder(float radius)
-        {
-            if (_kobold == null) return null;
-            GrinderManager best = null;
-            float bestD = float.MaxValue;
-            try
-            {
-                foreach (var g in UnityEngine.Object.FindObjectsOfType<GrinderManager>())
-                {
-                    if (g == null) continue;
-                    float d = Vector3.Distance(_kobold.transform.position, g.transform.position);
-                    if (d < radius && d < bestD) { bestD = d; best = g; }
-                }
-            }
-            catch (Exception) { }
-            return best;
-        }
+        private GrinderManager FindNearestGrinder(float radius) { return FindNearestOf<GrinderManager>(radius); }
     }
 }

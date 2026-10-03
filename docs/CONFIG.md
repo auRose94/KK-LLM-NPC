@@ -12,7 +12,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `SystemPrompt` | *(built-in)* | — | Override the default system prompt. A customized value always wins; otherwise `SystemPromptFile` is used if readable. |
 | `SystemPromptFile` | `system_prompt_default.txt` | — | Path to the full system prompt (relative to game dir, plugin dir, or CWD). Overrides the built-in prompt; ships in this repo. |
 | `ThinkInterval` | `0.4` | 0.05–10s | Seconds between perception/decision cycles |
-| `MaxTokens` | `1024` | 64–32768 | Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON) |
+| `MaxTokens` | `1024` | 64–32768 | Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON). Reasoning families automatically get a floor of `1024 + headroom` (Qwen/Bonsai/GLM +512 · Nemotron/Granite +768 · deepseek-style reasoners +1024 · unknown +256); your explicit value always stands when it is higher. |
 | `Temperature` | `0.3` | 0–2 | Sampling temperature (lower = faster, more deterministic) |
 | `PlanStepDelay` | `0.35` | 0.05–5s | Seconds between each action in a chained plan |
 | `PlanMaxSteps` | `8` | 1–8 | Max actions the model may queue in one response (hard cap) |
@@ -47,6 +47,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `Endpoint` | *(empty)* | Chat-completions URL for the vision model. Blank = use LLM.Endpoint |
 | `ApiKey` | *(empty)* | Bearer token for the vision endpoint. Blank = use LLM.ApiKey |
 | `MaxTokens` | `80` | Caption token cap (short = fast) |
+| `Temperature` | `0.2` | Sampling temperature for the spatial caption pass (was hardcoded 0.2). Spatial-reasoner models (e.g. ZDTaichu) want `0` — their card recommends temp 0 + top_p 0.95 + top_k 20 for grounding. |
 
 ## [Senses] — Perception
 
@@ -55,7 +56,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `RayCount` | `9` | ≥2 | Number of rays across the frustum fan |
 | `RayRange` | `25` | 1–100m | Raycast range (m) |
 | `AutoFindRange` | `60` | 1–500m | Radius to look for an entity to hijack |
-| `RadarEnabled` | `true` | bool | Add the top-down ASCII radar map to perception. Off = smaller payload + avoids models misreading radar symbols as living figures |
+| `RadarEnabled` | `true` | bool | Add the north-up ASCII sonar map to perception (top edge is ALWAYS north/+Z — it never rotates with facing; the facing arrow beside `@` shows heading). Off = smaller payload + avoids models misreading radar symbols (wall 'W', entity 'K') as living figures |
 | `RadarSize` | `10` | 3–30 | Radar half-grid size in cells (grid is a (2*N+1) square) |
 | `RadarScale` | `1.2` | 0.1–10m | Radar meters per cell |
 | `ImageSize` | `192` | 32–2048px | Square first-person render size (px) |
@@ -117,6 +118,13 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `MaxNPCs` | `1` | Maximum number of entities the LLM can possess simultaneously (1–4) |
+| `MaxNPCs` | `1` | Maximum number of entities the LLM can possess simultaneously (1–8) |
+| `SpawnMissingKobolds` | `false` | When the world has fewer free AI kobolds than `MaxNPCs`, spawn fresh AI kobold bodies (random genes, like the in-game dispenser) so the pool can fill up. A vanilla world only ever holds the starting pair — more kobolds otherwise come only from paid deliveries or breeding. Default OFF: the pool just waits for bodies to appear naturally (deliveries, breeding, other mods) and claims each one as it appears. Spawned kobolds are ordinary room objects and persist in the farm save. Needs the master client (always the local player in single player). |
 | `DisableReagentMessages` | `true` | Suppress reagent injection messages in log |
 | `BlockedScenes` | `MainMenu,Loading,ErrorScene` | Comma-separated scene names where the LLM stays idle |
+
+## [Debug] — AI Feedback
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `AIReportLog` | `true` | AI bug reports. When an NPC calls `report` (console) / `report_issue` (act tool) with a description of what broke or frustrated it, append a block — its message, position, facing, current goal, and its last ~10 tool calls — to `BepInEx/config/kkllmnpc_ai_reports.log`. Read it between sessions: it's the agents telling you which tools lie ("sonar is busted and showing garbage", "go_to kept picking the far blender"). Off = reports only surface in the BepInEx console log (`[AIReport]` lines). |

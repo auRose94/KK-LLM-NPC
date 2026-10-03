@@ -81,8 +81,10 @@ run_headless_suites() {
   run_suite goalresolver tests/test_goalresolver.cs -- src/PathCore.cs
   run_suite contextcore tests/test_contextcore.cs -- src/ContextCore.cs src/Json.cs src/Constants.cs
   run_suite chat        tests/test_chat_similarity.cs -- src/ChatSimilarity.cs
-  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs
+  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ChatSimilarity.cs
+  run_suite compass     tests/test_compass.cs -- src/Compass.cs
   run_suite safehttp    tests/test_safehttp.cs -- src/SafeHttp.cs
+  run_suite modelfamilies tests/test_modelfamilies.cs -- src/ModelFamilies.cs
 }
 
 # Every *.cs in tests/ must be reachable from a run_suite line above, otherwise a

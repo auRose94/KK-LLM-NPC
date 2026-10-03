@@ -43,11 +43,9 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 │  • Walk validation (raycast ahead, obstacle steering)           │
 │  • Camera clip detection + auto-crouch                          │
 │  • Horniness update (slow-burn while unstimulated)              │
-│  • Ambient commentary — DISABLED (EmitAmbient call sites are    │
-│    commented out; the plumbing is in place, no caller fires)   │
+│  • Wall-proximity/camera-clip probes (throttled)                │
 │  • Photon ownership re-assertion                                │
 │  • PhysicsTick hooks (body control)                             │
-│  • Background path worker (A* on separate thread)               │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,11 +65,14 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 | `NPCInstance.cs` | Core state, config fields, thread lifecycle |
 | `Llm.cs` | Decision loop, LLM query, tool extraction, plan chaining |
 | `Body.cs` | Possession, teardown, camera setup, reagent/penetration |
-| `Senses.cs` | Perception: raycasts, clearance, radar, spatial layout |
+| `Senses.cs` | Perception: raycasts, clearance, north-up sonar map (compass sweep + station hints), spatial layout |
 | `Movement.cs` | Physics-frame movement, walk validation, camera clip |
-| `Tools.cs` | Tool implementations (walk, go_to, interact, say, etc.) |
+| `Tools.cs` | Tool implementations (walk, go_to, interact, grab/drop/throw, say, radar, report_issue, etc.) |
+| `Compass.cs` | Pure-C# world compass (N=+Z/E=+X): sonar glyphs, station bearings, facing text |
+| `HoldSense.cs` | Reflection read of the grabber's grab list: what's held, person pickups, release verification |
+| `PlayerTrail.cs` | Host-player watcher: live activity snapshot, route sampling (persisted per scene), walkproof grid patching, route-leg narration |
 | `Chat.cs` | Photon chat, speech bubbles, chat log processing |
-| `Pathfinding.cs` | 3D layered A* on walkability grid + background worker |
+| `Pathfinding.cs` | 3D layered A* on walkability grid (main thread, time-budgeted) |
 | `WorldMap.cs` | Full-scene cached walkability map (shared by all agents) |
 | `PathCore.cs` | Pure A* solver, path policy, adaptive cell sizing, goal resolver (Unity-free) |
 | `Vision.cs` | Background vision caption pass |
@@ -104,10 +105,15 @@ all driven by an OpenAI-compatible chat-completion endpoint.
    tick hooks, and perception hooks are discovered by reflection. No shared-file
    edits needed to add a new module.
 
-3. **Background path worker**: A* pathfinding runs on a static worker thread. NPCs
-   enqueue paths; the worker computes off-main; results are posted to per-NPC slots.
-   Milestone-based replanning (only when deviation/target-move/age triggers) replaces
-   timer-driven replanning.
+3. **Main-thread pathfinding with time budgets**: A* runs on the Unity main thread
+   (grid sampling and post smoothing need Physics), but is bounded by `PathTimeBudgetMs`
+   and a node budget so it returns partial paths without frame hitches. An earlier
+   background path-worker thread was removed in 2026-10 — its `ComputePath` was a
+   placeholder that could never deliver a path (nothing enqueued to it), while the real
+   finding was that the local-grid design can't run off-main without a different grid
+   architecture. The shared `WorldMap` grid (built incrementally across frames) is what
+   keeps long routes cheap; `WorldMap.SegmentClear` holds the one smoothing
+   implementation both pipelines use.
 
 4. **JSON schema over tools**: Uses `response_format: json_schema` instead of
    `tool_choice` because many chat templates (Gemma, etc.) reject tool forcing.
@@ -175,7 +181,9 @@ LLM (legacy mode — [Console] Enabled=false):
 
 Movement:
     FixedUpdate → apply velocity, validate walk, steer around obstacles
-    Background path worker → A* on local grid or full world map
+    Wall-proximity scan (4 rays) at 4 Hz; camera-clip probe at 5 Hz
+    WorldMap grid built incrementally across frames (shared by all agents)
+    A* main-thread with time/node budgets; milestone-based replanning
     Camera clip → auto-crouch
     Photon → re-assert ownership
 ```
@@ -187,10 +195,13 @@ Movement:
 | Main (Unity) | Physics, rendering, Photon events, config hot-reload |
 | LLM thread | Decision loop: perception → LLM query → tool execution |
 | Vision thread | Background caption: render on main, caption on worker |
-| Commentary thread | Free-form musings via Task.Run |
+| Commentary thread | Free-form musings via Task.Run (both console and legacy modes since 2026-10) |
 | Ask thread | Question answering via Task.Run |
 | Plan steps thread | Background plan execution via Task.Run |
-| Path worker | Static daemon thread: computes A* paths off the main thread |
+
+Note on mind wipes: `ResetMind` requested from the main thread is applied by the LLM
+loop at the next turn boundary (volatile pending-flag) — the only thread-safe place to
+clear transcript/facts/lists the loop is actively reading.
 
 ### Error Handling
 

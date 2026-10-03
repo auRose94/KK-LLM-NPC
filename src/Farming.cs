@@ -196,7 +196,7 @@ namespace KKLLMNPC
             try
             {
                 Vector3 pos = _kobold.transform.position;
-                foreach (var plant in UnityEngine.Object.FindObjectsOfType<Plant>())
+                foreach (var plant in SceneCache.Find<Plant>(3f))
                 {
                     if (plant == null) continue;
                     float d = Vector3.Distance(pos, plant.transform.position);
@@ -225,76 +225,38 @@ namespace KKLLMNPC
 
         // ---- Helpers ----
 
-        private Seed FindNearbySeed(float radius)
+        // Nearest of T within `radius`, farm-flavored. Marshals internally: the tool
+        // handlers call these on the LLM thread, but FindObjectsOfType/transform
+        // access are main-thread APIs — and scans go through the shared TTL
+        // SceneCache so each type is scanned once per window across ALL modules.
+        private T FindNearestOf<T>(float radius) where T : Component
         {
             if (_kobold == null) return null;
-            Seed best = null;
-            float bestD = float.MaxValue;
-            try
+            var capBest = RunOnMainThread(() =>
             {
-                foreach (var s in UnityEngine.Object.FindObjectsOfType<Seed>())
+                T best = null;
+                float bestD = float.MaxValue;
+                try
                 {
-                    if (s == null) continue;
-                    float d = Vector3.Distance(_kobold.transform.position, s.transform.position);
-                    if (d < radius && d < bestD) { bestD = d; best = s; }
+                    foreach (var o in SceneCache.Find<T>(3f))
+                    {
+                        if (o == null) continue;
+                        float d = Vector3.Distance(_kobold.transform.position, o.transform.position);
+                        if (d < radius && d < bestD) { bestD = d; best = o; }
+                    }
                 }
-            }
-            catch (Exception) { }
-            return best;
+                catch (Exception) { }
+                return best;
+            }, 5000);
+            return capBest as T;
         }
 
-        private Plant FindNearestPlant(float radius)
-        {
-            if (_kobold == null) return null;
-            Plant best = null;
-            float bestD = float.MaxValue;
-            try
-            {
-                foreach (var p in UnityEngine.Object.FindObjectsOfType<Plant>())
-                {
-                    if (p == null) continue;
-                    float d = Vector3.Distance(_kobold.transform.position, p.transform.position);
-                    if (d < radius && d < bestD) { bestD = d; best = p; }
-                }
-            }
-            catch (Exception) { }
-            return best;
-        }
+        private Seed FindNearbySeed(float radius) { return FindNearestOf<Seed>(radius); }
 
-        private WateringCanWeapon FindNearestWateringCan(float radius)
-        {
-            if (_kobold == null) return null;
-            WateringCanWeapon best = null;
-            float bestD = float.MaxValue;
-            try
-            {
-                foreach (var w in UnityEngine.Object.FindObjectsOfType<WateringCanWeapon>())
-                {
-                    if (w == null) continue;
-                    float d = Vector3.Distance(_kobold.transform.position, w.transform.position);
-                    if (d < radius && d < bestD) { bestD = d; best = w; }
-                }
-            }
-            catch (Exception) { }
-            return best;
-        }
+        private Plant FindNearestPlant(float radius) { return FindNearestOf<Plant>(radius); }
 
-        private EggSpawner FindNearestEggSpawner(float radius)
-        {
-            if (_kobold == null) return null;
-            EggSpawner best = null;
-            float bestD = float.MaxValue;
-            try
-            {
-                foreach (var e in UnityEngine.Object.FindObjectsOfType<EggSpawner>())
-                {
-                    if (e == null) continue;
-                    float d = Vector3.Distance(_kobold.transform.position, e.transform.position);
-                    if (d < radius && d < bestD) { bestD = d; best = e; }
-                }
-            }
-            catch (Exception) { }
-            return best;
-        }
+        private WateringCanWeapon FindNearestWateringCan(float radius) { return FindNearestOf<WateringCanWeapon>(radius); }
+
+        private EggSpawner FindNearestEggSpawner(float radius) { return FindNearestOf<EggSpawner>(radius); }
     }
 }
