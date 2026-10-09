@@ -61,6 +61,8 @@ namespace KKLLMNPC
                     {
                         st = new PenState { name = hole, hole = hole, lastT = Time.unscaledTime };
                         _dickIn[listener] = st;
+                        // Their own body event too: the model is the one penetrating.
+                        PushWorldEvent("[sex] you are penetrating someone — " + hole + "; thrust to move with the rhythm (feel shows the live state)");
                     }
                     st.src = listener.lastTarget;
                     float d = Mathf.Max(0f, 0.05f - Mathf.Min(0f, dist)); // distToHole<0 => inside
@@ -68,6 +70,10 @@ namespace KKLLMNPC
                     st.vel = Mathf.Lerp(st.vel, (d - st.depth) / dt, 0.2f);
                     st.depth = d;
                     st.lastT = Time.unscaledTime;
+                    float nT = Time.unscaledTime;
+                    st.History.Add(nT);
+                    st.History.Add(d);
+                    while (st.History.Count > 2 && nT - st.History[0] > 5.0f) st.History.RemoveRange(0, 2);
                 }
             }
             catch (Exception e) { Logger.LogDebug($"NotifyDickTick error: {e.Message}"); }
@@ -289,7 +295,9 @@ namespace KKLLMNPC
 
         // Persistent identity key for a body — the kobold's own serialized object
         // name, which lives in the world save. Two sessions meet the same body here.
-        private static string BodyKey(Kobold k) => TextUtil.AsciiSafe(CleanName(k.name));
+        // internal — SwallowManager copies a swallowed body's record onto the reborn
+        // body's key at hatching time.
+        internal static string BodyKey(Kobold k) => TextUtil.AsciiSafe(CleanName(k.name));
 
         // Snapshot the current body's life to disk (teardown path: sold, lost,
         // world change). Facts/goal/persona, keyed by the body.
@@ -305,7 +313,7 @@ namespace KKLLMNPC
                 // least wakes up as the same person, not a renamed stranger.
                 var facts = new List<string>();
                 lock (_facts) foreach (var f in _facts) facts.Add(f.Text);
-                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal);
+                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal, _pronounsOverride);
                 try { Logger.LogInfo("KKLLMNPC: saved '" + _npcName + "' — " + facts.Count + " facts keyed to body '" + bodyKey + "'"); } catch (Exception) { }
             }
             catch (Exception) { }
@@ -330,6 +338,7 @@ namespace KKLLMNPC
                 _npcName = rec.Name;
                 NameRegistry.MarkTaken(_npcName);
                 _persona = rec.Persona;
+                _pronounsOverride = string.IsNullOrEmpty(rec.Pronouns) ? null : rec.Pronouns;
                 lock (_facts)
                 {
                     foreach (var t in rec.Facts) _facts.Add(new FactRec { Text = t, Tick = _tick });
@@ -687,6 +696,9 @@ namespace KKLLMNPC
 
         private string InferPronouns()
         {
+            // The NPC's own declaration wins (set_pronouns) — the body's anatomy is a
+            // default, not an order ("let them change their pronouns").
+            if (!string.IsNullOrEmpty(_pronounsOverride)) return _pronounsOverride;
             string g = InferGender();
             if (g == "male") return "he/him";
             if (g == "female") return "she/her";
@@ -893,6 +905,11 @@ namespace KKLLMNPC
                             //EmitAmbient("hah~"); // being entered
                             _stimSource = whoPen; // name the source: partner or machine part
                             _stimSourceT = now;
+                            // The model's OWN body event: sex reaches CONSOLE MODE as a
+                            // world event now — models used to learn "there's an egg in
+                            // me" minutes later and never knew they were being entered.
+                            PushWorldEvent("[sex] you are BEING PENETRATED — " + whoPen + " entered your " + st.hole
+                                + ". This is real and happening NOW; respond (say), match/ask the rhythm, or use `feel` + `thrust` to take part — you may be locked in an animation meanwhile");
                         }
                         st.src = penetrator.gameObject != null ? penetrator.transform : null;
                         float d = worldSpaceDistanceToPenetrator;
@@ -900,15 +917,100 @@ namespace KKLLMNPC
                         st.vel = Mathf.Lerp(st.vel, (d - st.depth) / dt, 0.2f);
                         st.depth = d;
                         st.lastT = now;
+                        // Depth history for the rhythm read (TrimDegenerateRepeat-free):
+                        st.History.Add(now);
+                        st.History.Add(d);
+                        while (st.History.Count > 2 && now - (float)st.History[0] > 5.0) st.History.RemoveRange(0, 2);
                     }
                     else if (_pen.TryGetValue(penetrator, out st))
                     {
                         _pen.Remove(penetrator); // pulled out
                         Logger.LogInfo(whoPen + " pulled out");
+                        PushWorldEvent("[sex] " + whoPen + " withdrew — that round is over; your body is yours again (say how it was, if you like)");
                     }
                 }
             }
             catch (Exception) { }
+        }
+
+        // PenRhythmText reads OUR penetrables' history; this form takes the dict.
+        private string RhythmFrom(Dictionary<object, PenState> dict)
+        {
+            try
+            {
+                lock (dict)
+                {
+                    foreach (var kv in dict)
+                    {
+                        var st = kv.Value;
+                        int pairs = st == null || st.History == null ? 0 : st.History.Count / 2;
+                        if (pairs < 4) continue;
+                        float now = st.History[(pairs - 1) * 2];
+                        float windowStart = now - 3f;
+                        float min = float.MaxValue, max = float.MinValue;
+                        float prevD = 0f, prevT = 0f, lastDelta = 0f, firstT = 0f;
+                        bool first = true;
+                        int reversals = 0;
+                        for (int p = 0; p < pairs; p++)
+                        {
+                            float t = st.History[p * 2], d = st.History[p * 2 + 1];
+                            if (t < windowStart) continue;
+                            if (first) { first = false; prevD = d; prevT = t; min = d; max = d; firstT = t; continue; }
+                            min = Mathf.Min(min, d); max = Mathf.Max(max, d);
+                            float delta = d - prevD;
+                            if (lastDelta != 0f && Mathf.Abs(lastDelta) > 0.02f && Mathf.Abs(delta) > 0.02f
+                                && Mathf.Sign(delta) != Mathf.Sign(lastDelta))
+                                reversals++;
+                            if (Mathf.Abs(delta) > 0.01f) lastDelta = delta;
+                            prevD = d;
+                            prevT = t;
+                        }
+                        float span = Mathf.Max(0.25f, prevT - firstT);
+                        float strokesPerSec = reversals * 0.5f / span;
+                        string pace = strokesPerSec < 0.6f ? "slow" : strokesPerSec < 1.8f ? "steady" : "fast";
+                        string depthWord = (max - min) < 0.05f
+                            ? (max < 0.15f ? "shallow, holding" : "held steady at " + F(max) + "m")
+                            : "depth varying " + F(min) + "m to " + F(max) + "m";
+                        string trend = st.vel > 0.08f ? "deepening" : st.vel < -0.08f ? "pulling out" : "steady";
+                        return st.name + ": " + pace + " (" + strokesPerSec.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
+                            + " strokes/s), " + depthWord + ", " + trend;
+                    }
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        // The rhythm read in words (things inside ME): strokes/sec (depth reversals
+        // over the last 3s), depth range, motion trend — a graph the model can react
+        // to instead of guessing. Used by the feeling tool + the console anchor.
+        private string PenRhythmText()
+        {
+            return RhythmFrom(_pen);
+        }
+
+        // One anchor line about the live intimacy state (console mode has no
+        // perception payload — without it, being entered/filled went unnoticed while
+        // it happened). null when nothing is going on / low stimulation.
+        private string SexAnchorText()
+        {
+            try
+            {
+                if (_pen.Count > 0)
+                {
+                    string rhythm = RhythmFrom(_pen);
+                    return "being penetrated (" + (rhythm != null ? rhythm : "someone is inside you") + ") — mid-play: `feel` for details, thrust to ride the rhythm";
+                }
+                if (_dickIn.Count > 0)
+                {
+                    string rhythm = RhythmFrom(_dickIn);
+                    return "you are penetrating (" + (rhythm != null ? rhythm : "you're inside someone/something") + ") — thrust to raise the rhythm";
+                }
+                if (_kobold.stimulation > 0.35f)
+                    return "stimulation " + F(_kobold.stimulation) + " — you want play";
+            }
+            catch (Exception) { }
+            return null;
         }
 
         // Rough hole classification from the penetrable's transform name/location.

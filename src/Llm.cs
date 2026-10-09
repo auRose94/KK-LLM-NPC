@@ -226,9 +226,12 @@ namespace KKLLMNPC
             }
             if (finalName == null)
             {
-                // First: a curated flavorful name (a numbered "Kobold-100" reads like
-                // a unit label — the mechanical style is the LAST resort).
-                try { finalName = NameRegistry.TryFlavor(); } catch (Exception) { }
+                // First: a curated flavorful name GENDERED to the body (a she/her
+                // body shouldn't be auto-named "Gnarl" — models don't always complete
+                // name selection, so the fallback must at least make sense with the
+                // pronouns they'll be read with).
+                try { finalName = NameRegistry.TryFlavorFor(InferGender()); } catch (Exception) { }
+                if (finalName == null) try { finalName = NameRegistry.TryFlavor(); } catch (Exception) { }
                 if (finalName != null)
                     Logger.LogInfo("KKLLMNPC: name selection: flavor fallback '" + finalName + "' (LLM unavailable or rejected)");
                 else
@@ -292,7 +295,10 @@ namespace KKLLMNPC
                     // Thinking families need many tokens for reasoning before the
                     // name — 16 dies inside the marker block, which is why name
                     // selection historically failed on reasoner models.
-                    ["max_tokens"] = FamilyProfile.EmitsThinkBlocks ? 320 : 16,
+                    // max_tokens: reasoners need CoT headroom; other models need room
+                    // for preamble/JSON-shaped answers (observed: act-JSON instead of
+                    // a bare name) — 128 gives those shapes room to land complete.
+                    ["max_tokens"] = FamilyProfile.EmitsThinkBlocks ? 320 : 128,
                     ["stream"] = false,
                 };
                 string body = Json.Write(payload);
@@ -308,11 +314,77 @@ namespace KKLLMNPC
                     if (choices == null || choices.Count == 0) return null;
                     var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
                     if (msg == null) return null;
-                    // Strip reasoning markers first: on reasoner models the content
-                    // must not be validated as a whole (the marker text would never
-                    // match the name pattern).
-                    string content = ModelFamilies.StripThinkBlocks((msg.GetValueOrDefault("content") as string) ?? "");
+                    // Some servers put the real text in 'reasoning_content' and/or non-
+                    // string content parts — try all the shapes before declaring empty.
+                    string content = msg.GetValueOrDefault("content") as string;
+                    if (string.IsNullOrEmpty(content))
+                    {
+                        try
+                        {
+                            var partsObj = msg.GetValueOrDefault("content") as List<object>;
+                            if (partsObj != null)
+                            {
+                                var sb2 = new System.Text.StringBuilder();
+                                foreach (var part in partsObj)
+                                {
+                                    var pd = part as Dictionary<string, object>;
+                                    object txt;
+                                    if (pd != null && pd.TryGetValue("text", out txt)) sb2.Append(txt).Append(' ');
+                                }
+                                content = sb2.ToString();
+                            }
+                        }
+                        catch (Exception) { }
+                    }
+                    if (string.IsNullOrEmpty(content))
+                    {
+                        try { content = msg.GetValueOrDefault("reasoning_content") as string ?? ""; } catch (Exception) { }
+                    }
+                    content = ModelFamilies.StripThinkBlocks(content ?? "");
+                    if (string.IsNullOrEmpty(content))
+                    {
+                        // Log the MESSAGE FIELD (the actual answer container) — the old
+                        // raw-prefix truncation cut exactly before the interesting part.
+                        try { Logger.LogWarning("[" + (gender ?? "?") + "] name selection: empty content — message was: " + Json.Write(msg).Substring(0, Math.Min(300, Json.Write(msg).Length))); }
+                        catch (Exception) { }
+                    }
                     content = content.Trim().Trim('"', '\'', ' ', '\n', '\r', '\t');
+                    // Models saturated on this mod's own contract answer the name ask
+                    // with an act-shaped JSON object ({"name":"Ember"}) — or wrap it in
+                    // code fences. Parse both shapes before validating.
+                    try
+                    {
+                        string unwrapped = content;
+                        if (unwrapped.StartsWith("```", StringComparison.Ordinal))
+                        {
+                            int nl = unwrapped.IndexOf('\n');
+                            int end = unwrapped.IndexOf("```", nl + 1, StringComparison.Ordinal);
+                            if (nl >= 0 && end > nl) unwrapped = unwrapped.Substring(nl + 1, end - nl - 1);
+                        }
+                        if (unwrapped.StartsWith("{", StringComparison.Ordinal))
+                        {
+                            var nd = Json.Parse(unwrapped) as Dictionary<string, object>;
+                            if (nd != null)
+                            {
+                                string nm = (nd.GetValueOrDefault("name") ?? nd.GetValueOrDefault("action")) as string;
+                                if (!string.IsNullOrEmpty(nm))
+                                {
+                                    content = nm.Trim();
+                                    Logger.LogInfo("[family] name selection: model answered in JSON — took name '" + content + "'");
+                                }
+                            }
+                        }
+                        else if (unwrapped.StartsWith("name", StringComparison.OrdinalIgnoreCase) || unwrapped.StartsWith("my name", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // "name: Ember" / "my name is Ember" shapes — take the tail word.
+                            int colon = unwrapped.IndexOf(':');
+                            int is_ = unwrapped.IndexOf("is ", StringComparison.OrdinalIgnoreCase);
+                            string tail = colon >= 0 ? unwrapped.Substring(colon + 1) : is_ >= 0 ? unwrapped.Substring(is_ + 3) : "";
+                            tail = tail.Trim().Trim('"', '\'', ' ', '.');
+                            if (tail.Length >= 2 && tail.Length <= 16) { content = tail; }
+                        }
+                    }
+                    catch (Exception) { }
                     // Validate: alphanumeric, 2-12 chars (matches the prompt)
                     if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 12
                         && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9]+$"))
@@ -715,9 +787,10 @@ namespace KKLLMNPC
 
                 // With a vision-capable action model, attach frames as proper
                 // image parts. Send past images (oldest first) plus current frame
-                // so the model sees visual context over time.
+                // so the model sees visual context over time. The cooldown pauses
+                // attaching when the server rejects image parts (400 ladder).
                 object userContent = text;
-                if (imageB64 != null)
+                if (imageB64 != null && Time.unscaledTime >= _imageCooldownUntil)
                 {
                     var parts = new System.Collections.Generic.List<Dictionary<string, object>>();
                     parts.Add(new Dictionary<string, object> { ["type"] = "text", ["text"] = text });
@@ -736,7 +809,8 @@ namespace KKLLMNPC
                 // For small models: skip json_schema (they can't follow it) and
                 // rely on the compact prompt + lenient parsing instead.
                 // If strict=true causes empty replies, we'll fall back next turn.
-                bool useSchema = !IsSmallModel && _emptyReplies < 2;
+                bool useSchema = !IsSmallModel && _emptyReplies < 2
+                    && Time.unscaledTime >= _schemaCooldownUntil; // paused after server rejections
                 bool useStrict = _emptyReplies == 0;  // only strict on first try
                 var schema = useSchema ? ActSchema() : null;
                 var responseFormat = useSchema
@@ -819,28 +893,137 @@ namespace KKLLMNPC
         // POST a chat payload and return the assistant's content (sanitized), or null
         // on failure (logged). Shared by the legacy act-JSON path (QueryLLM) and the
         // console path (QueryConsoleModel). toolName/toolArgs capture any tool_calls.
+        // 400-recovery cooldowns: after the server rejects image parts / response_format
+        // once, stop attaching them for a while instead of re-failing every tick.
+        private const float ImageCooldownSeconds = 90f, SchemaCooldownSeconds = 300f;
+        private float _imageCooldownUntil, _schemaCooldownUntil;
+
         private string PostChatPayload(Dictionary<string, object> payload, out string toolName, out string toolArgs)
         {
             toolName = null; toolArgs = null;
             try
             {
-                string body = Json.Write(payload);
-                // SafeHttp retries transient failures (5xx/408/429/transport) with
-                // backoff and fails fast on permanent ones, and hands back the error
-                // body so we can tell "no model loaded" from a network blip.
-                // Cap the read: this path streams, so a runaway server can't OOM us.
-                string rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
-                    retries: 3, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
-                    onRetry: r => Logger.LogDebug("LLM retry: " + r),
-                    onError: ReportEndpointError);
-                if (rawResponse == null) { NoteEndpointFail(); return null; }
+                string body;
+                string lastError = null;
+                string rawResponse = null;
+                // HTTP 4xx on the REQUEST is a payload problem, not a transient one:
+                // the engine hiccup (peg-native stream format) retries unchanged; a
+                // context/image/format/size rejection shrinks the payload (two
+                // degradations max) before this tick gives up.
+                int engineTries = 0, shrinkStage = 0;
+                while (true)
+                {
+                    body = Json.Write(payload);
+                    rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                        retries: 3, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
+                        onRetry: r => Logger.LogDebug("LLM retry: " + r),
+                        onError: err => lastError = err);
+                    if (rawResponse != null) break;
+                    if (lastError == null) { NoteEndpointFail(); return null; }
+                    string category = HttpRetryLadder.Classify(lastError);
+                    if (category == "transient_engine")
+                    {
+                        if (++engineTries > 2) { NoteEndpointFail(); return null; }
+                        Logger.LogWarning("[" + MyName() + "] server engine hiccup (peg/500 stream format) — retrying unchanged payload (" + engineTries + "/2)");
+                        try { Thread.Sleep(1200); } catch (Exception) { }
+                        lastError = null;
+                        continue;
+                    }
+                    if (category == null)
+                    {
+                        // Not a payload problem — keep the human-readable guidance
+                        // ("No models loaded", auth, model-not-found...).
+                        ReportEndpointError(lastError);
+                        NoteEndpointFail();
+                        return null;
+                    }
+                    if (shrinkStage >= 2)
+                    {
+                        Logger.LogWarning("[" + MyName() + "] " + category + " rejection persists after " + shrinkStage + " degradations — giving up this tick");
+                        NoteEndpointFail();
+                        return null;
+                    }
+                    shrinkStage++;
+                    ApplyRequestFix(payload, category, shrinkStage);
+                    lastError = null;
+                }
                 NoteEndpointOk(); // reachable — reset the cross-tick breaker even if parsing then fails
-                return ParseChatResponse(rawResponse, out toolName, out toolArgs);
+                // The engine's 500s ALSO arrive INSIDE a 200-OK stream ("event: error …
+                // peg-gemma4 format") — the payload was fine, the output stream wasn't.
+                // Empty content + such an error event = retry the same payload.
+                string content = ParseChatResponse(rawResponse, out toolName, out toolArgs);
+                if (content == null && toolName == null)
+                {
+                    string streamErr = HttpRetryLadder.StreamEngineError(rawResponse);
+                    if (streamErr != null && engineTries < 2)
+                    {
+                        engineTries++;
+                        Logger.LogWarning("[" + MyName() + "] stream carried an engine 500 (" + streamErr + ") — retrying unchanged payload (" + engineTries + "/2)");
+                        try { Thread.Sleep(1200); } catch (Exception) { }
+                        lastError = null;
+                        while (true)
+                        {
+                            body = Json.Write(payload);
+                            rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                                retries: 3, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
+                                onRetry: r => Logger.LogDebug("LLM retry: " + r),
+                                onError: err => lastError = err);
+                            if (rawResponse == null)
+                            {
+                                if (lastError != null) ReportEndpointError(lastError);
+                                NoteEndpointFail();
+                                return null;
+                            }
+                            NoteEndpointOk();
+                            content = ParseChatResponse(rawResponse, out toolName, out toolArgs);
+                            if (content != null || toolName != null) return content;
+                            streamErr = HttpRetryLadder.StreamEngineError(rawResponse);
+                            if (streamErr == null || engineTries >= 2) return content ?? null;
+                            engineTries++;
+                            Logger.LogWarning("[" + MyName() + "] engine 500 again (" + streamErr + ") — retrying (" + engineTries + "/2)");
+                            try { Thread.Sleep(1200); } catch (Exception) { }
+                        }
+                    }
+                }
+                return content;
             }
             catch (Exception e)
             {
                 Logger.LogWarning("LLM endpoint: " + e.Message);
                 return null;
+            }
+        }
+
+        // One degradation step on the payload, per the server's complaint.
+        private void ApplyRequestFix(Dictionary<string, object> payload, string category, int stage)
+        {
+            try
+            {
+                switch (category)
+                {
+                    case "image":
+                        _imageCooldownUntil = Time.unscaledTime + ImageCooldownSeconds;
+                        HttpRetryLadder.ShrinkMessages(payload, 2); // drops image parts (and, belt, the big blobs)
+                        Logger.LogWarning("[" + MyName() + "] server rejected image parts — dropped them this request and pausing images for " + Mathf.RoundToInt(ImageCooldownSeconds) + "s (if this model can't see at all, set [VisionModel] and SendImage=false)");
+                        return;
+                    case "response_format":
+                        _schemaCooldownUntil = Time.unscaledTime + SchemaCooldownSeconds;
+                        payload.Remove("response_format");
+                        Logger.LogWarning("[" + MyName() + "] server rejected response_format — retrying without the schema (paused for " + Mathf.RoundToInt(SchemaCooldownSeconds) + "s)");
+                        return;
+                    case "max_tokens":
+                        payload["max_tokens"] = 512;
+                        Logger.LogWarning("[" + MyName() + "] server rejected max_tokens — retrying with 512");
+                        return;
+                    default:
+                        HttpRetryLadder.ShrinkMessages(payload, stage);
+                        Logger.LogInfo("[" + MyName() + "] payload rejected (" + category + ") — shrunk (stage " + stage + "): radar/rays dropped, arrays capped" + (stage >= 2 ? ", oldest conversation trimmed" : ""));
+                        return;
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("shrink: " + e.Message);
             }
         }
 

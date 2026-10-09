@@ -41,6 +41,10 @@ namespace KKLLMNPC
                     _harmony.Patch(stopRoutineMoveNext,
                         prefix: new HarmonyMethod(typeof(Patches).GetMethod(nameof(StopAnimationRoutine_MoveNext_Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
 
+                // Swallow-vore trigger: the player's drop while looking up becomes a
+                // swallow (SwallowManager owns the trigger rule + suppresses the drop).
+                SwallowManager.ApplyPatches(_harmony);
+
                 log.LogInfo("KKLLMNPC: animator rotation patches applied.");
             }
             catch (Exception e)

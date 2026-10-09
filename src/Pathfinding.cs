@@ -88,14 +88,16 @@ namespace KKLLMNPC
             float timeBudget = _cfgPathTimeBudget != null ? _cfgPathTimeBudget.Value : Consts.PathTimeBudgetMs;
             int nodeBudget = _cfgPathMaxExpansions != null ? _cfgPathMaxExpansions.Value : Consts.PathMaxExpansions;
             var a = new Astar(cols, rows, gc, gl, grid, timeBudget, nodeBudget);
-            a.Expand(sx, szz, sl);
-            int[] nodes;
-            if (!a.Build(out nodes))
+            try
             {
-                Logger.LogInfo("path: null — A* expanded " + a.ExpandedCount + " nodes, no route to goal cell");
-                return null;
-            }
-            if (nodes.Length < 1) return null;
+                a.Expand(sx, szz, sl);
+                int[] nodes;
+                if (!a.Build(out nodes))
+                {
+                    Logger.LogInfo("path: null — A* expanded " + a.ExpandedCount + " nodes, no route to goal cell");
+                    return null;
+                }
+                if (nodes.Length < 1) return null;
 
             // The door warning reflects the route actually chosen, not door cells
             // the search merely considered while exploring alternatives.
@@ -135,6 +137,8 @@ namespace KKLLMNPC
             if (outWay.Count >= 2 && outWay[outWay.Count - 1] == outWay[outWay.Count - 2])
                 outWay.RemoveAt(outWay.Count - 1);
             return outWay.Count >= 2 ? outWay : null;
+            }
+            finally { a.Release(); }
         }
 
         // Chest-height line-of-sight between two waypoints, each orbited at its own
@@ -411,6 +415,75 @@ namespace KKLLMNPC
         private readonly int _nodeBudget;
         private int _bestNode;  // node closest to goal when budget exhausted
 
+        // ------------------------------------------------------------------
+        // scratch pool — A* over full-scene grids allocated + manually zeroed
+        // ~185MB PER CALL (MainMap++night2: 1150x1119 x layers) and the zero pass
+        // is a slow int-by-int loop: one cd call cost ~0.2-0.4s of main thread and
+        // huge GC churn; under follow pressure the main thread drowned entirely
+        // (the 2026-10-02 freeze). One grow-only pool, zeroed once, with per-run
+        // TOUCHED-node restore on release. A* calls serialize (marshal/main); an
+        // overlapping run falls back to private arrays. Small grids skip the pool —
+        // a fresh small allocation is cheaper than holding a big one forever.
+        // ------------------------------------------------------------------
+        private static int[] _poolG, _poolCame;
+        private static bool[] _poolClosed;
+        private static int _poolActiveN;
+        private static bool _poolBusy;
+        private static readonly object _poolLock = new object();
+        private bool _usingPool;
+        private List<int> _touched = new List<int>(2048);
+
+        private static bool TryPooled(int N, out int[] g, out int[] came, out bool[] closed)
+        {
+            g = null; came = null; closed = null;
+            lock (_poolLock)
+            {
+                if (_poolBusy || N < 262144) return false;
+                if (_poolG == null || _poolG.Length < N)
+                {
+                    _poolG = new int[N];
+                    _poolCame = new int[N];
+                    _poolClosed = new bool[N];
+                    // One-time semantic init (the A* invariant: unvisited = MaxValue /
+                    // -1); Release() restores exactly the touched nodes per run.
+                    for (int i = 0; i < N; i++) { _poolG[i] = int.MaxValue; _poolCame[i] = -1; }
+                }
+                else if (_poolActiveN < N)
+                {
+                    // The pool grew to a previous larger size; untouched nodes keep
+                    // their init values, and the just-grown range needs it now.
+                    for (int i = _poolActiveN; i < N; i++) { _poolG[i] = int.MaxValue; _poolCame[i] = -1; }
+                }
+                g = _poolG; came = _poolCame; closed = _poolClosed;
+                _poolActiveN = N;
+                _poolBusy = true;
+                return true;
+            }
+        }
+
+        // Restore the pool invariants for the nodes this run touched, then free it.
+        public void Release()
+        {
+            try
+            {
+                if (_touched.Count > 0 && _usingPool)
+                    for (int i = 0; i < _touched.Count; i++)
+                    {
+                        int n = _touched[i];
+                        _gScore[n] = int.MaxValue;
+                        _cameFrom[n] = -1;
+                        _closed[n] = false;
+                    }
+            }
+            catch (Exception) { }
+            _touched.Clear();
+            if (_usingPool)
+            {
+                _usingPool = false;
+                lock (_poolLock) _poolBusy = false;
+            }
+        }
+
         public Astar(int cols, int rows, int goalCi, int goalL, ILayerGrid grid)
             : this(cols, rows, goalCi, goalL, grid, null, null)
         { }
@@ -425,8 +498,12 @@ namespace KKLLMNPC
             _timeBudgetMs = timeBudgetMs ?? Consts.PathTimeBudgetMs;
             _nodeBudget = nodeBudget ?? Consts.PathMaxExpansions;
             int N = cols * rows * grid.MaxLayerCount();
-            _gScore = new int[N]; _cameFrom = new int[N]; _closed = new bool[N];
-            for (int i = 0; i < N; i++) { _gScore[i] = int.MaxValue; _cameFrom[i] = -1; }
+            if (TryPooled(N, out _gScore, out _cameFrom, out _closed)) _usingPool = true;
+            else
+            {
+                _gScore = new int[N]; _cameFrom = new int[N]; _closed = new bool[N];
+                for (int i = 0; i < N; i++) { _gScore[i] = int.MaxValue; _cameFrom[i] = -1; }
+            }
             _bestNode = -1;
         }
 
@@ -478,6 +555,7 @@ namespace KKLLMNPC
         {
             int startNode = _grid.Node(_grid.Ci(sx, sz), sl);
             int goalNode = _grid.Node(_goalCi, _goalL);
+            if (_gScore[startNode] == int.MaxValue) _touched.Add(startNode);
             _gScore[startNode] = 0;
             HeapPush(startNode, H(sx, sz));
 
@@ -557,6 +635,7 @@ namespace KKLLMNPC
                     int ng = _gScore[cur] + add;
                     if (ng < _gScore[nid])
                     {
+                        if (_gScore[nid] == int.MaxValue) _touched.Add(nid); // first write — restored on Release
                         _gScore[nid] = ng;
                         _cameFrom[nid] = cur;
                         HeapPush(nid, ng + H(nx, nz));

@@ -15,6 +15,7 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 
 - **Possession pool** — every AI kobold the world produces gets an agent (a body that appears later, e.g. from a delivery or breeding, is claimed as it shows up). With `SpawnMissingKobolds` on, it can also spawn extra AI kobolds near the player until `MaxNPCs` is met.
 - **Pickup awareness** — knows when its body is grabbed, tracks a position trail while carried, and reports where it was moved (thrown is flagged as startling); it also auto-recovers if ragdolled next to the mail/sell machine and will never interact with that machine, since climbing in starts the sell timer.
+- **Swallow-vore (you, the player — opt-in)** — grab a kobold, aim steeply up (`SwallowLookUpDot`, default ≈70°+, near max-up so a casual drop can never trigger it), drop: you swallow them whole instead of dropping. They ride into your mouth (~2s) and are **hidden once fully swallowed** (no sticking-out clipping); they still speak via chat, steering gated, and the digestion is narrated to them as events. What happens at the end is `SwallowEffect`: **Egg** (default) pops an egg at your feet mixing their genes with yours — plant it in soil and the hatched body wakes as the SAME person, changed genes, in control again; **BellyEgg** puts the genetics inside YOUR belly instead — sit on a nest and lay them yourself, then plant that egg; **Grow** absorbs them into you (bigger and/or stronger, no egg); **Destroy** leaves them simply gone. In the no-rebirth modes (Grow/Destroy) the consumed one's **saved AI memories are erased from disk** to sell the effect. Held player bodies can never be swallowed. **No-cheat escape hatch: type "swallow abort"** (or "spit out", "cough up", "regurgitate", "swallow stop") **in the game chat** and everyone mid-digest is heaved back up alive and whole — scale, colliders, renderers, ragdoll and their LLM session all restored, set down in front of you; the swallowed NPC gets the release as an event and remembers it. **Force-feeding: any kobold — NPC or player — dropping a held person right onto another kobold's head makes the receiver swallow them**: the receiver walks around with the digest running inside (outcome per `SwallowEffect`), the dropped one gets the mode-honest narration naming who fed them, the dropper's `drop` result says `force_fed` instead of "dropped", players can be neither victim nor receiver (grief guard), and an eater already digesting someone refuses another. The whole feature is off by default: it lives in **[LittleTreats]**, opt-in only.
 
 - **Frustum raycasts** around the head (down/level/up rows) — what's where, with distances.
 - **8-direction clearance** — which way is open, what's a wall/sill/window.
@@ -89,6 +90,15 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
 - **Body control tools** — `thrust` (hip animation), `erection`, `mount`/`unmount`, `orgasm`
   with consent-aware prompt guidance.
 - **Reagent/egg awareness** — detects drinks, sprays, pumps, and egg readiness; seeks a nest to lay.
+- **Swallow-vore (opt-in)** — release-while-looking-up swallows the held person into the
+  player (their LLM keeps narrating from inside the stomach), digestion timeline, then a
+  configurable ending: egg at your feet / egg in your belly (lay it on a nest yourself) /
+  absorb their size and strength / just destroy. Egg endings reconstitute the same person
+  in a fresh body with changed genes and their persona back in control (plant in soil);
+  a swallowed NPC's events ("the walls churn around you", "you are becoming an EGG") are
+  world events like any other — no special prompt needed — and the narration is honest
+  per mode (Grow/Destroy don't promise a rebirth). The reborn body's claim path is
+  the ordinary one, so persona restoration rides on the existing MemoryStore keys.
 - **Farming & cooking** — `plant` → `water` → `harvest` cycle, `plant_egg`, `feed_blender`, `grind`.
   Perception reports nearby plants and cooking equipment.
 - **Identity** — per-NPC orientation, trans status, expressed persona. `rename` tool with
@@ -215,6 +225,7 @@ Logs one line per NPC: `model family 'qwen' from 'qwen3:14b' — …`.
 | `MaxRounds` | 3 | 1–8 | Command rounds per think cycle (each round = one LLM call after reading output) |
 | `MaxTokens` | 256 | 64–4096 | Max tokens per console reply (command lines are short — low is fast). Reasoning families: automatic floor `256 + headroom`; your value stands when higher. |
 | `HistoryMessages` | 30 | 6–120 | Rolling conversation window (system prompt always kept) |
+| `AutoScreenshotTicks` | 6 | 0–60 | Attach the NPC's first-person view automatically every N console turns (vision-capable models only, and only when it moved/turned; also right after a stuck streak); 0 = off |
 | `SystemPromptFile` | `system_prompt_console.txt` | — | Console persona/world-rules file (command list + protocol appended automatically) |
 
 ### `[Vision]` — the background "eyes" thread
@@ -375,6 +386,9 @@ mcs -target:exe -out:/tmp/t_pf.exe tests/test_pathcore.cs src/PathCore.cs && mon
 
 # Chat similarity (19 tests: Jaccard, Levenshtein, fuzzy matching)
 mcs -target:exe -out:/tmp/t_chat.exe tests/test_chat_similarity.cs src/ChatSimilarity.cs && mono /tmp/t_chat.exe
+
+# Swallow-vore logic (57 tests: trigger rules, conversion phases, abort command, fingerprint format)
+mcs -target:exe -out:/tmp/t_sw.exe tests/test_swallow.cs src/SwallowLogic.cs && mono /tmp/t_sw.exe
 ```
 
 ## Architecture

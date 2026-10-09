@@ -667,17 +667,21 @@ namespace KKLLMNPC
             }
 
             var a = new Astar(b.Cols, b.Rows, gCi, gl, grid);
-            a.Expand(sx, sz, sl);
-            int[] nodes;
-            if (!a.Build(out nodes) || nodes == null || nodes.Length < 1) return null;
+            try
+            {
+                a.Expand(sx, sz, sl);
+                int[] nodes;
+                if (!a.Build(out nodes) || nodes == null || nodes.Length < 1) return null;
 
-            var way = new List<Vector3>(nodes.Length + 1);
-            way.Add(start);
-            for (int i = 1; i < nodes.Length; i++)
-                way.Add(grid.CellPos(nodes[i] / grid.MaxLayerCount(), nodes[i] % grid.MaxLayerCount()));
-            if (way.Count == 1) way.Add(goal);
-            else way[way.Count - 1] = new Vector3(goal.x, grid.H(gCi, gl), goal.z);
-            return way.Count >= 2 ? way : null;
+                var way = new List<Vector3>(nodes.Length + 1);
+                way.Add(start);
+                for (int i = 1; i < nodes.Length; i++)
+                    way.Add(grid.CellPos(nodes[i] / grid.MaxLayerCount(), nodes[i] % grid.MaxLayerCount()));
+                if (way.Count == 1) way.Add(goal);
+                else way[way.Count - 1] = new Vector3(goal.x, grid.H(gCi, gl), goal.z);
+                return way.Count >= 2 ? way : null;
+            }
+            finally { a.Release(); } // the big-grid scratch pool MUST come back
         }
 
         // A* + string-pull in one shot. Main thread (smoothing raycasts).

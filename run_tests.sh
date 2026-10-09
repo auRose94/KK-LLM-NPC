@@ -77,12 +77,15 @@ run_suite() {
 # Suites that need no game assemblies — these are what CI runs.
 run_headless_suites() {
   run_suite json        tests/test_json.cs tests/test_json_standalone.cs -- src/Json.cs
+  run_suite textutil    tests/test_textutil.cs -- src/TextUtil.cs
   run_suite pathcore    tests/test_pathcore.cs -- src/PathCore.cs
   run_suite goalresolver tests/test_goalresolver.cs -- src/PathCore.cs
   run_suite contextcore tests/test_contextcore.cs -- src/ContextCore.cs src/Json.cs src/Constants.cs
   run_suite chat        tests/test_chat_similarity.cs -- src/ChatSimilarity.cs
   run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ChatSimilarity.cs
   run_suite compass     tests/test_compass.cs -- src/Compass.cs
+  run_suite swallow     tests/test_swallow.cs -- src/SwallowLogic.cs
+  run_suite httpretry   tests/test_httpretry.cs -- src/HttpRetry.cs src/Json.cs
   run_suite safehttp    tests/test_safehttp.cs -- src/SafeHttp.cs
   run_suite modelfamilies tests/test_modelfamilies.cs -- src/ModelFamilies.cs
 }

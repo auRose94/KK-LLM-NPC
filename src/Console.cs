@@ -54,6 +54,49 @@ namespace KKLLMNPC
         private float _lastIdleChatterNudge; // talking-to-no-one nudge throttle
         // Lines of the last user (terminal) message, for transcript-echo skipping.
         private HashSet<string> _echoSet;
+        // Auto-view cadence state (MaybeAutoScreenshot).
+        private int _consoleTurnsSinceShot;
+        private Vector3 _lastShotPos;
+        private float _lastShotYaw;
+
+        // Attach the current first-person view automatically: every N turns when the
+        // body actually moved/turned, and right after a stuck streak — but only for
+        // vision-capable models (a text model would 400 on image parts; the 400
+        // ladder handles that too). Console's only images used to be the model's own
+        // `screenshot` calls — which never happened, so models effectively never used
+        // their eyes to understand a room.
+        private void MaybeAutoScreenshot()
+        {
+            int every = _cfgConsoleAutoShot != null ? _cfgConsoleAutoShot.Value : 6;
+            if (every <= 0) return;
+            if (FamilyProfile == null || !FamilyProfile.VisionCapable) return;
+            Vector3 pos;
+            float yaw;
+            try
+            {
+                if (!IsAlive(_kobold)) return;
+                pos = _kobold.transform.position;
+                yaw = BodyYaw();
+            }
+            catch (Exception) { return; }
+            bool stuckNow = _consoleStuckCount >= 2;
+            if (!stuckNow)
+            {
+                if (_consoleTurnsSinceShot < every) { _consoleTurnsSinceShot++; return; }
+                bool moved = (_lastShotPos - pos).sqrMagnitude > 1.2f * 1.2f;
+                bool turned = Mathf.Abs(Mathf.DeltaAngle(_lastShotYaw, yaw)) > 25f;
+                if (!moved && !turned) return; // same spot, same view — the old frame stands
+            }
+            _consoleTurnsSinceShot = 0;
+            _lastShotPos = pos;
+            _lastShotYaw = yaw;
+            try
+            {
+                string b64 = (string)RunOnMainThread(() => (object)CaptureImageB64(), 10000);
+                if (!string.IsNullOrEmpty(b64)) _pendingShotB64 = b64;
+            }
+            catch (Exception) { }
+        }
 
         // Trimmed, non-empty lines of a terminal-bearing user message.
         private static HashSet<string> LastUserLineSet(string text)
@@ -236,7 +279,7 @@ namespace KKLLMNPC
             "THINGS: ls tags: ':busy' in use, ':needs_buy' buy its contract first, ':not_built' build it first, ':done' bought. " +
             "MONEY: your body has its own coins (shown in status/whoami/cat needs). `buy [name]` purchases whatever purchasable you stand next to — a machine contract (:needs_buy), the kobold dispenser, or a shop item. Walk there (cd) then buy; economy.purchasables lists costs. Buying needs no permission from anyone. " +
             "SOCIAL: one echo at a time; never repeat the same line twice; avoid emoji (they don't render). `emote <what you do>` is body language (renders *like this*) — reserve echo for actual speech. " +
-            "VISION: `screenshot` shows you your first-person view when you use it. " +
+            "VISION: `screenshot` shows you your first-person view whenever you ask; the mod also attaches it automatically every few turns (and when you get stuck) — USE the images: decide from what you SEE, not what you guess. " +
             "TERMINAL DISCIPLINE: never start a reply with '$' and never copy the terminal output back (the game already printed it) — replies are NEW command lines only; copy-echoes are skipped. And when a station is 'seat blocked' for you, don't retry blindly — cat stations / ls, pick another, or ask.";
 
         // The console protocol contract (appended to the persona).
@@ -286,6 +329,15 @@ namespace KKLLMNPC
         private string StateAnchorLine()
         {
             var parts = new List<string>();
+            // Live intimacy first — mid-play it outranks everything. Console had no
+            // perception payload, so being entered/loaded reached the model only via
+            // much-later belly/egg numbers.
+            try
+            {
+                string sexLine = SexAnchorText();
+                if (sexLine != null) parts.Add(sexLine);
+            }
+            catch (Exception) { }
             string goal;
             lock (_goalLock) { goal = _goal; }
             if (!string.IsNullOrEmpty(goal))
@@ -341,6 +393,17 @@ namespace KKLLMNPC
             catch (Exception) { }
             try
             {
+                // World events (grabs/throws/danger/SEX): the console used to drop
+                // these entirely — an NPC could be entered and loaded with cum and
+                // only notice later via its belly number. Same [event] line shape.
+                var world = DrainWorldEvents();
+                if (world != null)
+                    foreach (var w in world)
+                        if (w != null) sb.Append("[event] ").AppendLine(Sanitize(w.ToString()));
+            }
+            catch (Exception) { }
+            try
+            {
                 if (_lastAnswer != null && !_consoleAnswerDelivered && !_answerBusy)
                 {
                     sb.Append("[ask] Q: ").Append(_pendingQuestion ?? "").Append(" A: ").AppendLine(_lastAnswer);
@@ -367,6 +430,9 @@ namespace KKLLMNPC
                 _consoleSlept = false;
                 _consoleCmdsThisCycle = 0;
 
+                // Auto-view: give the model its eyes (config [Console] AutoScreenshotTicks).
+                MaybeAutoScreenshot();
+
                 // World events (player chat, reagent events, ask answers) + state anchor + prompt.
                 string events = DrainConsoleEvents();
                 string userText = events + StateAnchorLine() + "$\n";
@@ -390,6 +456,13 @@ namespace KKLLMNPC
                     // Reasoning markers must never reach command-line parsing — strip
                     // first so reasoning-only replies land in the empty-streak path.
                     reply = ModelFamilies.StripThinkBlocks(reply);
+                    // Models that invent tool-call markup ("ls<|whoami?<k>sleep]") put
+                    // their whole command queue inside it — recover those commands as
+                    // lines instead of letting the markup ride inside speech.
+                    string salvaged = ConsoleSalvage.Clean(reply);
+                    if (salvaged != reply)
+                        Logger.LogInfo("[" + MyName() + "] console: recovered command lines from garbled tool-markup");
+                    reply = salvaged;
                     AddConsoleMsg("assistant", reply);
 
                     if (reply.Length == 0)
@@ -535,12 +608,22 @@ namespace KKLLMNPC
                     {
                         string shot = _pendingShotB64;
                         _pendingShotB64 = null;
-                        var parts = new List<object>
+                        if (Time.unscaledTime < _imageCooldownUntil)
                         {
-                            new Dictionary<string, object> { ["type"] = "text", ["text"] = outSb.ToString() },
-                            new Dictionary<string, object> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object> { ["url"] = shot } },
-                        };
-                        AddConsoleMsg("user", parts.ToArray());
+                            // The server rejected image parts recently — don't burn the
+                            // screenshot into a guaranteed 400; tell the model instead.
+                            outSb.AppendLine("(image skipped: the server refused image parts recently — the mod paused images; screenshot again in a couple of minutes)");
+                            AddConsoleMsg("user", outSb.ToString());
+                        }
+                        else
+                        {
+                            var parts = new List<object>
+                            {
+                                new Dictionary<string, object> { ["type"] = "text", ["text"] = outSb.ToString() },
+                                new Dictionary<string, object> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object> { ["url"] = shot } },
+                            };
+                            AddConsoleMsg("user", parts.ToArray());
+                        }
                     }
                     else
                     {
@@ -807,13 +890,34 @@ namespace KKLLMNPC
             return new JsonObj(d);
         }
 
+        // id:7 is canonical; models also emit "id_7" / "id-8" (glued punctuation) and
+        // bare digits — all normalize to numeric id targeting.
+        private static readonly System.Text.RegularExpressions.Regex IdFormRegex =
+            new System.Text.RegularExpressions.Regex("^id[^0-9]{0,2}[0-9]+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
         private static string ArgTargetKey(string a)
         {
-            return a.StartsWith("id:", StringComparison.Ordinal) ? "id" : "name";
+            if (a == null) return "name";
+            string t = a.Trim();
+            return t.StartsWith("id:", StringComparison.Ordinal)
+                || IdFormRegex.IsMatch(t)
+                || (t.Length > 0 && t[0] >= '0' && t[0] <= '9' && (t.IndexOf(':') < 0))
+                ? "id" : "name";
         }
         private static string ArgTargetVal(string a)
         {
-            return a.StartsWith("id:", StringComparison.Ordinal) ? a.Substring(3) : a;
+            if (a == null) return a;
+            string t = a.Trim();
+            if (t.StartsWith("id:", StringComparison.Ordinal)) return t.Substring(3);
+            var m = IdFormRegex.Match(t);
+            if (m.Success)
+            {
+                var digits = new System.Text.StringBuilder();
+                for (int i = m.Value.Length - 1; i >= 0 && char.IsDigit(m.Value[i]); i--)
+                    digits.Insert(0, m.Value[i]);
+                return digits.ToString();
+            }
+            return t;
         }
 
         // ------------------------------------------------------------------
@@ -1404,12 +1508,15 @@ namespace KKLLMNPC
                 return FmtResult(ToolDropGoal(new JsonObj(new Dictionary<string, object> { ["reason"] = why })));
             }
             string goal = line.Payload ?? string.Join(" ", line.Args);
-            // Terminal-echo belt: a copied STATE-ANCHOR line ("goal: (none yet) |
-            // awake: 0h03m") must never become the goal itself.
+            // Terminal-echo / junk belt: neither a copied STATE-ANCHOR line ("goal:
+            // (none yet) | awake: 0h03m") nor a glued fence artifact ("get energy
+            // up-sleep```json{ "turn": -9}") may become the goal.
             string candidate = (goal ?? "").Trim();
             if (candidate.StartsWith(":", StringComparison.Ordinal)) candidate = candidate.Substring(1).Trim();
-            if (candidate.Length == 0 || candidate.Contains(" awake: ") || candidate.StartsWith("(none yet", StringComparison.Ordinal))
-                return "that looks like the status line, not a goal — try: goal <what you're doing>";
+            if (candidate.Length == 0 || candidate.Contains(" awake: ") || candidate.StartsWith("(none yet", StringComparison.Ordinal)
+                || candidate.Contains("```", StringComparison.Ordinal) || candidate.Contains("\"turn\"", StringComparison.Ordinal)
+                || candidate.Contains("json {", StringComparison.Ordinal))
+                return "that looks like status/terminal junk, not a goal — try: goal <what you're doing>";
             return FmtResult(ToolSetGoal(new JsonObj(new Dictionary<string, object> { ["goal"] = goal })));
         }
 

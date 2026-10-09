@@ -22,6 +22,7 @@ namespace KKLLMNPC
             public string Persona;   // the persona line the identity built
             public List<string> Facts;
             public string Goal;      // may be null/empty
+            public string Pronouns;  // the NPC's declared pronouns (set_pronouns); null = body default
             public string SavedUtc;
         }
 
@@ -59,6 +60,13 @@ namespace KKLLMNPC
 
         internal static void Save(string bodyKey, string name, string persona, List<string> facts, string goal)
         {
+            Save(bodyKey, name, persona, facts, goal, null);
+        }
+
+        // pronouns: the NPC's own declared pronouns (set_pronouns override) — restored
+        // with the rest of the life so a returned body still is who it declared.
+        internal static void Save(string bodyKey, string name, string persona, List<string> facts, string goal, string pronouns)
+        {
             try
             {
                 string file = FileName(bodyKey ?? "");
@@ -70,12 +78,32 @@ namespace KKLLMNPC
                 if (facts != null) foreach (var f in facts) if (!string.IsNullOrEmpty(f)) fs.Add(f);
                 d["facts"] = fs.ToArray();
                 d["goal"] = goal ?? "";
+                if (!string.IsNullOrEmpty(pronouns)) d["pronouns"] = pronouns;
                 d["saved_utc"] = System.DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
                 lock (_lock)
                 {
                     System.IO.File.WriteAllText(
                         System.IO.Path.Combine(Dir(), file),
                         Json.Write(d));
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // Erase a body's saved life entirely. Swallow-vore's no-rebirth modes
+        // (Grow/Destroy) call this — the person was consumed for good, so their
+        // records go too and the effect isn't undercut by them re-appearing whole.
+        // No-ops when nothing is recorded; lock-serialized like Save.
+        internal static void Delete(string bodyKey)
+        {
+            try
+            {
+                string file = FileName(bodyKey ?? "");
+                if (file == null || Dir() == null) return;
+                lock (_lock)
+                {
+                    string path = System.IO.Path.Combine(Dir(), file);
+                    if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
                 }
             }
             catch (Exception) { }
@@ -97,6 +125,7 @@ namespace KKLLMNPC
                 rec.Name = raw.GetValueOrDefault("name") as string;
                 rec.Persona = raw.GetValueOrDefault("persona") as string;
                 rec.Goal = raw.GetValueOrDefault("goal") as string;
+                rec.Pronouns = raw.GetValueOrDefault("pronouns") as string;
                 rec.SavedUtc = raw.GetValueOrDefault("saved_utc") as string;
                 if (raw.TryGetValue("facts", out var factsObj) && factsObj is List<object> fl)
                 {

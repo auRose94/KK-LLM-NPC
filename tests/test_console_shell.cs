@@ -290,6 +290,56 @@ static class ConsoleShellTests
         Assert(h.Contains("thrust") && h.Contains("feed_blender"), "help: lists extra names");
     }
 
+    // ---- ConsoleSalvage (inline tool-markup recovery) ----
+
+    static void SalvageTests()
+    {
+        Console.WriteLine("--- ConsoleSalvage ---");
+        // The observed live glitch: speech + the whole command queue in mangled markup.
+        string r1 = ConsoleSalvage.Clean("echo Hello! I am Basil and it is good morning!<br/>ls<|whoami?<k>sleep]<tool_call|>");
+        Assert(r1.Contains("echo Hello! I am Basil and it is good morning!"), "clean echo head kept");
+        Assert(r1.Contains("\nls\n") || r1.EndsWith("ls") || r1.StartsWith("ls"), "ls recovered");
+        Assert(r1.Contains("whoami"), "whoami recovered");
+        Assert(r1.Contains("sleep"), "sleep recovered");
+        Assert(!r1.Contains("tool_call") && !r1.Contains("whoami?"), "junk markers dropped");
+
+        // Prose head + goall/lsl mangles.
+        string r2 = ConsoleSalvage.Clean("Let me get my bearings.<br/>whoami<|ls|<p/><goall explore house}<lsl-> sleep]<tool_call|>_");
+        Assert(r2.StartsWith("Let me get my bearings.", StringComparison.Ordinal), "prose head kept");
+        Assert(r2.Contains("whoami"), "whoami recovered from prose-junk");
+        Assert(r2.Contains("goal explore house"), "goall -> goal with payload");
+        Assert(r2.Contains("sleep"), "sleep recovered");
+
+        // Clean replies pass through untouched.
+        string clean = "ls\nwhoami\nsleep";
+        Assert(ConsoleSalvage.Clean(clean) == clean, "clean reply untouched");
+        string prose = "I want food and company today.";
+        Assert(ConsoleSalvage.Clean(prose) == prose, "prose untouched");
+
+        // Empty after pure junk.
+        Assert(ConsoleSalvage.Clean("") == "", "empty passthrough");
+
+        // Glue-split: the whole terminal turn glued onto speech (observed live).
+        string r3 = ConsoleSalvage.Clean("Hmm, I's feeling kinda sleepy and hungry today! maybe food first! ps whoami status ls sleep");
+        Assert(r3.Contains("ps\n") || r3.EndsWith("ps"), "glue: ps split out");
+        Assert(r3.Contains("whoami") && r3.Contains("status") && r3.Contains("sleep"), "glue: commands recovered");
+        Assert(r3.StartsWith("Hmm,", StringComparison.Ordinal), "glue: speech head kept");
+        // glued sleep digits
+        string r4 = ConsoleSalvage.Clean("time to nap then rest! ps sleep1h05m");
+        Assert(r4.Contains("sleep 1h05m"), "glued sleep1h05m -> sleep 1h05m, got: " + r4.Replace("\n","|"));
+
+        // ParseReply accepts the salvaged output end-to-end.
+        var lines = ConsoleShell.ParseReply(r1);
+        Assert(lines.Count >= 3, "salvaged reply parses to " + lines.Count + " lines");
+        bool sawEcho = false, sawLs = false;
+        foreach (var l in lines)
+        {
+            if (l.Cmd == "echo") sawEcho = true;
+            if (l.Cmd == "ls") sawLs = true;
+        }
+        Assert(sawEcho && sawLs, "echo + ls both parsed from salvaged reply");
+    }
+
     static void Main()
     {
         Console.WriteLine("ConsoleShell tests");
@@ -309,6 +359,7 @@ static class ConsoleShellTests
         ParseLineGoalSubcommands();
         ParseSonarArgs();
         ParseReportPayload();
+        SalvageTests();
         ParseLineCallStyle();
         ParseReplyMultiLine();
         ParseReplyFences();

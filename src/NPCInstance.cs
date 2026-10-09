@@ -85,6 +85,8 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgRadarScale;
         // AI feedback channel: report_issue(...) appends to a file when enabled.
         internal ConfigEntry<bool> _cfgAIReportLog;
+        // The NPC's declared pronouns (set_pronouns) — wins over anatomy inference.
+        internal string _pronounsOverride;
         internal ConfigEntry<float> _cfgHornyRate;
         internal ConfigEntry<float> _cfgHornyBaseline;
         internal ConfigEntry<string> _cfgModelTier;
@@ -100,6 +102,7 @@ namespace KKLLMNPC
         internal ConfigEntry<int> _cfgConsoleMaxRounds;
         internal ConfigEntry<int> _cfgConsoleMaxTokens;
         internal ConfigEntry<int> _cfgConsoleHistory;
+        internal ConfigEntry<int> _cfgConsoleAutoShot;
         internal ConfigEntry<string> _cfgConsolePromptFile;
 
         // ---- runtime state ----
@@ -289,7 +292,7 @@ namespace KKLLMNPC
         private const int FactCap = 24;
 
         // Penetration awareness.
-        private class PenState { public string name; public float depth; public float lastT; public float vel; public string hole; public Transform src; }
+        private class PenState { public string name; public float depth; public float lastT; public float vel; public string hole; public Transform src; public List<float> History = new List<float>(); } // History: (t,d) pairs, last ~5s — the rhythm graph
         private readonly Dictionary<object, PenState> _pen = new Dictionary<object, PenState>();
         private readonly Dictionary<object, PenState> _dickIn = new Dictionary<object, PenState>();
         private ScriptableReagent _eggReagent;
@@ -592,6 +595,7 @@ namespace KKLLMNPC
             _cfgConsoleMaxTokens = plugin._cfgConsoleMaxTokens;
             _cfgConsoleHistory = plugin._cfgConsoleHistory;
             _cfgConsolePromptFile = plugin._cfgConsolePromptFile;
+            _cfgConsoleAutoShot = plugin._cfgConsoleAutoShot;
         }
 
         // ------------------------------------------------------------------

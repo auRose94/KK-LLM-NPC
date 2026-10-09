@@ -44,6 +44,7 @@ namespace KKLLMNPC
             ModuleRegistry.Tool("mount", (n, p) => n.ToolMount(p), schemas);
             ModuleRegistry.Tool("unmount", (n, p) => n.ToolUnmount(p), schemas);
             ModuleRegistry.Tool("orgasm", (n, p) => n.ToolOrgasm(p), schemas);
+            ModuleRegistry.Tool("feel", (n, p) => n.ToolFeel(p));
 
             ModuleRegistry.PhysicsTick((n, dt) => n.BodyControlTick(dt));
             ModuleRegistry.Perception((n, d) => n.BodyControlPerception(d));
@@ -53,6 +54,48 @@ namespace KKLLMNPC
     // ---- Partial class: NPCInstance additions for body control ----
     internal partial class NPCInstance
     {
+        // ---- feel: the on-demand detailed intimacy read (the "extra info" tool) ----
+        // Who is inside you / you inside whom, the live depth+rhythm graph, stimulation
+        // trend, egg pressure — everything the body can feel, in one call. Also teaches
+        // WHAT MOVES the stimulation (your hips, the partner's pace).
+        internal object ToolFeel(JsonObj p)
+        {
+            if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
+            var lines = new List<string>();
+            try
+            {
+                string entered = IsPenetrated() ? PenetrationInfo() : null;
+                if (entered != null) lines.Add("entering you: " + entered);
+                string doing = IsDickInside() ? DickInInfo() : null;
+                if (doing != null) lines.Add("you inside: " + doing);
+                string rhythm = PenRhythmText();
+                if (rhythm != null) lines.Add("rhythm (in you): " + rhythm);
+                string ownRhythm = RhythmFrom(_dickIn);
+                if (ownRhythm != null) lines.Add("your own pace: " + ownRhythm);
+                try
+                {
+                    float stim = _kobold.stimulation;
+                    lines.Add("stimulation: " + F(stim) + StimTrend(stim));
+                    float eggVol = 0f; bool eggReady = false;
+                    try { eggVol = GetEggVolume(_kobold); eggReady = IsReadyToLayEgg(_kobold); } catch (Exception) { }
+                    lines.Add("belly: " + F(eggVol) + "ml egg" + (eggReady ? " — READY_TO_LAY" : ""));
+                }
+                catch (Exception) { }
+            }
+            catch (Exception e) { lines.Add("feeling trouble: " + Sanitize(e.Message)); }
+            string head = lines.Count > 0
+                ? "what your body feels right now:"
+                : "nothing is touching you right now — everything is calm";
+            lines.Add("what moves it: your hips (thrust intensity=0..1, duration=secs — ride the rhythm), "
+                + "your partner's pace (ask with say/emote), the machine/mount itself. "
+                + "orgasm when the peak lands; unmount (or exit) leaves the animation.");
+            var d = new Dictionary<string, object>
+            {
+                ["ok"] = true,
+                ["note"] = head + (lines.Count > 0 ? "\n  " + string.Join("\n  ", lines.ToArray()) : ""),
+            };
+            return d;
+        }
         // ---- Thrust state (LLM thread writes, physics tick reads) ----
         private volatile bool _thrustActive;
         private volatile float _thrustIntensity;

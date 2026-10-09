@@ -109,9 +109,18 @@ namespace KKLLMNPC
 
             // Flavorful fallback names for when the LLM name pick fails entirely — a
             // numbered "Kobold-100" reads like a unit label, so try real names first.
+            // SPLIT BY GENDER so a fallback name agrees with the body's pronouns (the
+            // user's ask: a she/her body should not be auto-named "Gnarl") .
             // Common-word kobold-ish names (farm/house/nature flavored), no collisions
             // with known in-game assets intended.
-            internal static readonly string[] FlavorNames = new[]
+            internal static readonly string[] FlavorFem =
+                { "Ember", "Maple", "Juniper", "Wisp", "Fern", "Sable", "Sprout", "Thistle", "Puddle", "Snug", "Clove", "Puff" };
+            internal static readonly string[] FlavorMasc =
+                { "Cinder", "Ash", "Soot", "Flint", "Cobble", "Bramble", "Rusty", "Pip", "Gnarl", "Scamper", "Parch", "Tumble" };
+            internal static readonly string[] FlavorAny =
+                { "Yip", "Basil", "Pepper", "Moss", "Nib", "Bumble" };
+            // Union (kept for compatibility/tests).
+            internal static readonly string[] FlavorNames =
             {
                 "Yip", "Ember", "Cinder", "Ash", "Soot", "Maple", "Juniper", "Basil",
                 "Clove", "Pepper", "Moss", "Fern", "Bramble", "Flint", "Cobble", "Wisp",
@@ -125,13 +134,40 @@ namespace KKLLMNPC
                 lock (_lock)
                 {
                     Init();
+                    string[] pool = FlavorNames;
                     // Deterministic shuffle by rotating from a ticking seed so two
                     // freshly-spawned agents don't always reach for the same name.
-                    int start = (int)(System.DateTime.UtcNow.Ticks % FlavorNames.Length);
-                    for (int i = 0; i < FlavorNames.Length; i++)
+                    int start = (int)(System.DateTime.UtcNow.Ticks % pool.Length);
+                    for (int i = 0; i < pool.Length; i++)
                     {
-                        string cand = FlavorNames[(start + i) % FlavorNames.Length];
+                        string cand = pool[(start + i) % pool.Length];
                         if (!_taken.Contains(cand)) return TryReserve(cand) ? cand : null;
+                    }
+                    return null;
+                }
+            }
+
+            // Gender-aware flavor fallback: "female"/"male" pick the matching pool;
+            // anything else (nonbinary/unknown) starts with the neutral pool, then
+            // tries every other pool before giving up.
+            internal static string TryFlavorFor(string gender)
+            {
+                string[] first = gender == "female" ? FlavorFem : gender == "male" ? FlavorMasc : FlavorAny;
+                lock (_lock)
+                {
+                    Init();
+                    int start = (int)(System.DateTime.UtcNow.Ticks % first.Length);
+                    for (int i = 0; i < first.Length; i++)
+                    {
+                        string cand = first[(start + i) % first.Length];
+                        if (!_taken.Contains(cand)) return TryReserve(cand) ? cand : null;
+                    }
+                    // Pool exhausted — try the OTHER pools before failing.
+                    foreach (var pool in new[] { FlavorFem, FlavorMasc, FlavorAny })
+                    {
+                        if (pool == first) continue;
+                        foreach (var cand in pool)
+                            if (!_taken.Contains(cand)) return TryReserve(cand) ? cand : null;
                     }
                     return null;
                 }
@@ -347,6 +383,13 @@ namespace KKLLMNPC
             if (text.Length == 0) text = p.S("message", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
             text = Sanitize(text);
+            // Degenerate-say guard: some models (Gemma-class quants) fall into
+            // sampling loops and one loop shipped a 40KB "you's you's you's…" bubble
+            // to chat, the ack comparer and the prompt. Trim runs to two units and
+            // cap the length BEFORE anything reads it.
+            string preTrim = text;
+            text = TextUtil.TrimDegenerateRepeat(text, 600);
+            if (text != preTrim) Logger.LogWarning("[NPC] say degenerated (" + preTrim.Length + "→" + text.Length + " chars, repeat-run trimmed): " + ShortenLine(preTrim, 80));
             // Acknowledge the conversation FIRST, before any repeat-suppression can
             // bounce the reply: suppression is anti-spam for the world, but ack
             // bookkeeping is what stops `heard` from re-serving the same old player

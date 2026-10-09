@@ -212,6 +212,12 @@ namespace KKLLMNPC
             if (_controller == null || _kobold == null) return;
             if (!IsPlayableScene() || !IsAlive(_kobold) || !IsAlive(_controller)) { RunOnMainThreadAsync(TeardownBody); return; }
 
+            // Swallow manager pins us (position/scale/lock are the manager's): skip
+            // steering entirely while inside a stomach. The LLM session keeps running
+            // (speaking/observing), and the body-death teardown above still runs so
+            // the conversion's Photon destroy saves the persona as usual.
+            if (Swallowed) { StopMove(); return; }
+
             // Ownership watchdog: controller only applies velocity when we own the
             // PhotonView. Re-assert a few times (other mods can transfer it away).
             if (_photonView != null && !_photonView.IsMine && PhotonNetwork.InRoom

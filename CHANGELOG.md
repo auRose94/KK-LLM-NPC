@@ -8,6 +8,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Player swallow-vore — in the new opt-in [LittleTreats] config category (ALL OFF by
+  default).** A Harmony prefix on `Grabber.TryDrop` turns the drop gesture into a
+  swallow when enabled, the view camera points up (forward.y ≥ 0.55) and a PERSON is in
+  hand: the drop is canceled, the victim is ownership-taken, any station animation is
+  canceled, and it is released on the game's throw path (limp ragdoll — no
+  dropped-on-a-station auto-use). Then a session pins it: ~2.2s pull-in to the mouth
+  while shrinking (1 → 0.3), it sits at the belly for `SwallowDigestSeconds` (default
+  45, clamped 5–600) with narration milestones ("the stomach walls churn around
+  you…"), then ~6s compacting to nothing — and `SwallowEffect` decides what comes of
+  it: **`Egg`** (default) — an `Egg` room object lands at your feet carrying
+  `KoboldGenes.Mix(player genes, victim genes)` (the game's own oviposition
+  recombination), ScrambledEgg-filled like vanilla eggs so it can also be eaten;
+  **`BellyEgg`** — instead the victim's `Egg` reagent (20 units, nests need ≥5) plus
+  THEIR genes pour into YOUR `bellyContainer` — sit on a nest and lay them yourself
+  (vanilla `OvipositionSpot` flow): a `OvipositionSpot.oviposition` relay matches the
+  lay against the belly genes we poured in and registers the LAID egg's seed genes for
+  the rebirth link (the lay-time Mix rolls randoms and can't be predicted); **`Grow`**
+  — no egg; `SwallowGrowLarger`/`SwallowGrowStrength` pick what you absorb (baseSize
+  and grabCount/maxEnergy, each +`SwallowGrowPercent`% of the meal — grab is flat +1,
+  cap 8; applied live via `Kobold.SetGenes` `With()` mutation) and nothing comes back
+  out; **`Destroy`** — nothing gained, nothing laid, they're just gone. A
+  claim-managed victim's LLM session STAYS ALIVE through all of it: steering is gated
+  (`NPCInstance.Swallowed`) but speech/console keeps running — it experiences the
+  digestion — and the onboarding narration is HONEST per mode (Grow/Destroy are told
+  there's no coming back). Other NPCs get "you watched the player swallow NAME WHOLE"
+  fanout events. On completion the body is Photon-destroyed; the eaten NPC's
+  persona/facts/name are snapshotted to MemoryStore BEFORE the destroy
+  (`SaveBodyMemory` skips destroyed bodies — the sold-kobold teardown has the same
+  gap). Plant an Egg-or-BellyEgg egg in soil (vanilla Seed → Plant → KoboldSpawnPlant
+  chain): when the reborn body hatches, `Kobold.spawned` matches its genes against a
+  fingerprint registry — every gene float round-tripped through the same HalfPrecision
+  quantize→dequantize the `AddKoboldGenes` serialization applies, so the plant chain's
+  quantization can't break the match — and copies the eaten body's saved life onto the
+  new body's key. The claim scan then wakes the SAME person in the new body: same
+  name, persona, facts and pronouns, in control again, genes changed. Config keys
+  (all `[LittleTreats]`, default OFF): `SwallowEnabled`, `SwallowDigestSeconds`,
+  `SwallowEffect` (Egg|BellyEgg|Grow|Destroy), `SwallowGrowLarger`,
+  `SwallowGrowStrength`, `SwallowGrowPercent`. Held PLAYER bodies can never be
+  swallowed (grief guard); anything else in hand still drops normally even when a
+  swallow starts. New build references: `com.naelstrof.orbitcam.dll` (camera look-up
+  check) and `NetStack.dll` (BitBuffer/HalfPrecision). Tests: new pure `SwallowLogic`
+  suite (trigger rule, phase/scale math, digest milestones, fingerprint format).
+
+  Playtest round 2: the trigger angle is now `SwallowLookUpDot` (default 0.94 ≈ 70°+,
+  deliberate near-max-up — it was 0.55 ≈ 33° and a raised face ate people on a normal
+  drop); the swallowed body's renderers shut off the moment the pull-in completes —
+  the shrunk rig doesn't scale cleanly with the root and kept visibly sticking out of
+  the stomach (a consumed NPC's speech still works through the chat channel); and the
+  no-rebirth modes (Grow/Destroy) erase the eaten one's saved AI life via the new
+  `MemoryStore.Delete(bodyKey)` so the persona records can't undercut the effect.
+
+  Playtest round 3: a no-cheat digest ABORT — the player types "swallow abort"
+  (aliases "abort swallow", "swallow stop", "stop swallowing" — letters-only
+  normalized, "cough up", "spit out" too) into the game CHAT: every in-flight session
+  releases its victims (`ReleaseSwallowed` un-does the whole pin — scale/colliders/
+  renderers/kinematics/controller restored, ragdoll popped, each person set down in
+  front of the eater) and `NPCInstance.Swallowed` lifts so the LLM session resumes
+  with a release event + a fresh persisted snapshot. The interception sits in
+  plugin `OnEvent` right before NPC chat distribution: only the LOCAL player's lines
+  are honored, matched lines are consumed (the NPCs never hear the escape hatch),
+  and with the feature disabled chat is never hijacked; empty-stomach typing gets a
+  "your stomach is empty" bubble. The matcher lives in the pure `SwallowLogic`
+  (`NormalizeLetters`/`MatchesAny`/`AbortCommands`) — same suite.
+
+  Playtest round 4 — FORCE-FEEDING (`[LittleTreats] SwallowForceFeeding`, default on,
+  master-gated by `SwallowEnabled`): the drop gesture generalizes beyond the player's
+  self-eat. `TryDropPrefix` now runs two gestures in precedence order — (1) the
+  unchanged player steep-look-up self-swallow; (2) ANY kobold's drop (the mod's NPC
+  `drop` tool and the player alike) landing a held PERSON right on/at another kobold's
+  HEAD (`IsOnOrAboveHead` within 0.85m of the head bone; receiver must be alive, not a
+  player body (grief guard), not held, not already digesting someone) makes the
+  RECEIVER swallow them. `Begin` carries the ACTOR now, so every narration names who
+  did what: the fanout says "you watch X shove NAME into Y's face — Y swallowed them
+  whole!", the eater's LLM gets a direct force-fed briefing (a NAME in THEIR stomach),
+  the dropped one's swallow promise names their feeder, and the mod's `drop` tool
+  result gained a `force_fed` field (captured inside the main-thread drop marshal via
+  `SwallowsBegunBy`) so the dropper's model never believes a plain "dropped" when the
+  shove became a swallow. All completion narrations (egg at feet / belly pour / grow /
+  destroy / abort) name the ACTUAL eater via `BodyLabel`, and the egg-rebirth
+  registry/fact now carry the eater's label (`RebirthLink`) since the stomach owner
+  isn't always the player — the reborn person's fact no longer claims "the player"
+  swallowed them.
 - **North-up sonar (playtest feedback, "the map slides around").** The ASCII radar was
   world-anchored in code but documented to the model as *facing-relative* ("row 0 = furthest
   forward") and only ever drew the camera-FOV cone, so every turn re-scrambled what the map
@@ -126,6 +208,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a tenderly-not-sellables rule.
 
 ### Fixed
+- **"Not really aware they're having sex" — console mode now has a full intimacy
+  channel.** Console mode drains only chat + reagent events: being entered, withdrawn,
+  and filling up reached the model only as late belly/egg numbers ("they just notice
+  they have an egg later"). Now: penetration entry/withdrawal push [sex] world events
+  (and the console drain delivers world events at all — carries/thrown/danger too, which
+  ALSO never landed in console before); the per-turn state anchor carries a live sex
+  line when anything is happening ("being penetrated (Dick: steady, 1.2 strokes/s,
+  depth varying 0.2m to 0.6m, deepening)"); and the new `feel` tool (BodyControl module;
+  console: `feel`) is the on-demand detailed read the user asked for — who is inside
+  whom, the depth/rhythm curve in words (strokes/sec from the last 3s of the game's
+  calculated depth values, depth range, deepening/pulling-out trend), stimulation, egg
+  state, and WHAT MOVES the stimulation (your hips: thrust; the partner's pace; the
+  machine). `thrust` teaching goes with it. Prompts say: respond to [sex] events in the
+  moment; never ignore a penetration.
+- **Name-selection emptiness: the logging was looking in the wrong place.** The previous
+  fix logged the response's HEAD (which cut exactly before the content field) — now the
+  message DICT is serialized into the log (300 chars), and content itself is recovered
+  from every shape: string content, content-PART arrays (text parts joined), and
+  'reasoning_content' — some servers put the real text somewhere else entirely. Between
+  that, the JSON-answer parsing and the 128-token floor, a model that "wants to use json
+  as a name" or answers in a preamble now lands the name anyway; what still fails gets a
+  REAL reason in the log for the next round.
+- **Farming flow verified from the game source + taught as LOOK-then-USE**: the seed
+  only plants while it sits on/near the soil (Seed.CanUse scans a 1m plantable SoilTile
+  radius from the SEED's position), so the prompt flow is now: grab seed → cd to the
+  plot → hold it over the dirt (or drop it on the plot) → look/turn TOWARD it → THEN use
+  its id — with the "interact fails when you're looking elsewhere" note. All three
+  prompts.
+- **Gemma's 500s never hit the 400-ladder — they stream INSIDE 200-OK responses.**
+  The follow-up log: "event: error … does not match the expected peg-gemma4 format"
+  arrives as an SSE event after HTTP 200, so SafeHttp sees success and the loop sees
+  empty content — retrying never happened. New `StreamEngineError` detection
+  (pure, tested): empty content + an engine-error event (peg-*/server_error/predict
+  stream/nested 500) → retry the UNCHANGED payload up to twice, with the engine's
+  message in the log. Also: terminal-turn glue salvage ("speech… ps whoami status go
+  find bed echo Zzzzzz~ 15m" — the whole turn glued into one line/SAY) now splits into
+  speech + real command lines (targeted commands hunt non-command targets: "go find
+  bed" → cd bed); glued digits ("sleep1h05m" → sleep 1h05m); code-fence artifacts
+  ("```json{ "turn": -9}") are junk markers now; "id_7"/"id-8"/bare-number targets
+  normalize to numeric-id targeting everywhere; and the goal belt refuses
+  fence/turn-artifact junk.
+- **"Focused on the blender, thinks it's a goal" — the energy truth + an exit
+  strategy.** The hungry NPC was reasoning fine under a lie it was told: the prompts
+  claimed FOOD is the recovery while the game's OTHER energy source (verified in the
+  source: `BedMachine.SleepRoutine` = +0.2 energy/s) — bed REST — was missing from the
+  teaching, and the model had no protocol for "the blender contract costs more coins
+  than I have". Prompts (all three) now teach: at 0 energy stations refuse you;
+  food metabolizes into energy AND bed rest restores it steadily; plus a HUNGER
+  PROTOCOL (ask once → eat/buy what's reachable → plant/water/wait/harvest → bed rest)
+  and an anti-fixation rule: don't loop on a plan you can't afford — state plainly what
+  you need (coins? fruit?) and switch route; a machine you pass is not a goal; drop
+  stale goals instead of re-asserting them.
+- **"Not really using the image system at all" — console now has eyes by default.**
+  The whole session had ZERO image uses: console mode never auto-attaches frames and
+  no model ever typed `screenshot` itself. New `[Console] AutoScreenshotTicks` (default
+  6): every N turns a vision-capable model gets its current first-person view attached
+  automatically (when it actually moved/turned since the last one — no repeated frames
+  of the same spot), and right after a stuck streak (see WHERE you're stuck). Prompts
+  tell it to decide from the images.
+- **"Wanted to use json as a name" — the name call now parses JSON answers.** Models
+  saturated on the mod's contract answer the one-shot name prompt with an act-shaped
+  JSON object ({"name":"..."}) or code fences — both now parsed (plus
+  "name: X"/"my name is X" shapes), and the name call's max_tokens floor rose 16→128
+  (those shapes need room to land complete; 16-token cuts were half the empty-name
+  stories). Raw-server logging stays for anything still empty.
+- **Inline tool-markup salvage ("they wanted to use XML now") + the name-selection fix.**
+  The Novalis log showed the Gemma-a4b model emitting its whole turn as speech with its
+  command queue inside mangled tool markup:
+  "Hello! I am Basil…!<br/>ls&lt;|whoami?&lt;k&gt;sleep]&lt;tool_call|&gt;" — plus invented
+  fragments (---end-of-turn-, &lt;goall …&gt;, &lt;lsl-&gt;). Everything went into the
+  SAY payload; none of the intended commands (ls / whoami / goal explore the house /
+  sleep) executed. New `ConsoleSalvage` (pure, in ConsoleShell.cs + tests): lines are
+  split at junk markers (tool_call/broken-tags/end-of-turn fragments), the clean head is
+  kept as the line (speech reads correctly), and the markup segment's words are
+  canonicalized against the command vocabulary — payloads collected for goal/remember/
+  echo-style commands, next-token targets for cd/use/get/find/look. A garbled reply now
+  becomes: speech + `ls` + `whoami` + `goal explore house` + `sleep` executing properly,
+  with a log line when a salvage happens. Think-marker constants are fragment-assembled
+  in this file too (the marker-hygiene rule).
+- **Name selection was structurally broken for preambly models.** The one-shot name call
+  ran at max_tokens **16** — ANY model that emits even a short preamble (or a stray
+  reasoning line the template doesn't isolate) gets cut to empty content before a name
+  ever lands ("LLM name rejected: '' x3" in two different models). Floor raised to 64
+  (reasoners keep 320), and when content is still empty the server's RAW response
+  (240-char snippet) is logged so the per-family quirk is diagnosable from the log
+  instead of a silent triple-fallback.
+- **Gemma glitch-say guard (the 40KB "see you's" bubble).** The Gemma-4-26B-QAT playtest
+  produced a degenerate sampling loop — one reply was the phrase "see you's" repeated
+  thousands of times (40KB to the bubble, chat window, ack comparer and the prompt). New
+  `TextUtil.TrimDegenerateRepeat` (pure, 11th test suite): consecutive identical 1- and
+  2-token windows repeated ≥6× collapse to two units with " […]" (content before AND
+  after the run survives), same-char runs ("!!!!!…") cut when they dominate, and says are
+  hard-capped at 600 chars. Wired into `say` before suppression/acks, with a log line
+  showing the shrink.
+- **A\* scratch pool — the second freeze lead.** The MainMap++night2 session's grid is
+  1150×1119 cells × layers ≈ tens of millions of nodes; EVERY A* call allocated
+  `_gScore`/`_cameFrom`/`_closed` fresh (~185MB) and zeroed them with a slow int-by-int
+  loop (~0.2–0.4s main-thread + massive GC churn per `cd`, the same order as the hang).
+  A* now has a grow-only scratch pool (one-time init; per-run touched-node restore on
+  release; overlapping runs fall back to private arrays; small local-window grids skip
+  the pool), and both call sites release in `finally`.
+- **Hang forensics that work from OUTSIDE the wedged thread.** Both freeze logs showed
+  only repeated "main thread timeout (5000ms)" from the LLM loop and NOTHING else —
+  because the main thread was wedged and a per-frame WedgeWatch can't log from inside
+  its own wedge. Now: the main thread records a heartbeat + phase marker
+  ("ReconcileInstances" / "WorldMap.Tick" / "PlayerTrail.Tick" / "QuestSense.Tick" /
+  "marshal-callback" / idle) and a background watchdog logs
+  "main thread appears HUNG (Ns without a tick) — last phase: X" — the next freeze
+  names the section it died in.
+- **Fallback names are gendered + NPCs can change their pronouns.** Not every model
+  completes name selection (3× "LLM name rejected: ''" in the log) — the flavor fallback
+  pools are now split feminine/masculine/neutral and the fallback picks from the pool
+  matching the body's inferred gender, so a she/her body isn't auto-named "Gnarl". And
+  new `set_pronouns(pronouns='she/her')` tool (console: `set_pronouns she/her`): the
+  NPC's own declaration wins over anatomy-derived inference everywhere (perception
+  'pronouns'), persists in the per-body memory record, and is restored with the rest of
+  the life.
+- **HTTP 400 recovery ladder (the playtest's peg-native 400s).** The fresh log's 400 body
+  was a SERVER-side streaming-decode hiccup: "Engine protocol predict stream … does not
+  match the expected peg-native format" (type server_error wrapped in an HTTP 400) — the
+  payload was fine, the server's grammar layer choked on the model's own stream, wasting
+  a tick each time. New `HttpRetry.cs` (pure + 10th test suite) classifies 400/413/422
+  error bodies: **transient_engine** (peg-native/nested-500) → retry the UNCHANGED
+  payload up to twice after 1.2s; **context/size (incl. 413/422)** → shrink the payload
+  in two staged degradations (stage 1: radar/rays dropped, chat_log halved, nearby/
+  stations/people capped, image parts flattened; stage 2: history/memory/facts dropped +
+  oldest half of long console conversations trimmed); **image** → drop image parts +
+  pause attaching for 90s (legacy frames AND console screenshots skip attaching and say
+  so, rather than burning a guaranteed 400); **response_format** → drop the schema + pause
+  5 min; **max_tokens** → retry at 512. Non-payload errors (401/404/no-model) keep the
+  existing guidance logging. Ladder is bounded (≤5 posts per tick) and every step logs
+  which fix fired.
 - **Station confusion (muse-glimmer playtest): occupancy, energy, follows.** Four issues,
   all grounded in the game source while fixing:
   1. *"It consumed one slot, hence busy — so it left thinking the station was full."*

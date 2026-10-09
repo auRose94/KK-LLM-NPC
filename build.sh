@@ -70,6 +70,8 @@ if [ "$COMPILER" = "mcs" ]; then
       -r:"$MGMT/PhotonRealtime.dll" \
       -r:"$MGMT/Assembly-CSharp.dll" \
       -r:"$MGMT/Naelstrof.PenetrationTech.dll" \
+      -r:"$MGMT/com.naelstrof.orbitcam.dll" \
+      -r:"$MGMT/NetStack.dll" \
       -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
       -r:"$MGMT/KoboldKare.ISavable.dll"
     cp KKLLMNPC.dll "$KDIR/BepInEx/plugins/KKLLMNPC.dll"
@@ -102,6 +104,12 @@ elif [ "$COMPILER" = "dotnet" ]; then
     </Reference>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/Assembly-CSharp.dll</HintPath>
+    </Reference>
+    <Reference Include="com.naelstrof.orbitcam">
+      <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/com.naelstrof.orbitcam.dll</HintPath>
+    </Reference>
+    <Reference Include="NetStack">
+      <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/NetStack.dll</HintPath>
     </Reference>
     <Reference Include="PhotonUnityNetworking">
       <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/PhotonUnityNetworking.dll</HintPath>

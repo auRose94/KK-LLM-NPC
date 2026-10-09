@@ -31,6 +31,185 @@ namespace KKLLMNPC
         public bool IsUnknown { get { return Cmd == null; } }
     }
 
+    // ------------------------------------------------------------------
+    // ConsoleSalvage — recover intended commands from models that emit their
+    // tool-call markup INLINE. Observed live (gemma-4 a4b quant): a reply looked like
+    //   "echo Hello! I am Basil!<br/>ls<|whoami?<k>sleep]<tool_call|>"
+    // — speech up to the first junk marker, then the WHOLE command queue inside
+    // mangled markup. Without salvage, that all went into the SPEECH payload and the
+    // NPC just chatted garbage. This splits each line at known junk markers, keeps
+    // the clean head (echo text or prose), and extracts the commands buried in the
+    // markup segment (validated against the command vocabulary, payload words
+    // collected for goal/remember/echo-style commands).
+    // Pure C# (ConsoleShell vocabulary only) — unit-testable.
+    // ------------------------------------------------------------------
+    internal static class ConsoleSalvage
+    {
+        // The first occurrence of any marker starts an embedded-command segment.
+        // NOTE: the think-marker spelling is fragment-assembled — the contiguous
+        // markers must never appear in source (see ModelFamilies.cs header).
+        private static readonly string ThinkOpen = "<" + "think";
+        private static readonly string ThinkClose = "<" + "/think" + ">";
+        private static readonly string[] JunkMarkers =
+        {
+            "<tool_call", "</tool_call", "<|", "|>", "<br/>", "<p/>", "<n/>", "<s/>",
+            "<k>", "</k>", "<lsl->", "<goal", "<whomi", "<whoami", "<end", "---end",
+            "<end-of-turn", "</s>", "<s>", "```", ThinkOpen, ThinkClose,
+        };
+
+        private static int IndexOfJunk(string s)
+        {
+            int best = -1;
+            foreach (var m in JunkMarkers)
+            {
+                int i = s.IndexOf(m, StringComparison.OrdinalIgnoreCase);
+                if (i >= 0 && (best < 0 || i < best)) best = i;
+            }
+            return best;
+        }
+
+        /// <summary>Clean a reply: per line, cut at tool-markup junk (clean head kept,
+        /// buried commands recovered as lines), or — when there is no markup — split
+        /// speech with the whole terminal turn glued onto it ("…goal explore the house
+        /// echo Hi everyone~ sleep"). Plain lines pass through.</summary>
+        public static string Clean(string reply)
+        {
+            if (string.IsNullOrEmpty(reply)) return reply;
+            var outLines = new System.Collections.Generic.List<string>();
+            foreach (var rawLine in reply.Split('\n'))
+            {
+                int cut = IndexOfJunk(rawLine);
+                if (cut >= 0)
+                {
+                    string head = rawLine.Substring(0, cut).Trim().TrimEnd(':', ',', ';');
+                    if (head.Length > 0) outLines.Add(head); // clean head (echo text or prose)
+                    SalvageCommands(rawLine.Substring(cut), outLines);
+                }
+                else GlueSplit(rawLine, outLines);
+            }
+            if (outLines.Count == 0) return "";
+            return string.Join("\n", outLines.ToArray());
+        }
+
+        // Models that learned the terminal convention still glue the entire turn onto
+        // one line after speech ("… my tummy! ps whoami status go find bed echo Zzzzzz~
+        // 15m"). Split when a command-ish token appears well inside the line AND at
+        // least one more command-ish token follows — single command words in ordinary
+        // speech ("let me look around") stay speech.
+        private static void GlueSplit(string line, List<string> outp)
+        {
+            if (line == null || line.Trim().Length == 0) return;
+            var tokens = line.Split(' ');
+            if (tokens.Length < 5)
+            {
+                outp.Add(line);
+                return;
+            }
+            int clusterStart = -1;
+            int commandCount = 0;
+            for (int i = 1; i < tokens.Length; i++)
+            {
+                if (CanonicalGlue(tokens[i]) != null)
+                {
+                    if (clusterStart < 0) clusterStart = i;
+                    commandCount++;
+                }
+            }
+            if (clusterStart < 4 || commandCount < 2 || clusterStart >= tokens.Length)
+            {
+                outp.Add(line);
+                return;
+            }
+            var sb = new System.Text.StringBuilder();
+            for (int t = 0; t < clusterStart; t++)
+                sb.Append(t == 0 ? "" : " ").Append(tokens[t]);
+            outp.Add(sb.ToString().Trim());
+            var restTokens = new System.Collections.Generic.List<string>();
+            for (int t = clusterStart; t < tokens.Length; t++) restTokens.Add(tokens[t]);
+            SalvageCommands(string.Join(" ", restTokens.ToArray()), outp);
+        }
+
+        // Canonical that also forgives glued digits: "sleep1h05m" → "sleep 1h05m".
+        internal static string CanonicalGlue(string w)
+        {
+            if (w == null) return null;
+            string c = ConsoleShell.Canonical(w);
+            if (c != null) return c;
+            for (int i = 1; i < w.Length; i++)
+            {
+                if (char.IsDigit(w[i]))
+                {
+                    string head = w.Substring(0, i).ToLowerInvariant();
+                    string hc = ConsoleShell.Canonical(head);
+                    if (hc != null) return hc + " " + w.Substring(i);
+                    break;
+                }
+            }
+            return null;
+        }
+
+        private static readonly char[] WordSplit =
+        { ' ', '\t', '<', '>', '|', '{', '}', '[', ']', '?', '!', '/', '"', ',', '.', ';', ':', '(', ')', '_', '-' };
+
+        // Extract command lines from a junk segment. Words that canonicalize to known
+        // commands become lines; payload-y commands (goal/remember/echo-style) swallow
+        // the following non-command words as their payload; targeted commands (cd/use/
+        // get/find/look) take the next token as their target.
+        private static bool SalvageCommands(string seg, List<string> outp)
+        {
+            if (string.IsNullOrEmpty(seg)) return false;
+            var words = seg.Split(WordSplit, StringSplitOptions.RemoveEmptyEntries);
+            bool found = false;
+            for (int i = 0; i < words.Length; i++)
+            {
+                string w = words[i].Trim().ToLowerInvariant();
+                if (w.Length == 0) continue;
+                string canon = CanonicalLoose(w);
+                if (canon == null) continue;
+                found = true;
+                if (ConsoleShell.IsPayloadCommand(canon))
+                {
+                    var payload = new List<string>();
+                    int j = i + 1;
+                    while (j < words.Length && payload.Count < 8 && !IsCommandish(words[j]))
+                    { payload.Add(words[j]); j++; }
+                    outp.Add(canon + (payload.Count > 0 ? " " + string.Join(" ", payload.ToArray()) : ""));
+                    i = j - 1;
+                }
+                else if (canon == "cd" || canon == "use" || canon == "get" || canon == "find" || canon == "look" || canon == "turn")
+                {
+                    // target = the next NON-command token ("go find bed" → cd bed);
+                    // when none follows, the bare command.
+                    int j = i + 1;
+                    while (j < words.Length && CanonicalLoose(words[j]) != null) j++;
+                    if (j < words.Length && words[j].Trim().Length > 0)
+                    { outp.Add(canon + " " + words[j].Trim()); i = j; }
+                    else outp.Add(canon);
+                }
+                else outp.Add(canon);
+            }
+            return found;
+        }
+
+        private static string CanonicalLoose(string w)
+        {
+            string c = CanonicalGlue(w);
+            if (c != null)
+            {
+                // Payload commands get their digits; plain commands return bare.
+                return c.Trim();
+            }
+            return null;
+        }
+
+        // Would this next word itself start a command? (payload terminators)
+        private static bool IsCommandish(string w)
+        {
+            if (string.IsNullOrEmpty(w)) return true;
+            return ConsoleShell.Canonical(w) != null;
+        }
+    }
+
     internal static class ConsoleShell
     {
         // ------------------------------------------------------------------

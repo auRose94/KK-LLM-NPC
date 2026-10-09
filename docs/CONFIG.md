@@ -123,6 +123,19 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `DisableReagentMessages` | `true` | Suppress reagent injection messages in log |
 | `BlockedScenes` | `MainMenu,Loading,ErrorScene` | Comma-separated scene names where the LLM stays idle |
 
+## [LittleTreats] — Opt-in oddities (nothing here is on by default)
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `SwallowEnabled` | `false` | Player swallow-vore: releasing a held PERSON (kobold) while looking steeply up swallows them whole instead of dropping. ~2s pull-in (they're hidden once fully swallowed — no stuck-out-of-the-stomach clipping), they digest at your stomach for `SwallowDigestSeconds`, then `SwallowEffect` decides the outcome. Held PLAYER bodies can never be swallowed (grief guard); other things in hand drop normally. The eaten NPC's LLM session survives the whole time (can still speak from inside; steering paused; the digestion is narrated to them), and other NPCs see it as a world event. **Digest abort (no cheats): type "swallow abort"** (or "spit out" / "cough up" / "regurgitate" / "swallow stop" / "abort swallow") **in the game chat** — every in-flight session releases its victims alive and whole in front of you; the line is consumed by the mod, so the NPCs never hear it; works in pull phase and mid-digest, does nothing once an egg was already laid. |
+| `SwallowLookUpDot` | `0.94` | How steeply up the camera must point for the drop to become a swallow: camera-forward y with asin of it = the angle. 0.94 ≈ 70°, 0.97 ≈ 76°, 0.87 ≈ 60°. Default is deliberately near max-up so you can't eat someone by accident; raise toward 0.999 for an even fussier trigger. |
+| `SwallowForceFeeding` | `true` | Force-feeding: ANY kobold's drop (the mod's NPC `drop` tool included) that lands a held PERSON right on/at another kobold's HEAD (within 0.85m, at/above the head bone) makes the RECEIVER swallow them — the receiver then follows `SwallowEffect`'s outcome, the dropped one is narrated honestly (they're told who fed them and their mode's real prospects), and the dropper's `drop` tool result says `force_fed` instead of "dropped". Grief guards: receivers and victims can never be player bodies; an eater already digesting someone refuses another; the player's steep look-up self-swallow still wins when both gestures match. Requires `SwallowEnabled`. |
+| `SwallowDigestSeconds` | `45` | Seconds a swallowed kobold sits in the stomach before the effect applies (clamped 5–600). The full cycle adds ~2s swallow-in and ~6s settle. |
+| `SwallowEffect` | `Egg` | What a fully-digested person becomes: **Egg** — an egg pops out at your feet carrying `KoboldGenes.Mix(your genes, theirs)`; plant it in soil and the hatched body is claimed again with their saved persona/name/facts (genes changed). **BellyEgg** — their `Egg` reagent (20 units; a nest lay needs ≥5) + THEIR genes ride in YOUR belly: sit on a nest and lay them yourself, then plant that egg (the rebirth link follows it). **Grow** — no egg; you absorb them (`SwallowGrowLarger`/`SwallowGrowStrength` choose what, `SwallowGrowPercent` the gain). **Destroy** — nothing gained or laid; they're gone. In the no-rebirth modes (Grow/Destroy) the consumed NPC's saved AI memories (persona/name/facts) are ERASED from disk with the body; narration to the swallowed NPC is honest per mode. |
+| `SwallowGrowLarger` | `true` | `[SwallowEffect=Grow]` gain the person's size: your `baseSize` gene += `SwallowGrowPercent`% of theirs — you visibly grow. |
+| `SwallowGrowStrength` | `true` | `[SwallowEffect=Grow]` gain strength: +1 grab (carry more at once, cap 8) and `maxEnergy` += `SwallowGrowPercent`% of theirs. |
+| `SwallowGrowPercent` | `10` | `[SwallowEffect=Grow]` percent of the consumed person's baseSize/maxEnergy gained per swallow (0–100). The +1 grab is flat regardless. |
+
 ## [Debug] — AI Feedback
 
 | Key | Default | Purpose |

@@ -42,7 +42,9 @@ namespace KKLLMNPC
         private float _lastPollHold;
 
         // Property getter reflection for GrabInfo (public getters, private setters).
-        private static object GetProp(object obj, string name)
+        // internal — SwallowManager reads the same GrabInfo kobold/body members when
+        // releasing held victims for a swallow.
+        internal static object GetProp(object obj, string name)
         {
             try
             {

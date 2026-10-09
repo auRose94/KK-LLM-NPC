@@ -1005,9 +1005,16 @@ namespace KKLLMNPC
             if (_grabber == null) return new { ok = false, reason = "no_grabber" };
             var before = HeldScan();
             if (before.Count == 0) return new { ok = true, dropped = "", note = "nothing was in your hands" };
+            // Captured INSIDE the marshalled try-drop (main thread): did our drop
+            // turn into a force-feed swallow? The result must tell the truth —
+            // "dropped" would lie when the release became a shove-into-a-mouth.
+            string[] forceFed = null;
             bool droppedOk = (bool)RunOnMainThread(() =>
             {
-                try { _grabber.TryDrop(); return true; } catch (Exception e) { Logger.LogWarning("drop: " + e.Message); return false; }
+                string[] forceFedTmp = null;
+                try { _grabber.TryDrop(); forceFedTmp = SwallowManager.SwallowsBegunBy(_kobold); return true; }
+                catch (Exception e) { Logger.LogWarning("drop: " + e.Message); return false; }
+                finally { forceFed = forceFedTmp; }
             });
             try { Thread.Sleep(300); } catch (Exception) { }
             var after = HeldScan();
@@ -1035,6 +1042,12 @@ namespace KKLLMNPC
             {
                 res["still_held"] = string.Join(", ", stillHeld.ToArray());
                 res["note"] = "STILL HELD: " + res["still_held"] + " — the release didn't take; try drop again, and if it persists report_issue it";
+            }
+            if (forceFed != null && forceFed.Length > 0)
+            {
+                res["force_fed"] = string.Join(", ", forceFed);
+                if (stillHeld.Count == 0)
+                    res["note"] = "you dropped a person onto another kobold's head — the receiver SWALLOWED them whole (force-feeding). No egg/rebirth is visible yet; the fate of the one you fed follows SwallowEffect — check your next [event] lines";
             }
             return res;
         }

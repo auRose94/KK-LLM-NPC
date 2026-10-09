@@ -544,7 +544,8 @@ namespace KKLLMNPC
         }
 
         // True when k is the local human player's body (not an AI/wild kobold).
-        private static bool IsPlayerKobold(Kobold k)
+        // internal — the swallow trigger reads it for its grief guard.
+        internal static bool IsPlayerKobold(Kobold k)
         {
             try
             {

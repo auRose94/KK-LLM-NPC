@@ -21,7 +21,7 @@ Tiers reflect playtest experience so far.
 |------|-------------------|--------------|--------|------------|-------------|
 | 🟢 1 | **Qwen** (`qwen3:4b..32b`, VL siblings, QwQ) | yes (stripped) | yes | sized normally, 128K-class | The bar. Reads first-person scenes well ("no problem looking at a scene in a picture and commenting on it"), spatial reasoning + console discipline, tidy JSON. |
 | 🟢 1 | **ZDTaichu** (`zdtaichu5.0-9b`, GGUF+mmproj) | yes (stripped) | yes (mmproj) | 9B → small | Qwen3.5-9B backbone + spatial/embodied-AI training mix — "really fast 3D spatial reasoner". Card: temp 0 + top_p 0.95 + top_k 20 for spatial/grounding → set `[VisionModel] Temperature=0`. Great as the spatial captioner or an action/console model. |
-| 🟢 1 | **Gemma** (`gemma-3-*) | no | yes | — | Literal template, strict-JSON friendly; no reasoning overhead. |
+| 🟢 1 | **Gemma** (`gemma-3-*, gemma-4-26b-a4b-qat`) | no | yes | — | Literal template, strict-JSON friendly; no reasoning overhead. **gemma-4-26b-a4b-qat live (2026-10-02):** quick, natural chat, set goals unprompted, spotted the egg-hatch; quirks: degenerate repeat loops (glitch-say trim shipped) and inline tool-markup emission ("wanted to use XML") — `ConsoleSalvage` now recovers the buried commands. |
 | 🟢 1 | **Muse Glimmer** (30B-A3B, `meta/muse-glimmer`) | no (128 headroom) | yes (native) | medium | **Validated exceptional (2026-10-02 playtests):** "really responsive and aware… truly impressive" — set its own goals ("Be by the blenders with player"), completed them unprompted, chatted naturally; prefers follow-mode travel once learned. Caveat: can be SLOW to figure out station/partner mechanics from raw text — compensated by structured data now (slot occupancy, cannot_use reasons, energy/food rules). (The follow freeze + the Nib console log were mod bugs, fixed — not model issues.) |
 | 🟡 2 | **GLM** (`glm-4.x-flash`) | yes (stripped) | yes | — | Good console discipline, think-strip handled. |
 | 🟡 2 | **Gemma** (`gemma-3-*) | no | yes | — | Literal template, strict-JSON friendly; no reasoning overhead. |
@@ -29,8 +29,9 @@ Tiers reflect playtest experience so far.
 | 🟡 3 | **LFM (Liquid)** (`LFM2-*`) | no (128) | no | small | Compact efficient hybrids. |
 | 🟡 3 | **Bonsai** (~4B) | yes (stripped, 512) | no | small | Tiny reasoner-distill; short but real CoT. |
 | 🟡 3 | Vision captioners (llava/moondream) | no | as captioner | small | Caption-only — route via `[VisionModel]`, not as the action model. |
-| 🔴 4 | **Nemotron** | yes (chatty, 768) | no | small | Heavy CoT + chatty; stripped now, but historically flopped. Retest candidate. |
-| 🔴 4 | **Granite** | yes (verbose, 768) | no | small | Verbose contracts; same story. Retest candidate. |
+| 🔴 4 | **Nemotron** | yes (chatty, 768) | no | small | Heavy CoT + chatty; stripped now, but historically flopped. Struggled again in the 2026-10-02 runs. |
+| 🔴 4 | **Struggled trio (2026-10-02 runs)** — Nemotron, `qwen3.5-9b`, `glm-4.7-flash` | mostly thinking-families | mixed | small | All three took slow/lost turns in console; thinking families likely burn their token floors on CoT before commands (the floor raises the budget but the WAIT is real). GLM was strong in earlier runs (glm-4.7 may be a different line-up — retest watching the think-strip logs). |
+| 🔴 4 | **Granite** (`granite-4.0-3b`) | yes (verbose, 768) | no | small | Verbose contracts; same story as Nemotron. Retest candidate. |
 
 Unknown-but-classified ids land as `generic` (runtime auto-detect decides tier); the
 startup line `model family 'x' from '<id>'` always shows what was chosen.

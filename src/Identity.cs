@@ -28,6 +28,7 @@ namespace KKLLMNPC
             if (_registered) return;
             _registered = true;
             ModuleRegistry.Tool("rename", (n, p) => n.ToolRename(p));
+            ModuleRegistry.Tool("set_pronouns", (n, p) => n.ToolSetPronouns(p));
             ModuleRegistry.Perception((n, dict) =>
             {
                 dict["identity"] = n.IdentityBlock();
@@ -159,6 +160,37 @@ namespace KKLLMNPC
 
             Logger.LogInfo("[" + oldName + "] renamed to " + newName);
             return new { ok = true, old_name = oldName, new_name = newName, broadcast = broadcastMsg };
+        }
+
+        // ------------------------------------------------------------------
+        // set_pronouns: the NPC (or the player via chat) declares what pronouns it
+        // goes by. Overrides the anatomy-based inference EVERYWHERE (perception,
+        // persona rendering) and persists with the body's life — the body's shape
+        // is a default, not an order.
+        // ------------------------------------------------------------------
+        internal object ToolSetPronouns(JsonObj p)
+        {
+            string text = p.S("pronouns", p.S("target", p.S("text", p.S("set", ""))));
+            text = Sanitize(text ?? "").Trim().Trim('"', '\'');
+            if (string.IsNullOrEmpty(text))
+                return new { ok = false, reason = "empty_pronouns",
+                    note = "set_pronouns(pronouns='she/her') or console: set_pronouns she/her — also try they/them, he/him, xe/xem, or anything you go by" };
+            if (text.Length > 24)
+                return new { ok = false, reason = "too_long", tried = text.Substring(0, 24), note = "pronouns ≤ 24 chars (e.g. 'she/her')" };
+            foreach (char c in text)
+                if (c != '/' && !char.IsLetter(c) && c != ' ')
+                    return new { ok = false, reason = "invalid_pronouns", tried = text, note = "letters + '/' only (e.g. 'they/them')" };
+            string prev = null;
+            try { prev = InferPronouns(); } catch (Exception) { }
+            _pronounsOverride = text;
+            Logger.LogInfo("[" + MyName() + "] pronouns set: " + text);
+            RunOnMainThreadAsync(() =>
+            {
+                try { SaveBodyMemory(); Logger.LogInfo("[" + MyName() + "] pronouns persisted with the body's life"); }
+                catch (Exception) { }
+            });
+            return new { ok = true, pronouns = text, was = prev,
+                note = "you now go by " + text + " — perception/pronouns say so everywhere now; mention it in chat if you like" };
         }
 
         // ------------------------------------------------------------------

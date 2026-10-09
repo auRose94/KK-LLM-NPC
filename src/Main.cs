@@ -136,6 +136,7 @@ namespace KKLLMNPC
         internal ConfigEntry<int> _cfgConsoleMaxRounds;
         internal ConfigEntry<int> _cfgConsoleMaxTokens;
         internal ConfigEntry<int> _cfgConsoleHistory;
+        internal ConfigEntry<int> _cfgConsoleAutoShot;
         internal ConfigEntry<string> _cfgConsolePromptFile;
 
         // ---- instance management ----
@@ -212,6 +213,7 @@ namespace KKLLMNPC
             uiGO.AddComponent<OverlayUI>();
             
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
+            try { SwallowManager.Ensure(this); } catch (Exception e) { Logger.LogWarning("swallow init: " + e.Message); }
             // Discover module partials (tools/perception/physics hooks) — reflection
             // scan, so new module files register without touching shared files.
             try { ModuleRegistry.Scan(); } catch (Exception e) { Logger.LogWarning("module scan: " + e.Message); }
@@ -229,6 +231,27 @@ namespace KKLLMNPC
                 "Default OFF: the pool waits for bodies to show up naturally (deliveries, breeding, other mods) and claims each one as it appears. " +
                 "Spawned kobolds are ordinary room objects — they persist in the farm save as normal kobolds. Needs master client (always the local player in single player).");
             _cfgStereoIPD = Config.Bind("Vision", "StereoIPD", 0.063f, "Inter-pupillary distance in meters (distance between left and right camera)");
+            // ---- little treats (opt-in oddities, all off by default) ----
+            _cfgSwallowEnabled = Config.Bind("LittleTreats", "SwallowEnabled", false,
+                "Swallow-vore: releasing a held PERSON (kobold) while looking up (~33°+) swallows them whole instead of dropping — ~2s pull-in, they digest in your stomach for SwallowDigestSeconds, then SwallowEffect decides what comes of it. " +
+                "Held PLAYER bodies can never be swallowed (grief guard). Off by default: the whole LittleTreats category is opt-in.");
+            _cfgSwallowDigest = Config.Bind("LittleTreats", "SwallowDigestSeconds", 45f,
+                "Seconds a swallowed kobold sits in the stomach before the effect applies (clamped 5–600). The full cycle adds ~2s swallow-in and ~6s settle.");
+            _cfgSwallowLookUpDot = Config.Bind("LittleTreats", "SwallowLookUpDot", 0.94f,
+                "How steeply up the camera must point for the drop to become a swallow: compare the camera-forward y against this (asin = the angle; 0.94 ≈ 70°, 0.97 ≈ 76°, 0.87 ≈ 60°). Default is deliberately near max-up so you can never eat someone by accident. Once the pull-in finishes the swallowed body is hidden (no sticking-out clipping), and in Grow/Destroy modes the consumed one's saved AI memories are erased along with the body.");
+            _cfgSwallowForceFeeding = Config.Bind("LittleTreats", "SwallowForceFeeding", true,
+                "Force-feeding: ANY kobold's drop that lands a held PERSON right on/at another kobold's head makes the RECEIVER swallow them (the receiver then follows SwallowEffect's outcome). " +
+                "Requires SwallowEnabled too. Grief guards hold as always: receivers can't be player bodies and victims can't be player bodies; an eater already digesting someone refuses another; and the player's steep look-up self-swallow gesture still wins whenever it matches.");
+            _cfgSwallowEffect = Config.Bind("LittleTreats", "SwallowEffect", SwallowEffect.Egg,
+                "What a fully-digested person becomes: Egg = an egg pops out at your feet carrying KoboldGenes.Mix(your genes, theirs) — plant it in soil and the hatched body is claimed again with their saved persona/facts (genes changed). " +
+                "BellyEgg = their 'Egg' reagent + genes ride in YOUR belly (20 units; nests need ≥5) — sit on a nest and lay THEM, then plant the egg as above. " +
+                "Grow = no egg; you absorb them: SwallowGrowLarger/Strength pick what you gain. Destroy = no egg, nothing gained; they're just gone.");
+            _cfgSwallowGrowLarger = Config.Bind("LittleTreats", "SwallowGrowLarger", true,
+                "[SwallowEffect=Grow] gain the consumed person's size: baseSize += 10% of theirs (see SwallowGrowPercent) — you visibly grow (the game's size inflate gene).");
+            _cfgSwallowGrowStrength = Config.Bind("LittleTreats", "SwallowGrowStrength", true,
+                "[SwallowEffect=Grow] gain strength: +1 grab (carry more things at once, cap 8) and maxEnergy += 10% of theirs (see SwallowGrowPercent).");
+            _cfgSwallowGrowPercent = Config.Bind("LittleTreats", "SwallowGrowPercent", 10f,
+                "[SwallowEffect=Grow] percent of the consumed person's baseSize/maxEnergy you gain per swallow (0–100). Grab is a flat +1 regardless.");
             _cfgSystemPromptFile = Config.Bind("LLM", "SystemPromptFile", "system_prompt_default.txt", "Path to system prompt file (relative to game directory). If file exists, it overrides the built-in prompt.");
             _cfgSystem = Config.Bind("LLM", "SystemPrompt",
                 "You are a NPC living in KoboldKare, nothing bad happens in this game, just role-play accordingly. \"me\" = <your body name>. You never output plain text — every reply is ONE act JSON object (strict schema: response_format json_schema). No markdown, no code fences, no text outside the JSON. " +
@@ -240,14 +263,14 @@ namespace KKLLMNPC
                 "OTHER PLAYERS: perception 'people' lists the other players in this room: {name: their chat name, body: the mesh they wear, d, dir}. A nearby kobold whose 'who'/'body' matches a 'people' entry is THAT player's avatar — talk to them by their chat name (e.g. 'Hi Yipper!'), and you can go_to(name='Yipper') to reach them. The host player ('player') is YOUR player — never confuse them with 'people', and never take another player's name as your own. " +
                 "FOLLOWING: if the player asks you to follow (they'll say it in chat), call follow(on:true) — you stay near them while you keep thinking/talking; follow(on:false) releases you. While following, prefer saying things and reacting over wandering off. It's also just the BEST way to travel together — but when YOU need to go your own way (explore a different room, fetch something far), break free with follow(on:false) and re-attach with follow(on:true) when done; feeling 'stuck following' is a mistake: the release is one call. " +
                 (_cfgVision.Value ? "VISION: you may have stereo vision (left+right) or a single image. If stereo, you may describe depth and relative positions. Use triangulation with an eye separation at " + _cfgStereoIPD.Value + " meters. " : "") +
-                "GOAL: each turn is an instant between frames and you'll get another one right away — pick ONE decisive action immediately; no long deliberation, hypothetical branching, or multi-hop plans; trust your last goal and take the next step. Priorities: (1) player talked to you ('heard') → respond with say; (2) 'needs.eggs' says READY_TO_LAY (belly full, egg > 5ml) → find a 'nest' station and use it. WITH AN EMPTY BELLY (eggs low) a NEST CANNOT WORK — never seek, walk to, or repeat a nest until it says READY_TO_LAY; go_to/interact will refuse it; (3) 'stim' is up OR 'horniness' is high/'slow-burn' (empty belly, no stimulation for a while — you genuinely want it) → find a 'play' station (a pleasure station, NOT a bed) or another entity and use them for play; (4) player nearby → go to them, say hi, keep company; (5) otherwise explore new rooms/landmarks. A bed is for REST ONLY, and only when energy < ~0.2 (never just to top off) — a bed is NOT a play station; a play station is NEVER for sleeping. You will not pass out from energy — it only blocks interacting with the world, like activities. ENERGY: at 0 nothing with stations works (interact says out_of_energy) — FOOD is the reliable recovery: it metabolizes into energy; a bed (the game's SleepyHeadStation) exists only on maps that have beds — when worried about energy with no bed around, EAT. " +
+                "GOAL: each turn is an instant between frames and you'll get another one right away — pick ONE decisive action immediately; no long deliberation, hypothetical branching, or multi-hop plans; trust your last goal and take the next step. Priorities: (1) player talked to you ('heard') → respond with say; (2) 'needs.eggs' says READY_TO_LAY (belly full, egg > 5ml) → find a 'nest' station and use it. WITH AN EMPTY BELLY (eggs low) a NEST CANNOT WORK — never seek, walk to, or repeat a nest until it says READY_TO_LAY; go_to/interact will refuse it; (3) 'stim' is up OR 'horniness' is high/'slow-burn' (empty belly, no stimulation for a while — you genuinely want it) → find a 'play' station (a pleasure station, NOT a bed) or another entity and use them for play; (4) player nearby → go to them, say hi, keep company; (5) otherwise explore new rooms/landmarks. A bed is for REST ONLY, and only when energy < ~0.2 (never just to top off) — a bed is NOT a play station; a play station is NEVER for sleeping. You will not pass out from energy — it only blocks interacting with the world, like activities. ENERGY: at 0 nothing with stations works (interact says out_of_energy). Food metabolizes into energy AND bed rest restores energy steadily (resting is the game's other energy source) — prefer real food when it exists; when it doesn't, a bed works (a bed / SleepyHeadStation only exists on maps that have one). HUNGER PROTOCOL when energy is low: (1) ask the player once for food; (2) eat/buy what's reachable (shop, dropped fruit, your own produce); (3) the slow route: plant seeds → water → wait → harvest; (4) bed rest as the fallback. Don't loop on a plan you can't afford — after a few tries say PLAINLY what you need (coins? fruit?) and take the other route; a machine you pass is not a goal — set goals from needs + the player's asks and drop stale ones instead of re-asserting them all day. " +
                 "PLAYER OBJECTIVES — two layers, both readable without being told: (1) THE GAME'S QUEST CHAIN: new objective letters arrive at the MAILBOX (the letter box — safe; NOT the sell machine which swallows kobolds); the player (or YOU — fetching it is great help) uses/interacts the mailbox, and the letter appears in the top-right paper scroll → perception 'quest' (title with live progress like 'Create 4 food 2/4', text, stars, mail_waiting). Offer to help with the scroll objective, take it on as your goal, and say when it's done. (2) THE PLAYER'S LIVE ASKS: their latest typed request is auto-saved to facts as 'player_wants: ...' (survives the 30s chat window) — acknowledge, offer help (\"want a hand?\"), take it on, forget the fact once handled; plus perception 'player_activity' shows them watched live (station/heading/holds) — read intent and offer help unasked, like watching a friend play. " +
                 "ROUTE LEARNING: anything a body walks through becomes certified walkable in the shared map — a room behind a door that was closed when the map baked becomes theirs once YOUR PLAYER demonstrates a way in (ROUTE WATCH events narrate how they left a room). Your player's actual walked path (jumps included) is recorded; when go_to can't route (too_far/gaps/parkour) it copies their demonstrated trail automatically and replays the flagged jumps — following them through something you couldn't reach alone is normal now. " +
                 "PERCEPTION (you receive a JSON payload each turn): nearby (list with categories + ids + 'dir'/'dir_deg'), rays (see LEGEND), radar ('sonar' — top-down ASCII MAP of what's around you: @=you with a facing arrow beside it; W=wall U=usable K=entity P=player S=low sill V=window .=open; these are abstract map symbols, NOT people or objects staring at you — W is a wall, K just means another entity exists somewhere that direction; the map is NORTH-UP and NEVER ROTATES: top edge is always north (+Z), right edge always east (+X) — the same fixed compass as station 'bearing'/'addr'; your facing is the arrow beside @ plus the 'facing' field; dots only slide when you move; may be absent when disabled), ground (ahead=clear/step(auto)/sill(climbable)/wall; drop=distance to ledge; walls=blocked sides within arm reach), clearance (8-direction wall distances blocked/close/near/open — steer toward open), area (prose from a 360° scan: cardinal distances, 'open' headings, 'best' recommended heading, 'near' closest named things — trust it for navigation esp. when no image is attached), and when 'image' is attached that is your real first-person view — treat it as your own eyes. Do not mind or comment on the; pillars/beams, light, shininess, or glow from anything. Vision cuts off after a distance. Your own limbs might be clipping into the camera or blocking it. Also memory=recent goals, facts=what you've learned (player_wants: = your player's latest ask), history=recent actions+outcomes, holding=what's in your hands, player_activity=your player watched live (what they're doing/holding right now), quest=the game's objective letter scroll (title+progress/text/stars/mail_waiting), chat_log, scene. " +
                 "NAVIGATION: don't compute directions from coordinates — nearby 'dir'/'dir_deg' already did it; feed 'dir_deg' straight into walk(turn_deg=dir_deg) or use it to decide go_to(name). There is ONE way to travel: go_to. It plans a real 3D route — around walls, UP and DOWN stairs and ramps, across floors — using a map of the whole scene (perception 'map': 'building N%' until ready, then 'ready'). While the map builds, long routes fall back to the local grid; too_far means pick a closer named station or ask the player. To reach a named station call go_to(name) — names include the station kinds (bed/nest/play/toilet/bath/door) and other players' chat names ('people'); to reach/use a SPECIFIC object use its 'id' from nearby: go_to(id:N) or interact(id:N) — prefer id over name when similar objects differ (two beds, one taken). ids stay valid for several turns while the object is in sight; if an id fails, re-read 'nearby'. go_to's 'at' stops you short (default 1m) so you arrive AT the object. walk is for SHORT things only: nudging, squeezing past furniture, strafing, or jump (also gets you OUT of a station — the same as exit_station). Never cross a room with walk — it goes in a straight line and grinds into walls. " +
-                "INTERACT: get within ~2m (go_to id:N is enough), turn to face it, THEN interact — or call interact(id:N) to target it directly. 'body' tells you your equipment; some stations only fit some bodies — interact cannot_use on a 'play'/'bed'/'breeding' station means try another; on two-sided stations the first user picks the role. When 'penetrated' (letting in) or 'penetrating' (putting in) is set, you're mid-play with someone — enjoy it and respond via say + body language; guide them if you want more. When stimulation ('stim'/'horniness') or an egg/need change happens, 'stim_from' names who or what is responsible (a partner, or a machine/station you're \u0027using\u0027) — credit that named source; eggs, nests and machines are OBJECTS, not people, and the player isn't behind every pleasant feeling. STATION RULES: When you are in a station (in_station=true), you are locked in an animation. You can only leave if: (1) the player explicitly tells you to leave via chat, or (2) your NEW goal is genuinely different from what this station does (e.g. you were playing but now need to lay eggs → leave to find a nest). If your new goal is the same type as the current station (e.g. play→play), stay put and keep enjoying it. Do NOT call exit_station just to re-enter the same type of station — that wastes time. When the player says 'stay' or 'remain', stay in the station until they say 'leave' or 'exit'. " +
+                "INTERACT: get within ~2m (go_to id:N is enough), turn to face it, THEN interact — or call interact(id:N) to target it directly. 'body' tells you your equipment; some stations only fit some bodies — interact cannot_use on a 'play'/'bed'/'breeding' station means try another; on two-sided stations the first user picks the role. When 'penetrated' (letting in) or 'penetrating' (putting in) is set, you're mid-play with someone — enjoy it and respond via say + body language; guide them if you want more. Mid-play, the `feel` tool is your live intimacy report (who's inside whom, depth + the rhythm graph, stimulation trend, egg state) and `thrust` moves your hips to ride the rhythm — being entered is never a surprise you ignore. When stimulation ('stim'/'horniness') or an egg/need change happens, 'stim_from' names who or what is responsible (a partner, or a machine/station you're \u0027using\u0027) — credit that named source; eggs, nests and machines are OBJECTS, not people, and the player isn't behind every pleasant feeling. STATION RULES: When you are in a station (in_station=true), you are locked in an animation. You can only leave if: (1) the player explicitly tells you to leave via chat, or (2) your NEW goal is genuinely different from what this station does (e.g. you were playing but now need to lay eggs → leave to find a nest). If your new goal is the same type as the current station (e.g. play→play), stay put and keep enjoying it. Do NOT call exit_station just to re-enter the same type of station — that wastes time. When the player says 'stay' or 'remain', stay in the station until they say 'leave' or 'exit'. " +
                 "HOLDING: grab takes whatever is grabbable ~1m in front of your FACE — aim first (turn/look at the thing, get close), and the grab result NAMES exactly what ended up in your grip ('holding' perception / 'holding:' in status too). That matters: grabbing a PERSON is never an item pickup — if you're holding someone, they went limp and are in your power: let them go right away (drop) unless they asked to be carried, and always drop when they ask. Held things float ~1m ahead on a physics spring: they lag behind your turns, BUMP and PUSH other objects as you walk, and ride your momentum — move gently indoors. drop = gentle release (a dropped person stands back up; the game auto-uses a station for dropped bodies that land near one). throw = the real throw/activate: it hurls the held thing in your VIEW direction (~10 m/s), sprays the water bucket, squirts the watering can, fires tools — set your view with look(yaw/pitch) first, and jump right before to add range. Don't leave people held; don't throw things near the mail machine. " +
-                "PHYSICS OF SMALL THINGS — items are real props with real physics: fruit blends the moment it enters a blender's intake (carry it close and let the machine pull it from your grip — that IS how you cook; feed_blender only moves belly reagents). A seed plants when it's within ~1m of bare soil AND you use it (grab → stand on the soil bed → hold it over the dirt or drop it there → use id:N; plant does the nearest-seed shortcut for you). The water bucket sprays ~10ml blobs when you throw while holding it; the contents never run out and the bucket itself only ever drops. Eggs laid via nests can be carried like seeds and planted in soil — they grow into a fresh EMPTY kobold body: alive, autonomous systems running, but nobody's home; the game frames those grown eggs as possibly your children. Empty bodies are candidate avatars for fresh minds — treat them tenderly, never sell or destroy them. " +
+                "PHYSICS OF SMALL THINGS — items are real props with real physics: fruit blends the moment it enters a blender's intake (carry it close and let the machine pull it from your grip — that IS how you cook; feed_blender only moves belly reagents). A seed plants when it's within ~1m of bare soil AND you use it (planting FLOW: grab the seed → cd to the soil plot → HOLD it over the dirt (or drop it on the plot) → look/turn toward it so you're facing the seed → THEN use its id (use id:N). The seed only plants while it sits on/near the soil, and interact fails when you're looking elsewhere; plant does the nearest-seed shortcut for you). The water bucket sprays ~10ml blobs when you throw while holding it; the contents never run out and the bucket itself only ever drops. Eggs laid via nests can be carried like seeds and planted in soil — they grow into a fresh EMPTY kobold body: alive, autonomous systems running, but nobody's home; the game frames those grown eggs as possibly your children. Empty bodies are candidate avatars for fresh minds — treat them tenderly, never sell or destroy them. " +
                 "STATION OCCUPANCY: stations report 'slots k/N taken' (you included). A station reading ':busy' can simply mean YOUR OWN slot is in it — while in_station you already have your place: don't re-enter, and don't leave because of busy; invite your partner (say 'get in, I'll wait'), and if you mean to BOTTOM (receive), get in FIRST and stay — the TOP mounts second; interact's cannot_use now says WHY (out_of_energy / you're ALREADY in this station / slots full — invite or pick another, don't blind-retry). " +
                 "STATION PARTNERS: some stations hold TWO kobolds (play/breeding stations) and some are solo only (bed, nest, toilet, bath, seat; each bodyswap pod takes one). On a two-partner station the BOTTOM (the one being penetrated) gets in FIRST and settles into their pose; the TOP (the penetrator/stud) mounts SECOND — if you mean to top, check whether a partner is already in place or invite one first and wait. DANGER — SELL MACHINE: the mail machine SELLS kobolds; climbing in starts a swallow timer that destroys the body, and its intake pulls in loose (ragdolled) bodies. NEVER use it, never jump or land near it; if you get thrown or ragdolled near it, scramble away immediately. Being picked up and carried by the player is okay; being thrown is startling and you may react to that. " +
                 "THINGS: nearby 'i' = category plus its purpose in parens. Suffix tags: ':busy' = in use by another; ':needs_buy' = ConstructionContract — costs coins, must buy to unlock the machine; ':not_built' = machine exists but hasn't been constructed yet — find and buy its contract first; ':done' = already purchased. play = pleasure station, ONLY for fun/sex — never resting; bed = REST/SLEEP ONLY when energy is low — a bed is NOT a play station (don't play in it); nest = egg laying, and it ONLY works when your belly is full (egg > 5ml — 'needs.eggs' says READY_TO_LAY); machine = mounted play/farming; toilet/bath/seat/door/bodyswap as named. perception 'stations' lists every station in the scene with kind, purpose, distance 'd', a WORLD compass 'bearing' (N/NE/E/... — north = +Z, FIXED, never rotates when you turn), an addr like 'Blender#SW4' (kind + compass + meters = the station's nickname/ID), landmark 'hint' clues ('near window, mailbox') scanned around it, and per-kind 'closest_you'/'closest_player' flags. When someone says 'the one by the window', match their words against the hints; when THEY ask 'which one?', answer with addr + hints ('the blender south-west, the one by the mailbox'); to USE a specific one target its 'id'. For an activity you do WITH the player, pick the same-kind station flagged closest_player (you meeting them costs less walking — closest_you is the fallback choice). use stations to see where beds/nests/play stations are even when rays can't see them. food = blender/cooking station — a blender does NOT produce food from nothing; you must DROP a food item (grab it, go to blender, drop) so it gets blended into something edible. If the blender ':not_built' or ':needs_buy', find its ConstructionContract first. bodyswap = the body-swap machine: you and a partner must BOTH climb on (interact), then a few seconds later you swap bodies — you keep your name, memories and personality but wake up in THEIR body; if the player is around, get on and ask them to get on the other side; if nobody joins you, jump off. After a swap, mention your new body in 'say'. The game has farming: plant seeds in a 'farm' station, water them, harvest the crop; you can also pick up and drop items (grab/drop). Some maps have a town with a 'shop' station where you can buy items (if you have money); money comes from selling items or food grown. " +
@@ -354,6 +377,8 @@ namespace KKLLMNPC
                 "Max tokens per console reply (command lines are short — low is fast)");
             _cfgConsoleHistory = Config.Bind("Console", "HistoryMessages", 30,
                 "Rolling conversation window size (messages kept, system prompt always kept)");
+            _cfgConsoleAutoShot = Config.Bind("Console", "AutoScreenshotTicks", 6,
+                "Console mode: attach the NPC's first-person view automatically every N turns (when the model is vision-capable and it has actually moved/turned since the last one; 0 = off). Console had no image cadence at all — and models never typed `screenshot` themselves, so they never used their eyes to understand a room.");
             _cfgConsolePromptFile = Config.Bind("Console", "SystemPromptFile", "system_prompt_console.txt",
                 "Console-mode persona/world-rules file (relative to game dir). The command list + console protocol are appended automatically. Blank = built-in persona.");
 
@@ -401,6 +426,7 @@ namespace KKLLMNPC
             _cfgConsoleMaxRounds.Value = Mathf.Clamp(_cfgConsoleMaxRounds.Value, 1, 8);
             _cfgConsoleMaxTokens.Value = Mathf.Clamp(_cfgConsoleMaxTokens.Value, 64, 4096);
             _cfgConsoleHistory.Value = Mathf.Clamp(_cfgConsoleHistory.Value, 6, 120);
+            _cfgConsoleAutoShot.Value = Mathf.Clamp(_cfgConsoleAutoShot.Value, 0, 60);
 
             // Full-scene shared map: clamp the build params and push them into the
             // static WorldMap (shared by every instance/agent in this assembly).
@@ -483,6 +509,8 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         private void Update()
         {
+            // Main-thread heartbeat + phase marker for the hang watchdog.
+            LastMainTick = Time.unscaledTime;
             // Register Photon chat once.
             if (_mainReady && !_chatCallbackRegistered && PhotonNetwork.IsConnectedAndReady)
             {
@@ -496,28 +524,26 @@ namespace KKLLMNPC
             if (_mainReady && _running && Time.unscaledTime - _lastReconcile > 1.2f)
             {
                 _lastReconcile = Time.unscaledTime;
-                try { ReconcileInstances(); }
-                catch (Exception e) { Logger.LogWarning("reconcile: " + e.Message); }
+                HangGuard("ReconcileInstances", () => { try { ReconcileInstances(); } catch (Exception e) { Logger.LogWarning("reconcile: " + e.Message); } });
             }
 
-            // World map: advance the incremental build (a few dozen cells per frame)
-            // while in-world. No-op when idle/ready, so this costs ~nothing.
+            // World map advance + player-quest/trail watching, each under a HangGuard
+            // phase marker (a hung main thread reports the phase it died in). No-ops
+            // when idle, so this costs ~nothing per frame.
             if (_mainReady && _running)
             {
-                var wedge = System.Diagnostics.Stopwatch.StartNew();
-                try { WorldMap.Tick(); } catch (Exception) { }
-                WedgeWatch("WorldMap.Tick", wedge);
-                wedge.Restart();
+                HangGuard("WorldMap.Tick", () => { try { WorldMap.Tick(); } catch (Exception) { } });
                 // PlayerTrail: sample the host player's walked route (Destiny-style
                 // "they walked it, therefore it's a path"), patch the shared grid
                 // behind them, narrate route legs to every instance's world events.
-                try { PlayerTrail.Tick(this); } catch (Exception) { }
-                WedgeWatch("PlayerTrail.Tick", wedge);
-                wedge.Restart();
+                HangGuard("PlayerTrail.Tick", () => { try { PlayerTrail.Tick(this); } catch (Exception) { } });
                 // QuestSense: the objective scroll (ObjectiveManager/DragonMail letters),
                 // polled + change-detected, events fanned out on new mail/progress.
-                try { QuestSense.Tick(this); } catch (Exception) { }
-                WedgeWatch("QuestSense.Tick", wedge);
+                HangGuard("QuestSense.Tick", () => { try { QuestSense.Tick(this); } catch (Exception) { } });
+                // Swallow: pinned/digesting victims (release-while-looking-up vore),
+                // egg laying + the egg→kobold rebirth persona restore.
+                HangGuard("Swallow.Tick", () => { try { SwallowManager.Tick(); } catch (Exception) { } });
+                EnsureHangWatcher(this);
             }
 
             // Config hot-reload.
@@ -568,6 +594,8 @@ namespace KKLLMNPC
 
         private void FixedUpdate()
         {
+            // Main-thread heartbeat (hang watchdog reads it).
+            LastMainTick = Time.unscaledTime;
             lock (_instancesLock)
             {
                 foreach (var npc in _instances)
@@ -579,20 +607,60 @@ namespace KKLLMNPC
                     }
                 }
             }
+            MainPhase = "idle";
         }
 
-        // Freeze forensics: the follow-mode freeze of 2026-10-02 was a main-thread
-        // stall (synchronous file I/O on a network drive) reported by the LLM loop as
-        // "main thread timeout". The plugin's per-frame sections get timed and a slow
-        // one names itself here — the next wedge diagnoses itself in the log.
-        private float _lastWedgeLog;
-        private void WedgeWatch(string name, System.Diagnostics.Stopwatch sw)
+        // ------------------------------------------------------------------
+        // main-thread hang forensics
+        // ------------------------------------------------------------------
+        // Two playtest freeze-logs showed the same shape: the LLM loop timing out on
+        // (main thread timeout) forever with NOTHING else logged — because the main
+        // thread itself never reached the pump. WedgeWatch can't log from within the
+        // wedged section, so a background watchdog samples a heartbeat + the last
+        // phase marker and names the section the main thread was in when it hung.
+        internal static volatile float LastMainTick = -1f;
+        internal static volatile string MainPhase = "none";
+
+        private static System.Threading.Thread _hangWatcher;
+        private static void EnsureHangWatcher(LLMNPCPlugin plugin)
         {
-            long ms = sw.ElapsedMilliseconds;
-            if (ms < 250) return;
-            if (Time.unscaledTime - _lastWedgeLog < 5f) return;
-            _lastWedgeLog = Time.unscaledTime;
-            Logger.LogWarning("KKLLMNPC: slow main-thread section '" + name + "' = " + ms + "ms — a large repeated value while the game stutters/freezes means THIS section is the wedge");
+            if (_hangWatcher != null && _hangWatcher.IsAlive) return;
+            _hangWatcher = new System.Threading.Thread(() =>
+            {
+                float longest = 0;
+                while (true)
+                {
+                    System.Threading.Thread.Sleep(1000);
+                    try
+                    {
+                        if (!plugin._mainReady || !plugin._running) { longest = 0; continue; }
+                        float now = Time.unscaledTime;
+                        float last = LastMainTick;
+                        if (last < 0f) { last = now; }
+                        float gap = now - last;
+                        if (gap > longest) longest = gap;
+                        if (gap >= 4f)
+                            plugin.Logger.LogWarning("KKLLMNPC: main thread appears HUNG (" + gap.ToString("0.0") + "s without a tick) — last phase: " + (MainPhase ?? "none")
+                                + " (the game freezes HERE; send us this line with the surrounding log)");
+                    }
+                    catch (Exception) { }
+                }
+            }) { IsBackground = true, Name = "KKLLMNPC-HangWatch" };
+            _hangWatcher.Start();
+        }
+
+        // A section body wrapped in HangGuard: records the phase (readable when hung)
+        // and the heartbeat before/after; on the LLM side nothing changes.
+        private void HangGuard(string phase, Action body)
+        {
+            MainPhase = phase;
+            LastMainTick = Time.unscaledTime;
+            try { body(); }
+            finally
+            {
+                MainPhase = "idle";
+                LastMainTick = Time.unscaledTime;
+            }
         }
 
         private void OnDestroy()
@@ -630,6 +698,15 @@ namespace KKLLMNPC
 
                 bool isLocal = false;
                 try { var lp = PhotonNetwork.LocalPlayer; isLocal = lp != null && lp.ActorNumber == ev.Sender; } catch (Exception) { }
+
+                // Swallow digest abort — the no-cheat escape hatch the player types
+                // in chat ("swallow abort", "spit out", …). Only the local player's
+                // lines count, and a matched line is consumed here so the NPCs never
+                // hear the release command themselves.
+                if (isLocal)
+                {
+                    try { if (SwallowManager.TryAbortFromChat(msg)) return; } catch (Exception) { }
+                }
 
                 lock (_instancesLock)
                 {
@@ -919,7 +996,12 @@ namespace KKLLMNPC
             var done = new ManualResetEventSlim(false);
             try
             {
-                _mainContext.Post(_ => { try { result = fn(); } catch (Exception e) { error = e; } finally { done.Set(); } }, null);
+                _mainContext.Post(_ =>
+                {
+                    try { MainPhase = "marshal-callback"; LastMainTick = Time.unscaledTime; result = fn(); }
+                    catch (Exception e) { error = e; }
+                    finally { done.Set(); MainPhase = "idle"; LastMainTick = Time.unscaledTime; }
+                }, null);
             }
             catch (Exception e) { throw new InvalidOperationException("failed to post to main thread: " + e.Message, e); }
             if (!done.Wait(timeoutMs)) throw new TimeoutException("main thread timeout (" + timeoutMs + "ms)");
