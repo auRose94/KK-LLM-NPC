@@ -57,6 +57,9 @@ mcs -target:library -out:"$OUT/KKLLMNPC.dll" src/*.cs \
   -r:"$MGMT/PhotonRealtime.dll" \
   -r:"$MGMT/Assembly-CSharp.dll" \
   -r:"$MGMT/Naelstrof.PenetrationTech.dll" \
+  -r:"$MGMT/com.naelstrof.orbitcam.dll" \
+  -r:"$MGMT/com.naelstrof.inflatable.dll" \
+  -r:"$MGMT/NetStack.dll" \
   -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
   -r:"$MGMT/KoboldKare.ISavable.dll" > "$OUT/log" 2>&1
 rc=$?

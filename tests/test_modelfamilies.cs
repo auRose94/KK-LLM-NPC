@@ -45,6 +45,9 @@ namespace KKLLMNPC.Tests
             TestStripEdgeCases();
             TestEffectiveMaxTokens();
             TestHasThinkBlocks();
+            TestSpeciesUnitLabel();
+            TestSalvageNameFromCoT();
+            TestThinkingOffPayload();
 
             Console.WriteLine("\n=== Results: " + _passed + " passed, " + _failed + " failed ===");
             Environment.Exit(_failed > 0 ? 1 : 0);
@@ -258,6 +261,119 @@ namespace KKLLMNPC.Tests
             Assert(!ModelFamilies.HasThinkBlocks("plain reply"), "plain reply: false");
             Assert(!ModelFamilies.HasThinkBlocks("stray" + TkClose), "closer-only text: false (no opener)");
             Assert(!ModelFamilies.HasThinkBlocks(null) && !ModelFamilies.HasThinkBlocks(""), "null/empty: false");
+        }
+
+        // ------------------------------------------------------------------
+        // IsSpeciesUnitLabel: species ± digits = unit label, not a name
+        // ------------------------------------------------------------------
+        static void TestSpeciesUnitLabel()
+        {
+            Console.WriteLine("--- IsSpeciesUnitLabel ---");
+
+            Assert(ModelFamilies.IsSpeciesUnitLabel("Kobold", "kobold"), "bare species word is a unit label");
+            Assert(ModelFamilies.IsSpeciesUnitLabel("Kobold2", "kobold"), "species + digits is a unit label");
+            Assert(ModelFamilies.IsSpeciesUnitLabel("Kobold-3", "kobold"), "species + hyphen digits is a unit label");
+            Assert(ModelFamilies.IsSpeciesUnitLabel("Deuzear-3", "Deuzear"), "species match is case-insensitive");
+            Assert(!ModelFamilies.IsSpeciesUnitLabel("Koboldess", "kobold"), "species-prefixed real word is still a name");
+            Assert(!ModelFamilies.IsSpeciesUnitLabel("Ember", "kobold"), "unrelated name is not a unit label");
+            Assert(!ModelFamilies.IsSpeciesUnitLabel("Ember", ""), "empty species disables the check");
+            Assert(!ModelFamilies.IsSpeciesUnitLabel("", "kobold"), "empty candidate is not a unit label");
+            Assert(!ModelFamilies.IsSpeciesUnitLabel(null, "kobold"), "null candidate is not a unit label");
+        }
+
+        // ------------------------------------------------------------------
+        // SalvageNameFromCoT: mine the conclusion out of unmarked reasoning
+        // (shapes observed verbatim in 2026-10 name-selection logs)
+        // ------------------------------------------------------------------
+        static void TestSalvageNameFromCoT()
+        {
+            Console.WriteLine("--- SalvageNameFromCoT ---");
+
+            // Taken-name pool for the salvage filter (positives below avoid it).
+            const string taken = "LoonaDZ, Expie, Ember, Viper, Rosemary, Sage";
+            string species = "kobold";
+
+            // Labeled conclusions.
+            Assert(ModelFamilies.SalvageNameFromCoT("1. check constraints\n2. keep it short\nFinal Answer: Puddle", taken, species) == "Puddle",
+                "Final Answer: X");
+            Assert(ModelFamilies.SalvageNameFromCoT("**Final Answer:** Puddle", taken, species) == "Puddle",
+                "bold-marked label");
+            Assert(ModelFamilies.SalvageNameFromCoT("The name is: Puddle", taken, species) == "Puddle",
+                "copula heading 'name is:'");
+            Assert(ModelFamilies.SalvageNameFromCoT("My pick: Puddle.", taken, species) == "Puddle",
+                "'pick' label, trailing period");
+            Assert(ModelFamilies.SalvageNameFromCoT("choice=Puddle", taken, species) == "Puddle",
+                "equals-separator label");
+
+            // Verbal conclusions.
+            Assert(ModelFamilies.SalvageNameFromCoT("Constraints checked. I'll call her Zephyr.", taken, species) == "Zephyr",
+                "'call her X'");
+            Assert(ModelFamilies.SalvageNameFromCoT("Named it Fluff.", taken, species) == "Fluff",
+                "'named it X'");
+
+            // Bare conclusions.
+            Assert(ModelFamilies.SalvageNameFromCoT("1. avoid taken names\n2. something short\n\nPuddle", taken, species) == "Puddle",
+                "single-word last line");
+            Assert(ModelFamilies.SalvageNameFromCoT("My pick:\nPuddle", taken, species) == "Puddle",
+                "label colon alone, name on next line");
+            Assert(ModelFamilies.SalvageNameFromCoT("\n\nName: 'Puddle'", taken, species) == "Puddle",
+                "quoted name");
+
+            // The reasoning's LAST conclusion wins over earlier candidates.
+            Assert(ModelFamilies.SalvageNameFromCoT("First thought: Fluff.\nBut no — final answer: Zephyr", taken, species) == "Zephyr",
+                "last candidate wins");
+
+            // Constraint dumps salvage nothing — every echo mid-fails or filters.
+            // (Verbatim 2026-10 reply fragments; these replies were truncated
+            // anyway, so ChooseNameWithLLM skips salvage for them entirely.)
+            Assert(ModelFamilies.SalvageNameFromCoT(
+                "* Gender: female.\n* Species: kobold.\n* Reply format: ONE name only.\n* Reply with ONE name only: 2-12 letters or digits.",
+                taken, species) == null, "constraint-only dump -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT(
+                "Here's a thinking process:\n\n1.  **Analyze the constraints:**\n\n    *   Reply with ONE name only: 2",
+                taken, species) == null, "truncated log-shaped dump -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("Names are TAKEN (do not use them): LoonaDZ, Expie.", taken, species) == null,
+                "taken-list echo -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("Name: one kobold character", taken, species) == null,
+                "prompt echo 'Name: one kobold character' -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("Gender: female.", taken, species) == null,
+                "'female' can't become a name");
+
+            // Filters.
+            Assert(ModelFamilies.SalvageNameFromCoT("Final Answer: Ember", taken, species) == null,
+                "taken name is dropped");
+            Assert(ModelFamilies.SalvageNameFromCoT("Name: Kobold2", taken, species) == null,
+                "species unit label is dropped");
+            Assert(ModelFamilies.SalvageNameFromCoT("I'll call her them.", taken, species) == null,
+                "stopword candidate is dropped");
+            Assert(ModelFamilies.SalvageNameFromCoT("The name is Puddle and short", taken, species) == null,
+                "mid-sentence candidate -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("", taken, species) == null, "empty -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT(null, taken, species) == null, "null -> null");
+        }
+
+        // ------------------------------------------------------------------
+        // ThinkingOffPayloadPart: [LLM] Thinking=off suppression fields
+        // ------------------------------------------------------------------
+        static void TestThinkingOffPayload()
+        {
+            Console.WriteLine("--- ThinkingOffPayloadPart ---");
+
+            var part = ModelFamilies.ThinkingOffPayloadPart();
+            Assert(part != null && part.Count == 3, "builds three suppression fields");
+
+            Assert(part.ContainsKey("think") && part["think"] is bool off1 && !off1,
+                "Ollama think=false");
+            Assert(part.ContainsKey("reasoning_budget") && Convert.ToInt32(part["reasoning_budget"]) == 0,
+                "llama.cpp reasoning_budget=0");
+            Assert(part["chat_template_kwargs"] is System.Collections.Generic.Dictionary<string, object> kwargs
+                && kwargs.ContainsKey("enable_thinking") && kwargs["enable_thinking"] is bool off2 && !off2,
+                "template kwargs enable_thinking=false");
+
+            // The values must be wire-primitives (bool/int/dict), not enums or
+            // strings, so every OpenAI-compatible server parses them the same.
+            Assert(part["think"].GetType() == typeof(bool), "think is a real bool (boxed identity compares nothing — never ReferenceEquals it)");
+            Assert(part["reasoning_budget"].GetType().IsPrimitive, "budget is a number, not a string");
         }
     }
 }

@@ -71,6 +71,7 @@ namespace KKLLMNPC
                     ["temperature"] = _cfgCommentTemp != null ? (double)_cfgCommentTemp.Value : 0.9,
                     ["stream"] = false,
                 };
+                ApplyThinkingParams(payload);
                 string body = Json.Write(payload);
                 string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
                     retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 512 * 1024,
@@ -142,6 +143,7 @@ namespace KKLLMNPC
                     ["temperature"] = 0.4,
                     ["stream"] = false,
                 };
+                ApplyThinkingParams(payload);
                 string body = Json.Write(payload);
                 string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
                     retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 512 * 1024,
@@ -212,7 +214,7 @@ namespace KKLLMNPC
                 for (int attempt = 1; attempt <= 3 && finalName == null; attempt++)
                 {
                     string chosen = null;
-                    try { chosen = ChooseNameWithLLM(gender, species, traits); }
+                    try { chosen = ChooseNameWithLLM(gender, species, traits, attempt); }
                     catch (Exception e) { Logger.LogWarning("name selection attempt " + attempt + " failed: " + e.Message); }
                     if (string.IsNullOrEmpty(chosen)) continue;
                     if (NameRegistry.TryReserve(chosen))
@@ -257,12 +259,41 @@ namespace KKLLMNPC
             Logger.LogInfo("KKLLMNPC: this kobold calls itself '" + _npcName + "'" + (_persona != null ? " — " + _persona : ""));
         }
 
+        // Built-in NAME-prompt template. KEEP IN SYNC with the shipped
+        // system_prompt_name.txt — the shipped file overrides this when present,
+        // and both must carry the same text with the {gender} {species}
+        // {traits} {taken} placeholders (the prompt-sync trap).
+        internal static readonly string NamePromptTemplateBuiltin =
+            "Name one kobold character. Gender: {gender}. Species: {species}. Personality: {traits}. {taken}" +
+            "Reply with ONE name only: 2-12 letters or digits, no spaces, no punctuation, no explanation. " +
+            "Never the species name with a number attached (like Kobold2) — invent an actual name. " +
+            "Do not think out loud or show your reasoning; if reasoning appears in your reply anyway, " +
+            "your reply MUST end with a final line of the form Name: <the name>";
+
+        // The name-prompt chat template: [LLM] NamePromptFile when present,
+        // else the built-in. Both go through TextUtil.ExpandTemplate so a
+        // user-edited file keeps the same placeholder contract.
+        private string NamePromptTemplate()
+        {
+            string file = _cfgNamePromptFile != null ? (_cfgNamePromptFile.Value ?? "").Trim() : "";
+            if (file.Length > 0)
+            {
+                string content = TryReadPromptFile(file);
+                if (content != null) return content;
+            }
+            return NamePromptTemplateBuiltin;
+        }
+
         // Sends a one-shot prompt with the body's gender, species, and personality
         // traits, asks for a single name. Runs for EVERY model tier (small models
         // get a strict one-token prompt) — a name is mandatory before the NPC acts,
         // and two agents on the same avatar model must never share one. Returns null
         // when the endpoint fails; the caller re-rolls or falls back to a unique tag.
-        internal string ChooseNameWithLLM(string gender, string species, string traits)
+        // `attempt` (1-based) drives the token-budget ladder: reasoning templates
+        // that print their monologue as plain text burn the whole budget before
+        // naming, and a fixed budget re-rolled three times hits the same wall —
+        // each re-roll gets 3× then 6× the base so the reasoning can complete.
+        internal string ChooseNameWithLLM(string gender, string species, string traits, int attempt = 1)
         {
             if (string.IsNullOrEmpty(Val(_cfgEndpoint)))
             {
@@ -276,14 +307,17 @@ namespace KKLLMNPC
                 // second agent on the same model doesn't re-pick its sibling's name.
                 string taken = "";
                 try { taken = NameRegistry.TakenList(); } catch (Exception) { }
-                string prompt = "Name one kobold character. " +
-                    "Gender: " + (gender ?? "unknown") + ". " +
-                    "Species: " + (species ?? "kobold") + ". " +
-                    "Personality: " + (traits ?? "unknown") + ". " +
-                    (taken.Length > 0 ? "These names are TAKEN, do not use them: " + taken + ". " : "") +
-                    "Reply with ONE name only: 2-12 letters or digits, no spaces, no punctuation, no explanation. " +
-                    "Never the species name with a number attached (like Kobold2) — invent an actual name.";
+                var promptVars = new Dictionary<string, string>
+                {
+                    ["{gender}"] = gender ?? "unknown",
+                    ["{species}"] = species ?? "kobold",
+                    ["{traits}"] = traits ?? "unknown",
+                    ["{taken}"] = taken.Length > 0 ? "These names are TAKEN, do not use them: " + taken + ". " : "",
+                };
+                string prompt = TextUtil.ExpandTemplate(NamePromptTemplate(), promptVars);
 
+                int baseTokens = FamilyProfile.EmitsThinkBlocks ? 320 : 128;
+                int maxTokens = attempt <= 1 ? baseTokens : baseTokens * (attempt == 2 ? 3 : 6);
                 var payload = new Dictionary<string, object>
                 {
                     ["model"] = Val(_cfgModel),
@@ -295,12 +329,16 @@ namespace KKLLMNPC
                     // Thinking families need many tokens for reasoning before the
                     // name — 16 dies inside the marker block, which is why name
                     // selection historically failed on reasoner models.
-                    // max_tokens: reasoners need CoT headroom; other models need room
-                    // for preamble/JSON-shaped answers (observed: act-JSON instead of
-                    // a bare name) — 128 gives those shapes room to land complete.
-                    ["max_tokens"] = FamilyProfile.EmitsThinkBlocks ? 320 : 128,
+                    // Worse are the templates that print reasoning as PLAIN text
+                    // (no markers to strip): the whole budget dies inside the
+                    // monologue and the validator rejects the blob (observed:
+                    // ~300-token CoT bullets truncated three times at the cap).
+                    // The ladder gives each re-roll more headroom so the
+                    // reasoning can complete and the answer land.
+                    ["max_tokens"] = maxTokens,
                     ["stream"] = false,
                 };
+                ApplyThinkingParams(payload);
                 string body = Json.Write(payload);
 
                 string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
@@ -312,8 +350,17 @@ namespace KKLLMNPC
                     if (root == null) return null;
                     var choices = root.GetValueOrDefault("choices") as List<object>;
                     if (choices == null || choices.Count == 0) return null;
-                    var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                    var choice = choices[0] as Dictionary<string, object>;
+                    var msg = choice?.GetValueOrDefault("message") as Dictionary<string, object>;
                     if (msg == null) return null;
+                    // OpenAI-compatible servers report WHY the reply ended ("stop"
+                    // vs "length"). A "length" reply was cut mid-stream: its
+                    // reasoning is incomplete, and salvage must not read a
+                    // half-written "Name: X" line out of it — that reply only
+                    // earns the next rung of the token-budget ladder.
+                    bool truncated = string.Equals(choice?.GetValueOrDefault("finish_reason") as string, "length", StringComparison.Ordinal);
+                    if (truncated)
+                        Logger.LogInfo("[" + MyName() + "] name attempt " + attempt + " cut by the token budget (finish_reason=length) — re-rolling with a bigger budget");
                     // Some servers put the real text in 'reasoning_content' and/or non-
                     // string content parts — try all the shapes before declaring empty.
                     string content = msg.GetValueOrDefault("content") as string;
@@ -393,23 +440,30 @@ namespace KKLLMNPC
                         // "AbsolB3") is a unit label, not a name — reject it and let the
                         // caller re-roll. (A deliberately robotic persona can still end
                         // up with one via the mechanical fallback.)
-                        string lower = content.ToLowerInvariant();
-                        string speciesLower = species != null ? species.ToLowerInvariant() : "";
-                        if (speciesLower.Length == 0) speciesLower = MyName().ToLowerInvariant();
-                        bool unitLabel = false;
-                        if (speciesLower.Length > 0 && lower.StartsWith(speciesLower))
-                        {
-                            string tail = content.Substring(speciesLower.Length).TrimStart('-');
-                            unitLabel = tail.Length == 0
-                                || (tail.Length > 0 && System.Text.RegularExpressions.Regex.IsMatch(tail, "^[0-9]+$"));
-                        }
-                        if (unitLabel)
+                        string speciesForLabel = !string.IsNullOrEmpty(species) ? species : MyName();
+                        if (ModelFamilies.IsSpeciesUnitLabel(content, speciesForLabel))
                         {
                             Logger.LogInfo("[" + MyName() + "] LLM name rejected (species unit label): '" + content + "'");
                             return null;
                         }
                         Logger.LogInfo("[" + MyName() + "] LLM chose name: " + content);
                         return content;
+                    }
+                    // The visible reply carried no bare name — but it may be a
+                    // reasoning paragraph that COMPLETED and ended with its
+                    // conclusion ("Final Answer: Ember", "I'll call her Ember", a
+                    // bare last word). Mine the last line for it. A reply cut by
+                    // the token budget gets no salvage: its "Name: X" line may
+                    // itself have lost its tail mid-candidate, so it only earns
+                    // the bigger-budget re-roll.
+                    if (!truncated && !string.IsNullOrEmpty(content))
+                    {
+                        string salvaged = ModelFamilies.SalvageNameFromCoT(content, taken, species);
+                        if (!string.IsNullOrEmpty(salvaged))
+                        {
+                            Logger.LogInfo("[" + MyName() + "] LLM chose name: " + salvaged + " (salvaged from an unmarked reasoning reply)");
+                            return salvaged;
+                        }
                     }
                     Logger.LogInfo("[" + MyName() + "] LLM name rejected: '" + (content ?? "null") + "' — using fallback");
                     return null;
@@ -434,6 +488,7 @@ namespace KKLLMNPC
             // Give the game a moment to load before looking for a body.
             try { Thread.Sleep(4000); } catch (Exception) { return; }
             string lastState = "";
+            int wedgedMarshalTimeouts = 0;
             while (_running)
             {
                 try
@@ -452,6 +507,9 @@ namespace KKLLMNPC
                     if (!MainReady) { Thread.Sleep(1000); continue; }
 
                     bool inGame = (bool)RunOnMainThread(() => IsPlayableScene(), 5000);
+                    // Reaching HERE means the main thread pumped a marshal — the wedge
+                    // (if we were in one) is over; the backoff un-arms.
+                    wedgedMarshalTimeouts = 0;
                     if (!inGame)
                     {
                         // Log state transitions so we can see *where* it's idle.
@@ -588,7 +646,16 @@ namespace KKLLMNPC
                 catch (Exception e)
                 {
                     try { Logger.LogWarning("LLM loop: " + e); } catch (Exception) { }
-                    try { Thread.Sleep(2000); } catch (Exception) { return; }
+                    bool timeoutWedge = e is TimeoutException;
+                    if (timeoutWedge) wedgedMarshalTimeouts++;
+                    // The wedge shape from the 2026-10-09 log: the main thread freezes
+                    // while the loop retries every cycle at full speed — 9 identical
+                    // timeouts with zero diagnosis between them. After 3 in a row,
+                    // slow down (the game is stuck; spinning at think-interval only
+                    // spams the log) and say ONCE that we're waiting it out.
+                    if (timeoutWedge && wedgedMarshalTimeouts == 3)
+                        Logger.LogWarning("LLM loop: main thread appears stuck (repeated marshal timeouts) — backing off in 10s cycles until it recovers; the timeout lines carry the stuck phase");
+                    try { Thread.Sleep(timeoutWedge && wedgedMarshalTimeouts >= 3 ? 1000 * 10 : 2000); } catch (Exception) { return; }
                 }
             }
             Logger.LogWarning("KKLLMNPC: LLMLoop exited (running=false).");
@@ -651,6 +718,25 @@ namespace KKLLMNPC
             }
             // 3) Built-in default.
             return Val(_cfgSystem);
+        }
+
+        // [LLM] Thinking=off — merge the reasoning-suppression fields
+        // (ModelFamilies.ThinkingOffPayloadPart: think=false for Ollama,
+        // chat_template_kwargs/enable_thinking for llama.cpp & vLLM-class
+        // templates, reasoning_budget=0 for llama.cpp hybrids) into a chat
+        // payload so the server skips CoT generation and the answer starts
+        // immediately. Latency, not context: the family token-headroom floors
+        // stay — harmless the moment the model actually stops thinking, and
+        // still saving the day when a server ignores the knobs. Wired into
+        // every call site: act loop, console REPL, comment, self-ask, name
+        // selection, vision caption.
+        private void ApplyThinkingParams(Dictionary<string, object> payload)
+        {
+            string mode = _cfgThinking != null ? (_cfgThinking.Value ?? "").Trim().ToLowerInvariant() : "";
+            if (mode != "off") return;
+            var part = ModelFamilies.ThinkingOffPayloadPart();
+            if (part == null) return;
+            foreach (var kv in part) payload[kv.Key] = kv.Value;
         }
 
         private static string TryReadPromptFile(string file)
@@ -849,6 +935,7 @@ namespace KKLLMNPC
                     ["max_tokens"] = ModelFamilies.EffectiveMaxTokens(_cfgMaxTokens.Value, 1024, FamilyProfile),
                     ["stream"] = true,
                 };
+                ApplyThinkingParams(payload);
                 string toolName = null, toolArgs = null;
                 string fullContent = PostChatPayload(payload, out toolName, out toolArgs);
                 if (fullContent == null) return null;
@@ -898,7 +985,7 @@ namespace KKLLMNPC
         private const float ImageCooldownSeconds = 90f, SchemaCooldownSeconds = 300f;
         private float _imageCooldownUntil, _schemaCooldownUntil;
 
-        private string PostChatPayload(Dictionary<string, object> payload, out string toolName, out string toolArgs)
+        private string PostChatPayload(Dictionary<string, object> payload, out string toolName, out string toolArgs, bool allowThinkBoost = true)
         {
             toolName = null; toolArgs = null;
             try
@@ -984,6 +1071,21 @@ namespace KKLLMNPC
                             try { Thread.Sleep(1200); } catch (Exception) { }
                         }
                     }
+                }
+                // THINK-ONLY STALL: a 200-OK reply carrying reasoning_content but NO
+                // content means the model burned its whole token budget on hidden CoT
+                // (glm-4.6v-flash playtest: turn after turn of "stuck standing in
+                // thought with no action"). Rather than wasting this tick on the
+                // next-turn hint, re-post ONCE with the token budget QUADRUPLED.
+                if (allowThinkBoost && toolName == null && (content == null || content.Length == 0)
+                    && rawResponse != null && rawResponse.Contains("reasoning_content"))
+                {
+                    int curTok = 1024;
+                    try { object mt; if (payload.TryGetValue("max_tokens", out mt)) curTok = Convert.ToInt32(mt); } catch (Exception) { }
+                    int nextTok = curTok * 4; if (nextTok > 16384) nextTok = 16384;
+                    payload["max_tokens"] = nextTok;
+                    Logger.LogWarning("[" + MyName() + "] think-only reply (reasoning burned the whole " + curTok + "-token budget, no content) — retrying once with max_tokens " + nextTok);
+                    return PostChatPayload(payload, out toolName, out toolArgs, false);
                 }
                 return content;
             }

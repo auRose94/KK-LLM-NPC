@@ -69,10 +69,41 @@ namespace KKLLMNPC
             if (target == null)
                 return new { ok = false, reason = "no_plant", note = "no plant nearby to water" };
 
-            // Find the nearest watering can — its RPC fires at a target viewID
+            // Find the nearest watering can — its RPC fires at a target viewID.
+            // When none is within reach, point at the nearest one MAP-WIDE (the
+            // key-places scan) instead of a dead end — small models otherwise
+            // conclude "no watering can" exists and give up on the whole farm.
             WateringCanWeapon can = FindNearestWateringCan(radius);
             if (can == null)
-                return new { ok = false, reason = "no_watering_can", note = "no watering can nearby" };
+            {
+                string hint = "no watering can nearby";
+                try
+                {
+                    hint = (string)RunOnMainThread(() =>
+                    {
+                        var cans = WateringCanList();
+                        WateringCanWeapon nearest = null;
+                        float bestD = float.MaxValue;
+                        Vector3 origin = _kobold.transform.position;
+                        if (cans != null)
+                            foreach (var w in cans)
+                            {
+                                if (w == null || w.transform == null) continue;
+                                float d = Vector3.Distance(w.transform.position, origin);
+                                if (d < bestD) { bestD = d; nearest = w; }
+                            }
+                        if (nearest == null)
+                            return "no watering can exists anywhere on this map — watering is unavailable until one is bought or brought here";
+                        Vector3 d3 = nearest.transform.position - origin;
+                        return "nearest watering can (map-wide): " + CleanName(nearest.name)
+                            + " " + StationAddr(CleanName(nearest.name), origin, nearest.transform.position)
+                            + " ~" + F(d3.magnitude) + "m " + Compass.NameOfOffset(d3.x, d3.z)
+                            + " — cd water, then try again near it";
+                    }, 5000);
+                }
+                catch (Exception) { }
+                return new { ok = false, reason = "no_watering_can", note = hint };
+            }
 
             Plant capTarget = target;
             WateringCanWeapon capCan = can;

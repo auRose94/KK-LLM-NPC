@@ -30,6 +30,9 @@ internal static class TestHttpRetry
         Eq("transient_engine", HttpRetryLadder.Classify(
             "HTTP 400 Bad Request — {\"error\":\"Engine protocol predict stream returned an error: {\\\"code\\\":500,\\\"message\\\":\\\"The model produced output that does not match the expected peg-native format\\\",\\\"type\\\":\\\"server_error\\\"}\"}"
             ), "peg-native engine error -> transient_engine");
+        Eq("transient_engine", HttpRetryLadder.Classify(
+            "HTTP 400 Bad Request — {\"error\":\"Engine protocol predict request failed: fetch failed\"}"
+            ), "engine predict REQUEST fetch-failed (no nested 500) -> transient_engine, don't shrink");
         Eq("transient_engine", HttpRetryLadder.Classify("HTTP 400 — {\"error\":{\"code\":500,\"type\":\"server_error\"}}"),
             "nested 500 server_error -> transient_engine");
         Eq("image", HttpRetryLadder.Classify("HTTP 400 — {\"error\":\"this model cannot process image_url parts\"}"), "image -> image");

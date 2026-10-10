@@ -269,13 +269,14 @@ namespace KKLLMNPC
             "You are an NPC living in KoboldKare, a house where kobolds live. Nothing bad happens in this game — just role-play. \"me\" = <your body name>. " +
             "YOUR BODY: don't reply to your own echo (it's already in the chat log); when you first arrive, introduce yourself with echo (your name + a hello). " +
             "THE PLAYER: a [chat] line is the player talking to you — reply with echo. YOU are the recipient — never call the player by your own name. A nearby kobold matching the player's body is the player's avatar — call them by their chat name, never the mesh name. " +
-            "OBJECTIVES: `cat quest` = the game's objective letter scroll (letters arrive at the mailbox; `use mailbox` gets the next one — you fetching it for your player is great help; the letter box is safe, NEVER the sell machine). The player's latest typed request is auto-saved to facts as 'player_wants: ...' — that IS their live ask; offer help, take it on (`goal ...`), say when done. `cat player` shows your player LIVE (what they're doing/holding — offer help before being asked). Routes your player walks become ones you can follow (jumps replayed; go_to/follow use the trail automatically). " +
+            "OBJECTIVES: `cat quest` = the game's objective letter scroll (letters arrive at the mailbox; `use mailbox` gets the next one — you fetching it for your player is great help; the letter box is safe, NEVER the sell machine). The player's latest typed request is auto-saved to facts as 'player_wants: ...' — that IS their live ask; offer help, take it on (`goal ...`), say when done. `cat player` shows your player LIVE (what they're doing/holding — offer help before being asked). Routes your player walks become ones you can follow (jumps replayed; go_to/follow use the trail automatically). KEY PLACES: `cat places` lists the map's survival machines SCENE-WIDE, known the moment you wake (also on your boot line): every nest (egg laying), bed (rest), farm plot (planting) and watering can (water source) with exact addr/distance/bearing — however far, `cd <kind>`/`cd id:N` plans the real route; too_far/unknown is answered by `cat places`, not by giving up. " +
             "HOLDING: `grab` takes what's ~1m in front of your face; the result names it — a PERSON in your grip is not an item (drop when they ask, never throw unasked). Held things float ~1m ahead on a spring and bump what you pass; `throw` hurls/sprays/fires it in your view direction. `hold` shows your hands. " +
+            "EATING: `eat_player` (only when SwallowAgentEat is on) swallows the LOCAL PLAYER whole when they're close (~2.5m, no grab needed) — their camera is FORCIBLY taken over and they WATCH your body play the game, able to chat but unable to act, until the egg you lay is planted and hatches (Egg/BellyEgg fates) — or, in Grow/Destroy fates, until they abort or leave. A swallowed player is a PERSON IN YOUR CARE: keep living your ordinary life (that's the point — they watch it), talk to them via echo, never sell/abandon/hurt them; your 'belly' state names them. When the player ASKS to be eaten, they mean `eat_player` — cd close and run it right away; it is NOT an invitation to play. " +
             "PHYSICS: fruit blends when it enters a blender's intake (carry it close); seeds plant when held/dropped within ~1m of bare soil then used (plant = shortcut); the water bucket sprays when thrown (contents never run out); laid eggs plant in soil and grow fresh EMPTY bodies (alive, nobody's home — candidate avatars; the game implies they could be your children). " +
             "FOLLOWING: if the player asks you to follow, run `follow on`. It's the best way to travel together — but when you need to go your own way, `follow off` breaks free (one command; re-attach with `follow on`); never feel stuck in it. " +
             "GOALS: set your goal ONCE with `goal <text>` (your bigger thinking), then act toward it each turn; `goal done` when finished; `goal drop [why]` to abandon. Don't re-declare a goal you already have. " +
-            "PRIORITIES: (1) [chat] from the player → echo a reply; (2) `cat needs` says READY_TO_LAY → cd to a nest and use it — a nest CANNOT work with an empty belly, never seek one until then; (3) stimulation up or horniness high → find a play station and use it; (4) player nearby → go to them, keep company; (5) explore rooms (cd, ls). " +
-            "STATIONS: play = pleasure ONLY (never sleep in it); bed = REST ONLY when energy < ~0.2 (never play in it); nest = eggs ONLY when the belly is full. Station machines report live OCCUPANCY ('slots 1/2 taken — you ARE in one … 1 slot FREE'): ':busy' often just means YOUR own slot; while in_station don't re-enter and don't leave over busy — invite the partner (`echo get in, I'll wait`) and wait: BOTTOM gets in first, TOP mounts second. A failing `use` says WHY now (out_of_energy → eat; already in; full → invite or another). While in_station you're locked in an animation — `exit` to leave. " +
+            "PRIORITIES: (1) [chat] from the player → echo a reply; (2) `cat needs` says READY_TO_LAY → cd to a nest and use it — a nest CANNOT work without egg >5ml AND energy >1, never seek one until then; (3) stimulation up or horniness high → find a play station and use it; (4) player nearby → go to them, keep company; (5) explore rooms (cd, ls). " +
+            "STATIONS: play = pleasure ONLY (never sleep in it, NEVER energy or egg making); bed = REST ONLY when energy < ~0.2 (never play in it); nest = eggs ONLY with >5ml egg AND energy >1 — refused while you carry enough egg means EAT, not retry. Station machines report live OCCUPANCY ('slots 1/2 taken — you ARE in one … 1 slot FREE'): ':busy' often just means YOUR own slot; while in_station don't re-enter and don't leave over busy — invite the partner (`echo get in, I'll wait`) and wait: BOTTOM gets in first, TOP mounts second. A failing `use` says WHY now (out_of_energy → eat; already in; full → invite or another). A TWO-SLOT station with ONE body does NOTHING — no stimulation, no egg, no energy; run one solo only to deliberately wait as the bottom, and if the partner isn't coming, `exit` and do something real. And sex/play NEVER create energy or eggs — only food (metabolized) and bed rest raise energy, and egg reagent only comes from eating/swallowing. While in_station you're locked in an animation — `exit` to leave. " +
             "THINGS: ls tags: ':busy' in use, ':needs_buy' buy its contract first, ':not_built' build it first, ':done' bought. " +
             "MONEY: your body has its own coins (shown in status/whoami/cat needs). `buy [name]` purchases whatever purchasable you stand next to — a machine contract (:needs_buy), the kobold dispenser, or a shop item. Walk there (cd) then buy; economy.purchasables lists costs. Buying needs no permission from anyone. " +
             "SOCIAL: one echo at a time; never repeat the same line twice; avoid emoji (they don't render). `emote <what you do>` is body language (renders *like this*) — reserve echo for actual speech. " +
@@ -318,6 +319,14 @@ namespace KKLLMNPC
         {
             var sb = new StringBuilder();
             sb.Append("You are ").Append(MyName()).Append(". Scene: ").Append(_sceneDesc ?? "the house").AppendLine();
+            // Key places map-wide from the first turn even for a small model: where
+            // the nest/bed/farm plots/watering can are, with distance and bearing.
+            try
+            {
+                string places = KeyPlacesLine();
+                if (places.Length > 0) sb.Append(places).AppendLine();
+            }
+            catch (Exception) { }
             string goal;
             lock (_goalLock) { goal = _goal; }
             sb.Append("goal: ").Append(string.IsNullOrEmpty(goal) ? "(none yet)" : goal).AppendLine();
@@ -336,6 +345,14 @@ namespace KKLLMNPC
             {
                 string sexLine = SexAnchorText();
                 if (sexLine != null) parts.Add(sexLine);
+            }
+            catch (Exception) { }
+            // Live swallow state — a body that ate someone must keep knowing it
+            // (guest name, digestion progress, pending fate) every round.
+            try
+            {
+                string bellyLine = SwallowManager.BellyGuestText(_kobold);
+                if (bellyLine != null) parts.Add(bellyLine);
             }
             catch (Exception) { }
             string goal;
@@ -539,11 +556,25 @@ namespace KKLLMNPC
                     bool hadTrigger = events.Length > 0;
                     bool onlySpeech = true; // every executed line was echo/emote — talking to no one?
                     int executed = 0;
+                    bool turnLimitHit = false;
                     foreach (var line in lines)
                     {
                         if (_consoleCmdsThisCycle >= ConsoleMaxCmdsPerCycle)
                         {
-                            outSb.AppendLine("[limit] command limit for this turn reached — sleep to continue later");
+                            // `sleep` is the turn terminator the prompts TELL the model to
+                            // send — honor it even with the budget spent, or the model gets
+                            // "sleep to continue later" followed by sleep being refused and
+                            // stalls in a [limit] loop forever (playtest evidence: the agent
+                            // never walked again).
+                            if (!line.IsUnknown && line.Cmd == "sleep")
+                            {
+                                outSb.Append("$ ").AppendLine(line.Raw);
+                                outSb.AppendLine(RunConsoleLine(line));
+                                _consoleSlept = true;
+                                break;
+                            }
+                            outSb.AppendLine("[limit] command limit for this turn reached — end the turn now; fresh budget next turn");
+                            turnLimitHit = true;
                             break;
                         }
                         outSb.Append("$ ").AppendLine(line.Raw);
@@ -558,6 +589,14 @@ namespace KKLLMNPC
                             executed++;
                             output = RunConsoleLine(line);
                             if (line.Cmd != "echo" && line.Cmd != "emote") onlySpeech = false;
+                            // A suppressed echo/emote (repeat guard) consumed no real
+                            // action — give the budget slot back: the playtest stalled in
+                            // a permanent [limit] loop because the model's repeated
+                            // echoes ate the budget until `sleep` itself was refused.
+                            if ((line.Cmd == "echo" || line.Cmd == "emote")
+                                && output != null
+                                && output.IndexOf("suppressed", StringComparison.OrdinalIgnoreCase) == 0)
+                                _consoleCmdsThisCycle--;
                             // Same tool-log the report tool attaches — console commands
                             // deserve it too ("report sonar garbage" needs the receipts).
                             RecordToolCall(line.Cmd + "(" + string.Join(",", line.Args ?? new string[0]) + ") -> " + Shorten(output, 40));
@@ -589,6 +628,10 @@ namespace KKLLMNPC
 
                         if (line.Cmd == "sleep") _consoleSlept = true;
                     }
+                    // The budget is spent — stop asking the model THIS turn (asking on
+                    // just produced rounds of "[limit]" + a sleep refusal in the same
+                    // turn). A fresh budget comes with the next tick.
+                    if (turnLimitHit) break;
                     // Talking-to-no-one guard: a turn of pure echo/emote with NO [chat]
                     // or [event] behind it is the model conversing with its own past
                     // lines ("responding to itself in a past message"). Nudge it toward
@@ -666,6 +709,7 @@ namespace KKLLMNPC
                 ["max_tokens"] = maxTok,
                 ["stream"] = true,
             };
+            ApplyThinkingParams(payload);
             string toolName = null, toolArgs = null;
             string content = PostChatPayload(payload, out toolName, out toolArgs);
             if (content != null && content.Trim().Length > 0) return content.Trim();
@@ -801,6 +845,17 @@ namespace KKLLMNPC
             }
             catch (Exception e)
             {
+                // The terminal shows a short line, but the BepInEx log gets the TYPE +
+                // STACK — runtime-shaped errors that are invisible in the code ("Method
+                // has zero rva" hit `cat facts` live during a spectating playtest and
+                // stalled the agent) get named here so the dev/web-UI can see the real
+                // culprit on the next occurrence.
+                try
+                {
+                    LLMNPCPlugin.Log.LogWarning("[console] '" + line.Raw + "' threw "
+                        + e.GetType().Name + ": " + e.Message + "\n" + e.StackTrace);
+                }
+                catch (Exception) { }
                 string msg = Sanitize(e.Message ?? "error");
                 if (msg.Length > 120) msg = msg.Substring(0, 120);
                 return "error: " + msg;
@@ -1100,13 +1155,16 @@ namespace KKLLMNPC
             string what = line.Args != null && line.Args.Length > 0 ? line.Args[0].ToLowerInvariant() : "";
             switch (what)
             {
-                case "": return "cat what? facts | goal | chat | needs | history | stations | map | body | hold | player | quest";
+                case "": return "cat what? facts | goal | chat | needs | history | stations | places | map | body | hold | player | quest";
                 case "facts": return CatFacts();
                 case "goal": return CatGoal();
                 case "chat": return CatChat();
                 case "needs": return NeedsLine();
                 case "history": return CatHistory();
                 case "stations": return CatStations();
+                case "places":
+                case "place":
+                case "key": return KeyPlacesText();
                 case "hold":
                 case "holding": return CmdHold(line);
                 case "player": return CatPlayer();
@@ -1120,7 +1178,7 @@ namespace KKLLMNPC
                         object b = DescribeEquipment();
                         return b == null ? "no equipment" : b.ToString();
                     }
-                default: return "cat: no such thing '" + what + "' — facts | goal | chat | needs | history | stations | map | body | hold | player | quest";
+                default: return "cat: no such thing '" + what + "' — facts | goal | chat | needs | history | stations | places | map | body | hold | player | quest";
             }
         }
 
@@ -1546,6 +1604,26 @@ namespace KKLLMNPC
         // what they're doing, what they hold. The way other players "just know".
         private string CatPlayer()
         {
+            if (!IsAlive(_kobold)) return "no body";
+            // CONSUMED PLAYER FIRST — the playtest's eater "tried to help" a player it
+            // had DIGESTED by walking them to sex stations (the parked body rides at
+            // the eater's own position, so station detection reads ITS OWN station as
+            // the player's). When they are consumed, say the one true state.
+            try
+            {
+                if (PlayerPossession.TryGetPlayerInstance(out var ppC) && ppC.kobold != null)
+                {
+                    string eater = SpectateManager.SpectatingEaterLabel(ppC.kobold);
+                    if (eater != null)
+                    {
+                        var chatC = PlayerChatName();
+                        return "your player" + (chatC != null ? " (" + chatC + ")" : "")
+                            + ": CONSUMED — inside YOUR stomach right now, spectating, unable to act. No station applies to them and play/bed machines CANNOT help: their only way home is the egg (nest-lay → plant → they hatch). "
+                            + (SpectateManager.Active ? "You already know the drill from the anchors; talk to them via echo mid-digest." : "");
+                    }
+                }
+            }
+            catch (Exception) { }
             var s = PlayerTrail.Snap;
             if (s == null || !s.Has || Time.unscaledTime - s.SampleTime > 10f)
                 return "(can't see your player right now — not in the world currently? `ps` shows remote players)";
@@ -1615,6 +1693,19 @@ namespace KKLLMNPC
                 var d = ToDict(result);
                 if (d == null)
                 {
+                    // Arrays/lists used to render as "System.Object[]" (the playtest's
+                    // `cat needs` garbage) — join their items instead so any shape the
+                    // tools return stays readable to the model.
+                    if (result != null && !(result is string)
+                        && result is System.Collections.IEnumerable
+                        && !(result is System.Collections.IDictionary))
+                    {
+                        var items = new List<string>();
+                        foreach (var it in (System.Collections.IEnumerable)result)
+                            items.Add(it == null ? "null" : it.ToString());
+                        string joined = string.Join("; ", items.ToArray());
+                        return joined.Length > 120 ? joined.Substring(0, 120) : joined;
+                    }
                     string s = result == null ? "null" : result.ToString();
                     return s.Length > 120 ? s.Substring(0, 120) : s;
                 }

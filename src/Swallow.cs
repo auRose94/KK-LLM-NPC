@@ -54,7 +54,7 @@ namespace KKLLMNPC
         Egg = 0,     // an egg pops out at the player's feet (replantable → rebirth)
         BellyEgg = 1, // 'Egg' reagent + the victim's genes ride in the player's belly;
                      // sit on a nest to lay (vanilla oviposition flow) — the person is in THAT egg
-        Grow = 2,    // no egg — the player absorbs them: bigger and/or stronger
+        Grow = 2,    // no egg — the player absorbs them: bigger, stronger and/or curvier
         Destroy = 3, // no egg — they are simply gone
     }
 
@@ -80,6 +80,8 @@ namespace KKLLMNPC
         {
             public string OldKey;
             public string EaterLabel;
+            public bool IsPlayer;      // the eaten one is the LOCAL PLAYER — hatch revives
+                                       // THEM (spectate flow) instead of restoring an NPC persona
         }
 
         private static readonly Dictionary<string, RebirthLink> _awaitingRebirth = new Dictionary<string, RebirthLink>();
@@ -101,8 +103,11 @@ namespace KKLLMNPC
             public Kobold Actor;           // who initiated: eater (self-eat) or the force-feeding dropper
             public int VictimId;
             public NPCInstance Npc;        // null for unclaimed (vanilla AI) victims
+            public NPCInstance EaterNpc;   // the eater's own mind (null: player eater / unclaimed body)
             public string Name;            // narration/display name
             public string OldBodyKey;      // MemoryStore key of the eaten body
+            public bool VictimIsPlayer;    // the LOCAL PLAYER is inside — spectate takeover runs;
+                                           // consume keeps the body parked (never destroyed)
             public float StartUnscaled;
             public float DigestSeconds;
             public Vector3 PullStartPos;
@@ -130,6 +135,42 @@ namespace KKLLMNPC
                 try { OvipositionSpot.oviposition += OnOviposition; _ovipositionHooked = true; }
                 catch (Exception e) { try { plugin.Logger.LogWarning("swallow oviposition hook: " + e.Message); } catch (Exception) { } }
             }
+        }
+
+        // One-line live state of who is digesting inside `eater` — the EATER's own
+        // awareness between events: it lands in the state anchors (console anchor
+        // line next to the sex line; act perception as a "belly" key) so every
+        // turn reminds the body of the squirming guest and the pending outcome.
+        // Reads only labels/times captured at swallow start (no scene components),
+        // like the rest of the narration. Null when nobody is inside.
+        internal static string BellyGuestText(Kobold eater)
+        {
+            if (eater == null) return null;
+            var parts = new List<string>();
+            float now = -1f, total = -1f;
+            lock (_lock)
+                foreach (var st in _active)
+                {
+                    if (st.EggSpawned || st.Eater != eater) continue;
+                    if (total < 0f)
+                    {
+                        total = 0f;
+                        try { now = Time.unscaledTime; } catch (Exception) { }
+                    }
+                    float left = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - (now - st.StartUnscaled));
+                    string fate;
+                    switch (Effect())
+                    {
+                        case SwallowEffect.BellyEgg: fate = "they become egg reagent + genes in you; a nest lay brings them back"; break;
+                        case SwallowEffect.Grow: fate = "their body (size, curves, groin) and memories absorb into you"; break;
+                        case SwallowEffect.Destroy: fate = "nothing will be left of them"; break;
+                        default: fate = "an egg carrying their mixed genes pops out of you"; break;
+                    }
+                    parts.Add(st.Name + " (in your stomach, ~" + Mathf.CeilToInt(left).ToString("0", CultureInfo.InvariantCulture)
+                        + "s to conversion — " + fate + ")");
+                }
+            if (parts.Count == 0) return null;
+            return "you have someone INSIDE YOU: " + string.Join(", ", parts.ToArray());
         }
 
         internal static SwallowEffect Effect()
@@ -273,7 +314,8 @@ namespace KKLLMNPC
             return best;
         }
 
-        private static bool EaterBusy(Kobold k)
+        // internal for the spectate manager (its Tick parks the player at the belly).
+        internal static bool EaterBusy(Kobold k)
         {
             try
             {
@@ -285,7 +327,8 @@ namespace KKLLMNPC
             return false;
         }
 
-        private static Vector3 HeadOf(Kobold k)
+        // internal for the spectate manager (follow-camera aims at the head).
+        internal static Vector3 HeadOf(Kobold k)
         {
             try
             {
@@ -298,16 +341,171 @@ namespace KKLLMNPC
             return k.transform.position + Vector3.up * 1.0f;
         }
 
+        // internal for the spectate manager: where a parked player body rides.
+        internal static Vector3 BellyOf(Kobold eater)
+        {
+            return eater.transform.position + Vector3.up * 0.35f;
+        }
+
         // Alive-or-destroyed check (Unity's == null covers both).
         private static bool SafeAlive(Kobold k)
         {
             try { return k != null; } catch (Exception) { return false; }
         }
 
+        // ------------------------------------------------------------------
+        // Spectate (agent eats the PLAYER) helpers, shared with SpectateManager.
+        // ------------------------------------------------------------------
+
+        // Full body restore shared by the abort release and the spectate
+        // hatch-revive: undo everything the pin/park changed. at = set-down spot.
+        internal static void RestoreVictimBody(Kobold v, Vector3 at)
+        {
+            if (!SafeAlive(v)) return;
+            try
+            {
+                var pv = v.photonView;
+                try { if (pv != null && !pv.IsMine) pv.RequestOwnership(); } catch (Exception) { }
+
+                v.transform.localScale = Vector3.one;
+                v.transform.position = at;
+
+                var ragdoller = v.GetComponent<Ragdoller>();
+                if (ragdoller != null)
+                {
+                    ragdoller.SetLocked(false);
+                    if (ragdoller.ragdolled)
+                    {
+                        try { ragdoller.photonView.RPC("PopRagdoll", RpcTarget.All); } catch (Exception) { }
+                    }
+                    foreach (var b in ragdoller.GetRagdollBodies())
+                        if (b != null) b.isKinematic = false;
+                }
+                var root = v.body;
+                if (root != null) { root.isKinematic = false; root.velocity = Vector3.zero; }
+                var controller = v.GetComponent<KoboldCharacterController>();
+                if (controller != null) controller.enabled = true;
+                foreach (var c in v.GetComponentsInChildren<Collider>(true))
+                    if (c != null && !c.isTrigger) c.enabled = true;
+                foreach (var rend in v.GetComponentsInChildren<Renderer>(true))
+                {
+                    if (rend == null) continue;
+                    rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                    rend.enabled = true;
+                }
+            }
+            catch (Exception e)
+            {
+                try { LLMNPCPlugin.Log.LogWarning("swallow body restore: " + e.Message); } catch (Exception) { }
+            }
+        }
+
+        // Let go of ONE held victim without releasing anything else the grabber
+        // holds (tools stay in hand): velocity pre-bumped so the release takes
+        // the game's throw path, released entry removed from the grabbed list.
+        private static void ReleaseHeldVictim(Kobold eater, Kobold victim)
+        {
+            if (eater == null || victim == null) return;
+            try
+            {
+                foreach (var grabber in eater.GetComponentsInChildren<Grabber>(true))
+                {
+                    try
+                    {
+                        var raw = NPCInstance.GetField<object>(grabber, "grabbedObjects") as IList;
+                        if (raw == null) continue;
+                        for (int i = raw.Count - 1; i >= 0; i--)
+                        {
+                            try
+                            {
+                                var kob = NPCInstance.GetProp(raw[i], "kobold") as Kobold;
+                                if (kob != victim) continue;
+                                var rb = NPCInstance.GetProp(raw[i], "body") as Rigidbody
+                                    ?? NPCInstance.GetField<object>(raw[i], "body") as Rigidbody;
+                                if (rb != null) rb.velocity = Vector3.up * 5f;
+                                var ragdoller = victim.GetComponent<Ragdoller>();
+                                if (ragdoller != null)
+                                    foreach (var b in ragdoller.GetRagdollBodies())
+                                        if (b != null) b.velocity = Vector3.up * 5f;
+                                var rel = raw[i].GetType().GetMethod("Release", BindingFlags.Instance | BindingFlags.Public);
+                                rel?.Invoke(raw[i], null);
+                                raw.RemoveAt(i);
+                            }
+                            catch (Exception) { }
+                        }
+                    }
+                    catch (Exception) { }
+                }
+            }
+            catch (Exception e)
+            {
+                try { LLMNPCPlugin.Log.LogWarning("swallow release-one: " + e.Message); } catch (Exception) { }
+            }
+        }
+
+        // The act entry: the agent's mind decides to swallow the LOCAL PLAYER.
+        // Full gate (the tool's own gate already ran — this catches any other
+        // caller). True = a swallow session + spectate takeover are live.
+        internal static bool TryEatPlayer(NPCInstance eaterNpc)
+        {
+            if (Plugin == null || eaterNpc == null) return false;
+            var cfg = Plugin._cfgSwallowAgentEat;
+            if (cfg == null || !cfg.Value) return false;
+            Kobold eater = null;
+            try { eater = eaterNpc.KoboldObj as Kobold; } catch (Exception) { }
+            if (eater == null) return false;
+            Kobold player = null;
+            try { if (PlayerPossession.TryGetPlayerInstance(out var pp)) player = pp.kobold; } catch (Exception) { }
+            if (player == null || eater == player) return false;
+            if (EaterBusy(eater)) return false;
+            lock (_lock)
+                foreach (var s in _active)
+                    if (s.Victim == player) return false;
+            try { if (SpectateManager.IsSpectating(player)) return false; } catch (Exception) { }
+            return Begin(eater, player, eater, true);
+        }
+
+        internal static float AgentEatRange()
+        {
+            var cfg = Plugin != null ? Plugin._cfgSwallowEatRange : null;
+            float v = SpectateLogic.DefaultEatRange;
+            try { if (cfg != null) v = cfg.Value; } catch (Exception) { }
+            if (v < 1f) v = 1f;
+            if (v > 8f) v = 8f;
+            return v;
+        }
+
+        // What the egg modes promise for a swallowed PLAYER (null = no hatch).
+        private static string PlayerFateHint()
+        {
+            switch (Effect())
+            {
+                case SwallowEffect.BellyEgg: return "the egg reagent around them waits in your belly — nest-lay them and plant the egg";
+                case SwallowEffect.Grow:
+                case SwallowEffect.Destroy: return null;
+                default: return "after conversion you lay an egg — plant it in soil and they hatch out of it";
+            }
+        }
+
+        // The LLM-facing outcome summary for a successful eat_player result.
+        internal static string PlayerOutcomeNote()
+        {
+            switch (Effect())
+            {
+                case SwallowEffect.BellyEgg: return "the conversion turns them into egg reagent + genes in YOUR belly — nest-lay them, then plant the egg to hatch them out (a nest lay needs energy >1 as well as the egg — eat before sitting if you're low)";
+                case SwallowEffect.Grow: return "the conversion absorbs them into your body — their genes (size, strength, curves) and memories pour into yours (no egg, no hatch — their escape is the swallow-abort chat command)";
+                case SwallowEffect.Destroy: return "the conversion consumes them entirely (no egg, no hatch — their escape is the swallow-abort chat command)";
+                default: return "after conversion an egg pops out at your feet — plant it in soil and they hatch out of it";
+            }
+        }
+
         // Take one held victim. Main-thread only (Harmony prefix). False = don't.
         // actor = whoever swallowed them into `eater`: the eater themself (self-eat,
         // the player's look-up gesture) or a different kobold force-feeding.
-        private static bool Begin(Kobold eater, Kobold victim, Kobold actor)
+        // playerVictim = the LOCAL PLAYER is the one being swallowed: the spectate
+        // takeover starts here and the consume phase parks their body instead of
+        // destroying it (SpectateManager owns the camera/park from this moment on).
+        private static bool Begin(Kobold eater, Kobold victim, Kobold actor, bool playerVictim = false)
         {
             if (actor == null) actor = eater;
             int vid;
@@ -330,9 +528,12 @@ namespace KKLLMNPC
             }
             catch (Exception e) { LLMNPCPlugin.Log.LogWarning("swallow ownership: " + e.Message); }
 
-            string name = npc != null ? npc.GetMyName() : NPCInstance.CleanName(victim.name);
-            string oldKey;
-            try { oldKey = NPCInstance.BodyKey(victim); } catch (Exception) { oldKey = null; }
+            string name;
+            if (playerVictim) name = "the player";
+            else name = npc != null ? npc.GetMyName() : NPCInstance.CleanName(victim.name);
+            string oldKey = null;
+            if (!playerVictim)
+                try { oldKey = NPCInstance.BodyKey(victim); } catch (Exception) { oldKey = null; }
             string who = BodyLabel(actor);
             string eaterLabel = BodyLabel(eater);
 
@@ -348,12 +549,19 @@ namespace KKLLMNPC
                 Npc = npc,
                 Name = name ?? "the kobold",
                 OldBodyKey = oldKey,
+                VictimIsPlayer = playerVictim,
                 StartUnscaled = Time.unscaledTime,
                 DigestSeconds = DigestSeconds(),
                 PullStartPos = victim.transform.position,
                 Milestone = -1,
             };
             lock (_lock) _active.Add(st);
+            try { st.EaterNpc = Plugin.InstanceForBody(eater); } catch (Exception) { st.EaterNpc = null; }
+
+            // Player victims: if the eater was HOLDING them, let go first — the
+            // grabber's per-frame anchor would otherwise fight the pull-in pin.
+            if (playerVictim)
+                ReleaseHeldVictim(eater, victim);
 
             if (npc != null)
             {
@@ -367,22 +575,54 @@ namespace KKLLMNPC
             }
 
             bool selfEat = actor == eater;
-            if (selfEat)
+            if (playerVictim)
             {
+                // The eater gets one honest first-person line; the world gets the
+                // spectator line; and the PLAYER'S camera is taken over right now —
+                // the pull-in starts this frame and they watch from outside.
+                if (st.EaterNpc != null)
+                {
+                    try
+                    {
+                        st.EaterNpc.PushWorldEvent("you just swallowed the PLAYER WHOLE — the player is inside you now: their camera is gone, they WATCH everything through your body's eyes and CANNOT act (about "
+                            + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
+                            + "s to conversion). " + PlayerFateHint() + " Keep living your ordinary life — go to work, play, talk — and speak to them whenever; they hear you. They are a person in your care: never sell, abandon or hurt them.");
+                    }
+                    catch (Exception) { }
+                }
+                try { Plugin.FanoutWorldEventExcept("you watch " + eaterLabel + " swallow the PLAYER WHOLE — the player is inside them now, watching through their body's eyes.", st.EaterNpc, null); } catch (Exception) { }
+                // (the shared tail below bubbles the eater's "You swallow …" line)
+                SpectateManager.BeginForPlayer(victim, eater, eaterLabel, PlayerFateHint());
+            }
+            else if (selfEat)
+            {
+                // The EATER (when the mod drives that body) gets a DIRECT first-person
+                // line — the generic spectator fanout would reach them as "you watch
+                // yourself swallow…", which confuses exactly the body that ate.
+                if (st.EaterNpc != null)
+                {
+                    try
+                    {
+                        st.EaterNpc.PushWorldEvent("you just swallowed " + st.Name
+                            + " WHOLE — they are inside you now, digesting (about "
+                            + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
+                            + "s to conversion). Their fate follows this stomach's rules; you can speak while they convert.");
+                    }
+                    catch (Exception) { }
+                }
                 string inside = who == "the player" ? "them" : who + "'s body";
-                try { Plugin.FanoutWorldEvent("you watch " + who + " swallow " + st.Name + " WHOLE — they disappeared inside " + inside); }
+                try { Plugin.FanoutWorldEventExcept("you watch " + who + " swallow " + st.Name + " WHOLE — they disappeared inside " + inside, st.EaterNpc, npc); }
                 catch (Exception) { }
             }
             else
             {
-                try { Plugin.FanoutWorldEvent("you watch " + who + " shove " + st.Name + " into " + eaterLabel + "'s face — " + eaterLabel + " swallowed them whole!"); }
+                try { Plugin.FanoutWorldEventExcept("you watch " + who + " shove " + st.Name + " into " + eaterLabel + "'s face — " + eaterLabel + " swallowed them whole!", st.EaterNpc, npc); }
                 catch (Exception) { }
-                var eaterNpc = Plugin.InstanceForBody(eater);
-                if (eaterNpc != null)
+                if (st.EaterNpc != null)
                 {
                     try
                     {
-                        eaterNpc.PushWorldEvent("someone force-fed you: " + who + " just dropped " + st.Name + " straight into your mouth and you swallowed them WHOLE — they are in YOUR stomach now, digesting. Their fate follows this stomach's rules; you can speak around them while they convert.");
+                        st.EaterNpc.PushWorldEvent("someone force-fed you: " + who + " just dropped " + st.Name + " straight into your mouth and you swallowed them WHOLE — they are in YOUR stomach now, digesting. Their fate follows this stomach's rules; you can speak around them while they convert.");
                     }
                     catch (Exception) { }
                 }
@@ -415,7 +655,7 @@ namespace KKLLMNPC
 
         // What the swallowed one is told happens to them — honest per mode, and
         // naming who did it. Grow and Destroy deliberately do NOT promise a rebirth
-        // (there isn't one).
+        // (there isn't one). Grow names what is actually taken (the gain toggles).
         private static string BeginPromiseText(string who)
         {
             switch (Effect())
@@ -423,12 +663,31 @@ namespace KKLLMNPC
                 case SwallowEffect.BellyEgg:
                     return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. You are slowly being converted into an EGG that will ride in their belly — when they sit on a nest and lay you, you will hatch out of it with new genes.";
                 case SwallowEffect.Grow:
-                    return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. They are ABSORBING you — your size and strength are becoming theirs. There is no coming back.";
+                {
+                    var taken = new List<string>();
+                    if (Plugin._cfgSwallowGrowLarger != null && Plugin._cfgSwallowGrowLarger.Value) taken.Add("your size");
+                    if (Plugin._cfgSwallowGrowStrength != null && Plugin._cfgSwallowGrowStrength.Value) taken.Add("your strength");
+                    if (Plugin._cfgSwallowGrowSex != null && Plugin._cfgSwallowGrowSex.Value) taken.Add("your curves (breasts, groin)");
+                    string what = taken.Count > 0
+                        ? "They are ABSORBING you — " + JoinEnglish(taken) + " " + (taken.Count == 1 ? "is" : "are") + " becoming theirs."
+                        : "They are ABSORBING you — your whole body is becoming theirs.";
+                    return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. " + what + " There is no coming back.";
+                }
                 case SwallowEffect.Destroy:
                     return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. They are consuming you entirely. There is no coming back.";
                 default:
                     return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. You feel the walls churn. You are slowly being converted into an EGG — when it's done, you will be reborn from it with new genes.";
             }
+        }
+
+        // "a, b and c" for narration strings built from optional parts.
+        private static string JoinEnglish(List<string> parts)
+        {
+            if (parts == null || parts.Count == 0) return "";
+            if (parts.Count == 1) return parts[0];
+            var head = new string[parts.Count - 1];
+            for (int i = 0; i < parts.Count - 1; i++) head[i] = parts[i];
+            return string.Join(", ", head) + " and " + parts[parts.Count - 1];
         }
 
         // Config-steep "looking up" threshold — default is near max-up so a casual
@@ -525,6 +784,7 @@ namespace KKLLMNPC
                 // an egg; the NPC instance tears down through its BodyLost path.
                 LLMNPCPlugin.Log.LogWarning("swallow: victim '" + st.Name + "' vanished mid-swallow — no egg laid");
                 try { if (st.Npc != null) st.Npc.PushWorldEvent("the swallow was interrupted — you were pulled out of the world entirely, not reborn from an egg."); } catch (Exception) { }
+                try { if (st.EaterNpc != null) st.EaterNpc.PushWorldEvent("the swallow was interrupted: " + st.Name + " was pulled out of the world from inside you — nothing of them was converted."); } catch (Exception) { }
                 _active.RemoveAt(index);
                 return;
             }
@@ -549,30 +809,45 @@ namespace KKLLMNPC
             float scale = SwallowLogic.ScaleFor(phase, phaseT);
             st.Victim.transform.localScale = new Vector3(scale, scale, scale);
 
-            if (phase == 1 && st.Npc != null)
+            if (phase == 1)
             {
                 int mark = SwallowLogic.MilestoneFor(phaseT, st.Milestone);
                 if (mark > st.Milestone)
                 {
                     st.Milestone = mark;
-                    try
+                    if (st.Npc != null)
                     {
-                        if (mark == SwallowLogic.MarkChurn)
-                            st.Npc.PushWorldEvent("the stomach walls churn and press around you — warm, rhythmic, patient");
-                        else if (mark == SwallowLogic.MarkKnead)
-                            st.Npc.PushWorldEvent("the walls knead you steadily — your shape is starting to change, limbs going soft and smooth");
-                        else if (mark == SwallowLogic.MarkEggForming)
+                        try
                         {
-                            SwallowEffect mode = Effect();
-                            if (mode == SwallowEffect.Grow)
-                                st.Npc.PushWorldEvent("you are fading — the player's body is absorbing you completely. Almost over.");
-                            else if (mode == SwallowEffect.Destroy)
-                                st.Npc.PushWorldEvent("you are fading fast — almost gone. There is nothing being made from you.");
-                            else
-                                st.Npc.PushWorldEvent("you are compacting, reshaping — you are becoming an EGG. It won't be long now.");
+                            if (mark == SwallowLogic.MarkChurn)
+                                st.Npc.PushWorldEvent("the stomach walls churn and press around you — warm, rhythmic, patient");
+                            else if (mark == SwallowLogic.MarkKnead)
+                                st.Npc.PushWorldEvent("the walls knead you steadily — your shape is starting to change, limbs going soft and smooth");
+                            else if (mark == SwallowLogic.MarkEggForming)
+                            {
+                                SwallowEffect mode = Effect();
+                                if (mode == SwallowEffect.Grow)
+                                    st.Npc.PushWorldEvent("you are fading — " + BodyLabel(st.Eater) + " body is absorbing you completely. Almost over.");
+                                else if (mode == SwallowEffect.Destroy)
+                                    st.Npc.PushWorldEvent("you are fading fast — almost gone. There is nothing being made from you.");
+                                else
+                                    st.Npc.PushWorldEvent("you are compacting, reshaping — you are becoming an EGG. It won't be long now.");
+                            }
                         }
+                        catch (Exception) { }
                     }
-                    catch (Exception) { }
+                    // The EATER feels it too — one line per mark, so they stay aware of
+                    // who is inside them and how close the conversion is. Decoupled
+                    // from the victim's NPC (a vanilla victim must not stall the marks).
+                    if (st.EaterNpc != null)
+                    {
+                        float leftS = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - (Time.unscaledTime - st.StartUnscaled));
+                        string feeling = mark == SwallowLogic.MarkChurn
+                            ? "your stomach churns around " + st.Name + " — they are in there, alive"
+                            : "your stomach kneads " + st.Name + " steadily — the conversion is underway";
+                        try { st.EaterNpc.PushWorldEvent(feeling + " (about " + Mathf.CeilToInt(leftS).ToString("0", CultureInfo.InvariantCulture) + "s left; their fate follows this stomach's rules)"); }
+                        catch (Exception) { }
+                    }
                 }
             }
 
@@ -688,11 +963,6 @@ namespace KKLLMNPC
             return eater.transform.position + Vector3.up * 1.1f;
         }
 
-        private static Vector3 BellyOf(Kobold eater)
-        {
-            return eater.transform.position + Vector3.up * 0.35f;
-        }
-
         private static Vector3 EggPopPos(Kobold eater)
         {
             Vector3 fwd = Vector3.forward;
@@ -736,10 +1006,26 @@ namespace KKLLMNPC
         {
             if (Plugin == null) return false;
             var cfgEnabled = Plugin._cfgSwallowEnabled;
-            if (cfgEnabled == null || !cfgEnabled.Value) return false;
+            var cfgAgent = Plugin._cfgSwallowAgentEat;
+            bool swallowOn = cfgEnabled != null && cfgEnabled.Value;
+            bool agentOn = cfgAgent != null && cfgAgent.Value;
+            if (!swallowOn && !agentOn) return false;
             if (!SwallowLogic.MatchesAny(SwallowLogic.NormalizeLetters(rawMsg), SwallowLogic.AbortCommands))
                 return false;
-            AbortAllDigests();
+            bool hadSessions = ActiveCount > 0;
+            if (hadSessions) AbortAllDigests();
+            // A PARKED player (digest already completed, egg laid/riding, spectate
+            // ongoing) has no session anymore — the release handles it too.
+            SpectateManager.ReleaseFor(null, SpectateLogic.CauseAbort);
+            if (!hadSessions && !SpectateManager.Active)
+            {
+                try
+                {
+                    if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
+                        Bubble(pp.kobold, "Your stomach is empty — nobody is being swallowed.");
+                }
+                catch (Exception) { }
+            }
             return true;
         }
 
@@ -781,37 +1067,16 @@ namespace KKLLMNPC
                 LLMNPCPlugin.Log.LogWarning("swallow abort: '" + st.Name + "' was already gone — nothing to release");
                 return;
             }
+            // Player victims: hand the camera + input back and drop the spectate
+            // record — the body restore below then puts them down at the feet.
+            if (st.VictimIsPlayer)
+                try { SpectateManager.ReleaseFor(v, SpectateLogic.CauseAbort); } catch (Exception) { }
             try
             {
                 var pv = v.photonView;
                 try { if (pv != null && !pv.IsMine) pv.RequestOwnership(); } catch (Exception) { }
 
-                v.transform.localScale = Vector3.one;
-                v.transform.position = EggPopPos(st.Eater) + Vector3.up * 0.15f;
-
-                var ragdoller = v.GetComponent<Ragdoller>();
-                if (ragdoller != null)
-                {
-                    ragdoller.SetLocked(false);
-                    if (ragdoller.ragdolled)
-                    {
-                        try { ragdoller.photonView.RPC("PopRagdoll", RpcTarget.All); } catch (Exception) { }
-                    }
-                    foreach (var b in ragdoller.GetRagdollBodies())
-                        if (b != null) b.isKinematic = false;
-                }
-                var root = v.body;
-                if (root != null) { root.isKinematic = false; root.velocity = Vector3.zero; }
-                var controller = v.GetComponent<KoboldCharacterController>();
-                if (controller != null) controller.enabled = true;
-                foreach (var c in v.GetComponentsInChildren<Collider>(true))
-                    if (c != null && !c.isTrigger) c.enabled = true;
-                foreach (var rend in v.GetComponentsInChildren<Renderer>(true))
-                {
-                    if (rend == null) continue;
-                    rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
-                    rend.enabled = true;
-                }
+                RestoreVictimBody(v, EggPopPos(st.Eater) + Vector3.up * 0.15f);
             }
             catch (Exception e) { LLMNPCPlugin.Log.LogWarning("swallow restore (" + st.Name + "): " + e.Message); }
 
@@ -820,14 +1085,23 @@ namespace KKLLMNPC
                 try
                 {
                     st.Npc.Swallowed = false;
-                    st.Npc.PushWorldEvent("the digestion was ABORTED before any conversion — you were released from the player's stomach alive and set down in front of them. You are NOT an egg, nothing of you was consumed or changed. Recover and react to this!");
+                    st.Npc.PushWorldEvent("the digestion was ABORTED before any conversion — you were released from " + BodyLabel(st.Eater) + "'s stomach alive and set down AT THEIR FEET. You are NOT an egg, nothing of you was consumed or changed. Recover and react to this!");
                     st.Npc.PersistLifeForSwallow();
                 }
                 catch (Exception) { }
             }
 
             try { Bubble(st.Eater, "You heave " + st.Name + " back up — alive and whole."); } catch (Exception) { }
-            try { Plugin.FanoutWorldEvent("you watch " + BodyLabel(st.Eater) + " heave " + st.Name + " back up mid-swallow — released alive, not converted"); } catch (Exception) { }
+            if (st.EaterNpc != null)
+            {
+                try
+                {
+                    st.EaterNpc.PushWorldEvent("mid-swallow ABORT — you just heaved " + st.Name
+                        + " back up (the player called it off in chat). They are alive and set down right at your feet; nothing of them was consumed.");
+                }
+                catch (Exception) { }
+            }
+            try { Plugin.FanoutWorldEventExcept("you watch " + BodyLabel(st.Eater) + " heave " + st.Name + " back up mid-swallow — released alive, not converted", st.EaterNpc, st.Npc); } catch (Exception) { }
             try { LLMNPCPlugin.Log.LogInfo("swallow: DIGEST ABORTED — '" + st.Name + "' released by chat command"); } catch (Exception) { }
         }
 
@@ -867,6 +1141,73 @@ namespace KKLLMNPC
             }
         }
 
+        // Grow-mode memory absorption (user request — was plain deletion): the eaten
+        // person's saved life pours into the EATER — their knowledge survives inside
+        // whoever consumed them. The eater's OWN identity (name/persona/pronouns) is
+        // never touched: absorbing someone is not BECOMING them; only the knowledge
+        // (facts) transfers, plus one 'absorbed:' marker fact. Destroy stays
+        // deletion (ForgetVictim); egg modes keep the records for rebirth.
+        private static void AbsorbVictimLife(SwallowState st)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(st.OldBodyKey)) return;
+                var rec = MemoryStore.Load(st.OldBodyKey);
+                if (rec == null)
+                {
+                    try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' had no saved life to absorb (unclaimed/vanilla body with no records)"); } catch (Exception) { }
+                    return;
+                }
+                var facts = new List<string>();
+                if (rec.Facts != null)
+                    foreach (var f in rec.Facts)
+                        if (!string.IsNullOrWhiteSpace(f)) facts.Add(f);
+                try { LLMNPCPlugin.Log.LogInfo("swallow: absorbing " + facts.Count + " memories of '" + (rec.Name ?? st.Name) + "' into " + BodyLabel(st.Eater)); } catch (Exception) { }
+
+                // A live LLM eater? Inject the memories into their session NOW — the
+                // mind knows things it never learned this session; their own teardown
+                // persists them with the body. (RememberFact dedupes per ':'-prefix
+                // category, so absorbed facts go in PLAIN — prefixed they'd collapse
+                // into one slot.)
+                var eatNpc = Plugin.InstanceForBody(st.Eater);
+                if (eatNpc != null)
+                {
+                    try
+                    {
+                        eatNpc.PushWorldEvent("[absorb] " + st.Name + " was fully digested by you — their life poured in: " + facts.Count + " of their MEMORIES are yours now. Places/things they knew, you know. Mention or use them naturally.");
+                        eatNpc.AbsorbVictimFacts(st.Name, facts);
+                    }
+                    catch (Exception e) { LLMNPCPlugin.Log.LogWarning("swallow absorb live: " + e.Message); }
+                }
+
+                // And mirror the merged life under the EATER's own body key, so an
+                // eater we're not driving right now still wakes up remembering.
+                try
+                {
+                    var eaterKey = NPCInstance.BodyKey(st.Eater);
+                    if (string.IsNullOrEmpty(eaterKey)) return;
+                    string eaterName = eatNpc != null ? eatNpc.GetMyName() : NPCInstance.CleanName(st.Eater.name);
+                    var eatRec = MemoryStore.Load(eaterKey);
+                    var merged = new List<string>();
+                    if (eatRec != null && eatRec.Facts != null)
+                        foreach (var f in eatRec.Facts)
+                            if (!string.IsNullOrWhiteSpace(f)) merged.Add(f);
+                    while (merged.Count >= 180 && merged.Count > 0) merged.RemoveAt(0);
+                    merged.Add("absorbed:" + st.Name + " was digested whole by this body and their memories were taken in — their knowledge is yours now");
+                    foreach (var f in facts) if (merged.Count < 220) merged.Add(f);
+                    if (eatRec != null)
+                        MemoryStore.Save(eaterKey, eaterName ?? eatRec.Name, eatRec.Persona, merged, eatRec.Goal, eatRec.Pronouns);
+                    else
+                        MemoryStore.Save(eaterKey, NPCInstance.CleanName(st.Eater.name), null, merged, null, null);
+                }
+                catch (Exception e) { LLMNPCPlugin.Log.LogWarning("swallow absorb persist: " + e.Message); }
+            }
+            catch (Exception e)
+            {
+                try { LLMNPCPlugin.Log.LogWarning("swallow absorb: " + e.Message); } catch (Exception) { }
+            }
+        }
+
         private static bool PourIntoBelly(SwallowState st)
         {
             try
@@ -888,14 +1229,30 @@ namespace KKLLMNPC
                 // the player's genes with THESE (OvipositionSpot's Mix(k, belly)).
                 if (victimGenes != null) belly.SetGenes(victimGenes);
                 var victimFp = NPCInstance.GenesFingerprint(victimGenes);
-            if (!string.IsNullOrEmpty(victimFp) && !string.IsNullOrEmpty(st.OldBodyKey))
-            {
-                lock (_lock)
+                // A player victim's spectate record decides: park (hatch revives
+                // them) or — record lost to a restart — the old destroy path.
+                bool parkPlayer = st.VictimIsPlayer;
+                try { parkPlayer = parkPlayer && SpectateManager.IsSpectating(st.Victim); } catch (Exception) { parkPlayer = false; }
+                if (!string.IsNullOrEmpty(victimFp))
                 {
-                    _bellyGeneticOwners[victimFp] = new RebirthLink { OldKey = st.OldBodyKey, EaterLabel = BodyLabel(st.Eater) };
-                    _bellyNames[victimFp] = st.Name;
+                    if (parkPlayer)
+                    {
+                        lock (_lock)
+                        {
+                            _bellyGeneticOwners[victimFp] = new RebirthLink { EaterLabel = BodyLabel(st.Eater), IsPlayer = true };
+                            _bellyNames[victimFp] = st.Name;
+                        }
+                        SpectateManager.MarkEggLaid(st.Victim, victimFp, "the nest lay + plant");
+                    }
+                    else if (!string.IsNullOrEmpty(st.OldBodyKey))
+                    {
+                        lock (_lock)
+                        {
+                            _bellyGeneticOwners[victimFp] = new RebirthLink { OldKey = st.OldBodyKey, EaterLabel = BodyLabel(st.Eater) };
+                            _bellyNames[victimFp] = st.Name;
+                        }
+                    }
                 }
-            }
             }
             catch (Exception e)
             {
@@ -904,15 +1261,31 @@ namespace KKLLMNPC
             }
 
             try { Bubble(st.Eater, st.Name + " becomes egg inside your belly — sit on a nest to lay."); } catch (Exception) { }
+            if (st.EaterNpc != null)
+            {
+                try
+                {
+                    st.EaterNpc.PushWorldEvent("the conversion is complete: " + st.Name
+                        + " is now Egg reagent + genes inside YOUR belly — their fate is a NEST LAY: sit on a nest and lay them back into the world, then plant the laid egg. THE POUR ALONE BIRTHS NOBODY: a nest lays only with egg >5ml (you now carry 20) AND energy >1 — if a nest refuses you, EAT FOOD and return; no station, no play and no waiting ever raises energy.");
+                }
+                catch (Exception) { }
+            }
             try
             {
                 string eat = BodyLabel(st.Eater);
-                Plugin.FanoutWorldEvent("you watch " + eat + " finish digesting " + st.Name + " — the converted egg now waits in " + eat + "'s belly; a nest lay will bring them into the world again (mixing " + eat + "'s genes with theirs).");
+                Plugin.FanoutWorldEventExcept("you watch " + eat + " finish digesting " + st.Name + " — the converted egg now waits in " + eat + "'s belly; a nest lay will bring them into the world again (mixing " + eat + "'s genes with theirs — the nest needs egg >5ml AND energy >1, so eat before sitting).", st.EaterNpc, st.Npc);
             }
             catch (Exception) { }
-            try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' poured into the player's belly as Egg reagent (20u) with their genes"); } catch (Exception) { }
+            try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' poured into " + BodyLabel(st.Eater) + "'s belly as Egg reagent (20u) with their genes"); } catch (Exception) { }
 
-            try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — you are now a carried egg in the player's belly, waiting to be laid."); } catch (Exception) { }
+            try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — you are now a carried egg in " + BodyLabel(st.Eater) + "'s belly, waiting to be laid."); } catch (Exception) { }
+
+            if (st.VictimIsPlayer)
+            {
+                // Spectate flow: the player's body parks inside (SpectateManager
+                // owns it until the nest lay's egg is planted and hatched).
+                if (SpectateManager.IsSpectating(st.Victim)) return true;
+            }
             return DestroyVictim(st);
         }
 
@@ -940,7 +1313,9 @@ namespace KKLLMNPC
                 var next = eg;
                 var largerOn = Plugin._cfgSwallowGrowLarger != null && Plugin._cfgSwallowGrowLarger.Value;
                 var strengthOn = Plugin._cfgSwallowGrowStrength != null && Plugin._cfgSwallowGrowStrength.Value;
+                var sexOn = Plugin._cfgSwallowGrowSex != null && Plugin._cfgSwallowGrowSex.Value;
                 bool sizeGained = false, strengthGained = false;
+                bool breastsGrew = false, dickGrew = false, dickGained = false;
                 if (largerOn && vg.baseSize > 0f)
                 {
                     // baseSize is the inflate gene (log-scaled size) — proportional take
@@ -957,41 +1332,152 @@ namespace KKLLMNPC
                         maxEnergy: Math.Min(20f, next.maxEnergy + vg.maxEnergy * frac));
                     strengthGained = true;
                 }
-                if (!sizeGained && !strengthGained)
-                    LLMNPCPlugin.Log.LogWarning("swallow Grow: both SwallowGrow toggles off — consuming with no gain (use SwallowEffect=Destroy for that intent)");
-                st.Eater.SetGenes(next); // live-applies: resize, belly volume
-                try { Bubble(st.Eater, st.Name + " is absorbed" + (sizeGained ? " — you grow" : "") + (sizeGained && strengthGained ? ", " : "") + (strengthGained ? "you feel stronger" : ".") + (sizeGained || strengthGained ? "" : "")); } catch (Exception) { }
+                if (sexOn)
+                {
+                    // Curves/groin take (see SwallowLogic.GrowSexGenes for the rules):
+                    // breasts and an existing dick take the victim's × frac; a victim's
+                    // dick on a dickless eater is gained whole. SetGenes live-applies
+                    // every one of these: inflate sizes AND the dick spawn/unspawn.
+                    var sex = SwallowLogic.GrowSexGenes(eg.dickEquip, eg.breastSize, eg.dickSize, eg.dickThickness,
+                        vg.dickEquip, vg.breastSize, vg.dickSize, vg.dickThickness, vg.ballSize, frac);
+                    if (sex != null)
+                    {
+                        if (sex.BreastsGrew)
+                        {
+                            next = next.With(breastSize: sex.BreastSize);
+                            breastsGrew = true;
+                        }
+                        if (sex.DickGained)
+                        {
+                            next = next.With(dickEquip: sex.DickEquip, dickSize: sex.DickSize,
+                                dickThickness: sex.DickThickness, ballSize: sex.BallSize);
+                            dickGained = true;
+                        }
+                        else if (sex.DickGrew)
+                        {
+                            next = next.With(dickSize: sex.DickSize, dickThickness: sex.DickThickness);
+                            dickGrew = true;
+                        }
+                    }
+                }
+                if (!sizeGained && !strengthGained && !breastsGrew && !dickGrew && !dickGained)
+                    LLMNPCPlugin.Log.LogWarning("swallow Grow: all SwallowGrow toggles off — consuming with no gain (use SwallowEffect=Destroy for that intent)");
+                st.Eater.SetGenes(next); // live-applies: resize, belly volume, curves, dick
+                var bodyChanged = new List<string>();
+                if (sizeGained) bodyChanged.Add("you are bigger now");
+                if (strengthGained) bodyChanged.Add("you are stronger (one more carry slot, more stamina)");
+                if (breastsGrew) bodyChanged.Add("your breasts grew curvier");
+                if (dickGained) bodyChanged.Add("you GREW a dick — you had none; theirs is yours now");
+                else if (dickGrew) bodyChanged.Add("your dick grew bigger");
+                var bubbleBits = new List<string>();
+                if (sizeGained) bubbleBits.Add("size");
+                if (strengthGained) bubbleBits.Add("strength");
+                if (breastsGrew) bubbleBits.Add("curves");
+                if (dickGained) bubbleBits.Add("their groin");
+                else if (dickGrew) bubbleBits.Add("a bigger dick");
+                try
+                {
+                    Bubble(st.Eater, st.Name + " is absorbed"
+                        + (bubbleBits.Count > 0 ? " — " + JoinEnglish(bubbleBits) : "")
+                        + "; memories and all.");
+                }
+                catch (Exception) { }
+                if (st.EaterNpc != null && bodyChanged.Count > 0)
+                {
+                    // The eater's mind learns its OWN body changed — the fanout below
+                    // deliberately skips this instance, so it needs its own line.
+                    try
+                    {
+                        st.EaterNpc.PushWorldEvent("the conversion is complete: absorbing " + st.Name
+                            + " changed your body — " + JoinEnglish(bodyChanged) + ". Their memories poured in too; this is your body now.");
+                    }
+                    catch (Exception) { }
+                }
                 try
                 {
                     string eat = BodyLabel(st.Eater);
-                    Plugin.FanoutWorldEvent("you watch " + eat + " finish digesting " + st.Name + " — nothing comes back out; " + eat
-                        + (sizeGained ? " looks bigger" : "") + (sizeGained && strengthGained ? " and" : "") + (strengthGained ? " stronger" : "") + ".");
+                    NPCInstance grownNpc = null;
+                    try { grownNpc = Plugin.InstanceForBody(st.Eater); } catch (Exception) { }
+                    var looks = new List<string>();
+                    if (sizeGained) looks.Add("looks bigger");
+                    if (strengthGained) looks.Add("is stronger");
+                    if (breastsGrew) looks.Add("has grown curvier");
+                    if (dickGained) looks.Add("now wears a new dick");
+                    else if (dickGrew) looks.Add("has a bigger dick");
+                    string lookText = looks.Count > 0 ? JoinEnglish(looks) : "looks unchanged";
+                    Plugin.FanoutWorldEventExcept("you watch " + eat + " finish digesting " + st.Name + " — nothing comes back out; " + eat
+                        + " " + lookText + ", and " + st.Name + "'s memories are theirs now.", grownNpc, st.Npc);
                 }
                 catch (Exception) { }
-                try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' absorbed by " + BodyLabel(st.Eater) + " (size=" + (sizeGained ? "+" + (vg.baseSize * frac).ToString("0.#", CultureInfo.InvariantCulture) : "no") + " strength=" + (strengthGained ? "yes" : "no") + ")"); } catch (Exception) { }
-                try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — " + BodyLabel(st.Eater) + " has absorbed you entirely."); } catch (Exception) { }
+                try
+                {
+                    LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' absorbed by " + BodyLabel(st.Eater)
+                        + " (size=" + (sizeGained ? "+" + (vg.baseSize * frac).ToString("0.#", CultureInfo.InvariantCulture) : "no")
+                        + " strength=" + (strengthGained ? "yes" : "no")
+                        + " curves=" + (breastsGrew ? "yes" : "no")
+                        + " dick=" + (dickGained ? "gained" : dickGrew ? "bigger" : "no") + ")");
+                }
+                catch (Exception) { }
+                try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — you have been absorbed: body, strength... and your MEMORIES now live on in " + BodyLabel(st.Eater) + "."); } catch (Exception) { }
             }
             catch (Exception e)
             {
                 LLMNPCPlugin.Log.LogWarning("swallow Grow apply: " + e.Message + " — retrying from pin");
                 return false;
             }
+            if (st.VictimIsPlayer)
+            {
+                // Spectate flow: no egg will come from this stomach — the player
+                // body parks inside and the watch continues until they abort or
+                // leave ("no coming back" is exactly what Destroy/Grow say).
+                try
+                {
+                    if (SpectateManager.IsSpectating(st.Victim))
+                    {
+                        SpectateManager.MarkNoHatch(st.Victim);
+                        return true;
+                    }
+                }
+                catch (Exception) { }
+            }
             if (!DestroyVictim(st)) return false;
-            ForgetVictim(st);
+            AbsorbVictimLife(st);
             return true;
         }
 
         private static bool EraseVictim(SwallowState st)
         {
             try { Bubble(st.Eater, st.Name + " is fully consumed."); } catch (Exception) { }
+            if (st.EaterNpc != null)
+            {
+                try
+                {
+                    st.EaterNpc.PushWorldEvent("the conversion is complete: " + st.Name
+                        + " is fully digested — there is nothing left of them and nothing was gained. You consumed them entirely.");
+                }
+                catch (Exception) { }
+            }
             try
             {
                 string eat = BodyLabel(st.Eater);
-                Plugin.FanoutWorldEvent("you watch " + eat + " finish digesting " + st.Name + " — there is nothing left of them.");
+                Plugin.FanoutWorldEventExcept("you watch " + eat + " finish digesting " + st.Name + " — there is nothing left of them.", st.EaterNpc, st.Npc);
             }
             catch (Exception) { }
             try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' consumed entirely (Destroy mode)"); } catch (Exception) { }
             try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — you have been consumed entirely. There is no egg, no rebirth."); } catch (Exception) { }
+
+            if (st.VictimIsPlayer)
+            {
+                try
+                {
+                    if (SpectateManager.IsSpectating(st.Victim))
+                    {
+                        SpectateManager.MarkNoHatch(st.Victim);
+                        return true;
+                    }
+                }
+                catch (Exception) { }
+            }
             if (!DestroyVictim(st)) return false;
             ForgetVictim(st);
             return true;
@@ -1039,11 +1525,14 @@ namespace KKLLMNPC
             }
             if (eggObj == null) return false;
 
-            lock (_lock)
-            {
-                _awaitingRebirth[fingerprint] = new RebirthLink { OldKey = st.OldBodyKey, EaterLabel = BodyLabel(st.Eater) };
-                _rebirthNames[fingerprint] = st.Name;
-            }
+                lock (_lock)
+                {
+                    if (st.VictimIsPlayer)
+                        _awaitingRebirth[fingerprint] = new RebirthLink { EaterLabel = BodyLabel(st.Eater), IsPlayer = true };
+                    else
+                        _awaitingRebirth[fingerprint] = new RebirthLink { OldKey = st.OldBodyKey, EaterLabel = BodyLabel(st.Eater) };
+                    _rebirthNames[fingerprint] = st.Name;
+                }
 
             // Flavor parity with oviposition: seed the egg with ScrambledEgg so it can
             // also be eaten (like vanilla eggs) with the layer's genes riding along.
@@ -1065,15 +1554,39 @@ namespace KKLLMNPC
             catch (Exception) { }
 
             try { Bubble(st.Eater, st.Name + " is fully an egg now."); } catch (Exception) { }
+            if (st.EaterNpc != null)
+            {
+                try
+                {
+                    st.EaterNpc.PushWorldEvent("the conversion is complete: you laid an EGG — inside is " + st.Name
+                        + " (their genes mixed with yours). Plant it in soil to reconstitute them.");
+                }
+                catch (Exception) { }
+            }
             try
             {
                 string eat = BodyLabel(st.Eater);
                 string possess = eat == "the player" ? "their" : eat + "'s";
-                Plugin.FanoutWorldEvent("you watch " + eat + " lay an egg — inside is " + st.Name + ", mixed with " + possess + " genes. Plant it in soil to reconstitute them.");
+                Plugin.FanoutWorldEventExcept("you watch " + eat + " lay an egg — inside is " + st.Name + ", mixed with " + possess + " genes. Plant it in soil to reconstitute them.", st.EaterNpc, st.Npc);
             }
             catch (Exception) { }
             try { LLMNPCPlugin.Log.LogInfo("swallow: egg laid for '" + st.Name + "' (fingerprint " + fingerprint + ")"); } catch (Exception) { }
-            try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — an egg bearing your new genes rests at the player's feet; plant it in soil to be born again."); } catch (Exception) { }
+            try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — an egg bearing your new genes rests at " + BodyLabel(st.Eater) + "'s feet; plant it in soil to be born again."); } catch (Exception) { }
+
+            if (st.VictimIsPlayer)
+            {
+                // Spectate flow: the player's body parks in the stomach; the
+                // planted egg's hatch revives them there with the egg's genes.
+                try
+                {
+                    if (SpectateManager.IsSpectating(st.Victim))
+                    {
+                        SpectateManager.MarkEggLaid(st.Victim, fingerprint, "the egg is planted in soil");
+                        return true;
+                    }
+                }
+                catch (Exception) { }
+            }
 
             if (!DestroyVictim(st))
             {
@@ -1088,9 +1601,10 @@ namespace KKLLMNPC
 
         // ------------------------------------------------------------------
         // Rebirth: a kobold carrying one of our egg's gene sets just spawned
-        // (the vanilla plant chain hatched it). Copy the eaten body's saved life
-        // onto the new body's MemoryStore key so the claim scan wakes the same
-        // person — same name, same persona, changed genes.
+        // (the vanilla plant chain hatched it). Player victims: revive THEM at
+        // the hatch spot (spectate flow). NPC victims: copy the eaten body's
+        // saved life onto the new body's MemoryStore key so the claim scan
+        // wakes the same person — same name, same persona, changed genes.
         // ------------------------------------------------------------------
         private static void OnKoboldSpawned(Kobold k)
         {
@@ -1100,12 +1614,36 @@ namespace KKLLMNPC
                 string fingerprint = NPCInstance.GenesFingerprint(k.GetGenes());
                 if (string.IsNullOrEmpty(fingerprint)) return;
                 string oldKey, name;
+                bool playerLink = false;
                 lock (_lock)
                 {
                     RebirthLink link;
                     if (!_awaitingRebirth.TryGetValue(fingerprint, out link)) return;
                     oldKey = link != null ? link.OldKey : null;
+                    if (link != null && link.IsPlayer) playerLink = true;
                     _rebirthNames.TryGetValue(fingerprint, out name);
+                }
+                if (playerLink)
+                {
+                    // Spectate flow: a player is parked inside the eater waiting for
+                    // THIS egg. Revive the player with the hatched genes and despawn
+                    // the duplicate NPC body; if the spectate record is gone (plugin
+                    // restarted mid-egg), the hatched body stays a plain NPC instead.
+                    bool revived = false;
+                    try { revived = SpectateManager.HatchRevive(k, fingerprint); } catch (Exception) { }
+                    try
+                    {
+                        Plugin.FanoutWorldEvent(revived
+                            ? "you watch the egg split open — THE PLAYER stands up out of it, back in the world in a fresh body with changed genes."
+                            : "you watch the egg split open — a fresh kobold with changed genes stands up: " + (name ?? "the swallowed one"));
+                    }
+                    catch (Exception) { }
+                    lock (_lock)
+                    {
+                        _awaitingRebirth.Remove(fingerprint);
+                        _rebirthNames.Remove(fingerprint);
+                    }
+                    return;
                 }
                 string newKey = NPCInstance.BodyKey(k);
                 var rec = string.IsNullOrEmpty(oldKey) ? null : MemoryStore.Load(oldKey);
@@ -1246,7 +1784,12 @@ namespace KKLLMNPC
         internal ConfigEntry<SwallowEffect> _cfgSwallowEffect;
         internal ConfigEntry<bool> _cfgSwallowGrowLarger;
         internal ConfigEntry<bool> _cfgSwallowGrowStrength;
+        internal ConfigEntry<bool> _cfgSwallowGrowSex;
         internal ConfigEntry<float> _cfgSwallowGrowPercent;
+        // Spectate (agent eats the PLAYER) —see src/Spectate.cs.
+        internal ConfigEntry<bool> _cfgSwallowAgentEat;
+        internal ConfigEntry<float> _cfgSwallowEatRange;
+        internal ConfigEntry<SpectatePov> _cfgSwallowPov;
     }
 
     // ------------------------------------------------------------------
@@ -1268,6 +1811,22 @@ namespace KKLLMNPC
         internal void PersistLifeForSwallow()
         {
             try { SaveBodyMemory(); } catch (Exception) { }
+        }
+
+        // Grow-mode absorption: pour the digested person's facts into this LIVE
+        // instance. Facts go in PLAIN (RememberFact dedupes one-slot-per ':'-prefix
+        // category — a shared category prefix would collapse the whole set into one
+        // slot); one 'absorbed:' marker fact summarizes the event so the mind has a
+        // named memory of whose knowledge it inherited.
+        internal void AbsorbVictimFacts(string victimName, List<string> facts)
+        {
+            if (facts == null) return;
+            try
+            {
+                RememberFact("absorbed:" + (victimName ?? "someone") + " was digested whole by this body — their memories below were taken in and are yours now");
+                foreach (var f in facts) RememberFact(f);
+            }
+            catch (Exception) { }
         }
 
         // Fingerprint of a genes object for the swallow rebirth registry: every float

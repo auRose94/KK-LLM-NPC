@@ -12,6 +12,11 @@ needed: think-block stripping (Qwen3/GLM/Bonsai/deepseek-style reasoners), token
 on top of `MaxTokens` for hidden reasoning, tight payloads for chatty small families, and
 a vision-capable flag. New families: run a playtest, note behavior, add a profile + test.
 
+For speed on the reasoning families, `[LLM] Thinking=off` request-suppresses the
+reasoning pass server-side (Ollama `think=false`, llama.cpp/vLLM `chat_template_kwargs
+{enable_thinking:false}`, llama.cpp `reasoning_budget=0`) — the first thing to try when a
+thinking family "takes slow/lost turns"; the struggled-trio notes above are a candidate.
+
 ## Ranking (field status, Oct 2026)
 
 Ranking is observational for now — no formal benchmark has run yet (see plan below).

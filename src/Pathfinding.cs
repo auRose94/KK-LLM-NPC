@@ -71,7 +71,33 @@ namespace KKLLMNPC
             grid.SampleCell(sx, szz);
             int sl = grid.LayerNear(grid.Ci(sx, szz), refY);
             if (sl < 0) sl = grid.ForceLayer(sx, szz, refY);
-            if (sl < 0) { Logger.LogInfo("path: null — start cell " + sx + "," + szz + " has no floor"); return null; }
+            if (sl < 0)
+            {
+                // START FALLBACK (live-navigation killer, seen in playtest: the body's
+                // clamped/occupied cell refused to ground — "start cell has no floor" →
+                // every cd/go_to from that spot died). Walk a small ring for the nearest
+                // cell that DOES have a groundable floor and start there instead.
+                bool foundStart = false;
+                for (int r = 1; r <= 3 && !foundStart; r++)
+                {
+                    for (int dz = -r; dz <= r && !foundStart; dz++)
+                    {
+                        for (int dx = -r; dx <= r && !foundStart; dx++)
+                        {
+                            if (System.Math.Abs(dx) != r && System.Math.Abs(dz) != r) continue; // ring edge only
+                            int cxx = sx + dx, czz = szz + dz;
+                            if (cxx < 0 || cxx >= cols || czz < 0 || czz >= rows) continue;
+                            int l2 = grid.LayerNear(grid.Ci(cxx, czz), refY);
+                            if (l2 >= 0)
+                            {
+                                Logger.LogInfo("path: start cell " + sx + "," + szz + " had no floor — re-grounded at " + cxx + "," + czz);
+                                sx = cxx; szz = czz; sl = l2; foundStart = true;
+                            }
+                        }
+                    }
+                }
+                if (!foundStart) { Logger.LogInfo("path: null — start cell " + sx + "," + szz + " has no floor (no floor in 3-cell ring either)"); return null; }
+            }
 
             // Goal: exact cell on the floor nearest our elevation, else a landed
             // near-miss cell a few steps out (so a goal jammed against geometry

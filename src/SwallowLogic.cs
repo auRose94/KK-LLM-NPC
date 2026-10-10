@@ -133,6 +133,63 @@ namespace KKLLMNPC
             return victimY >= headY - HeadAboveTolerance;
         }
 
+        // ---- Grow-mode sex genes ----
+        // What absorbing a body does to the eater's curves and groin, computed from
+        // the two bodies' numbers (no game types — src/Swallow.cs maps these onto
+        // KoboldGenes). dickEquip != 0 means the body has a dick equipped (the game's
+        // 1-based penis-database ID; 0 = none). Rules mirror the size/strength takes:
+        //   breasts: eater's breastSize += victim's × frac (a flat meal adds nothing)
+        //   an eater that ALREADY has a dick grows it by the victim's × frac (length
+        //            and thickness together)
+        //   a dickless eater that ate a dick-having victim GAINS that groin wholesale —
+        //            equip id plus the victim's dick/ball sizes copied, not sampled
+        //            (10% of a dick is invisible; absorbing it means owning it)
+        // Null = nothing changed and the caller has no sex genes to apply.
+        public sealed class GrowSexResult
+        {
+            public bool BreastsGrew;
+            public bool DickGrew;         // eater's existing dick got bigger
+            public bool DickGained;       // dickless eater took the victim's groin wholesale
+            public float BreastSize;      // new breastSize (BreastsGrew)
+            public float DickSize;        // new dickSize (DickGrew/DickGained)
+            public float DickThickness;   // new dickThickness (DickGrew/DickGained)
+            public float BallSize;        // new ballSize (DickGained — comes with the groin)
+            public short DickEquip;       // new dickEquip (DickGained)
+        }
+
+        public static GrowSexResult GrowSexGenes(
+            short eaterDickEquip, float eaterBreastSize, float eaterDickSize, float eaterDickThickness,
+            short vicDickEquip, float vicBreastSize, float vicDickSize, float vicDickThickness,
+            float vicBallSize, float frac)
+        {
+            if (frac < 0f) frac = 0f;
+            if (frac > 1f) frac = 1f;
+            var r = new GrowSexResult();
+            if (vicBreastSize > 0f && frac > 0f)
+            {
+                r.BreastsGrew = true;
+                r.BreastSize = eaterBreastSize + vicBreastSize * frac;
+            }
+            if (vicDickEquip != 0)
+            {
+                if (eaterDickEquip == 0)
+                {
+                    r.DickGained = true;
+                    r.DickEquip = vicDickEquip;
+                    r.DickSize = vicDickSize > 0f ? vicDickSize : 0f;
+                    r.DickThickness = vicDickThickness > 0f ? vicDickThickness : 0f;
+                    r.BallSize = vicBallSize > 0f ? vicBallSize : 0f;
+                }
+                else if (vicDickSize > 0f && frac > 0f)
+                {
+                    r.DickGrew = true;
+                    r.DickSize = eaterDickSize + vicDickSize * frac;
+                    r.DickThickness = eaterDickThickness + vicDickThickness * frac;
+                }
+            }
+            return r.BreastsGrew || r.DickGrew || r.DickGained ? r : null;
+        }
+
         // Stable string of a genes object's numbers, in a fixed field order — the
         // fingerprint the rebirth registry matches on. Floats must already be
         // normalized (half-precision round-tripped) or the serialization drift breaks

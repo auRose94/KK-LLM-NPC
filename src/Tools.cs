@@ -419,7 +419,7 @@ namespace KKLLMNPC
                 var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Mechanics", "FarmRegion" };
                 if (ignore.Contains(name.ToLowerInvariant())) return new { ok = false, reason = "ignored_place", tried = name };
                 var hit = FindPlaceByName(name);
-                if (!hit.HasValue) return new { ok = false, reason = "unknown_place", tried = name };
+                if (!hit.HasValue) return new { ok = false, reason = "unknown_place", tried = name, note = "try `cat places` — nests/beds/farm plots and watering cans are listed map-wide — or ls for nearby things" };
 
                 target = hit.Value;
                 _navTargetName = name;
@@ -499,16 +499,22 @@ namespace KKLLMNPC
             if (fullDist > maxReach + at && !trailRoute)
                 return new { ok = false, reason = "too_far", name = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), note = "in range of ~" + F(maxReach) + "m only — pick something from 'nearby'/'survey' or ask the player to take you" };
 
-            // Nest gate: a nest physically can't be used until the belly is full
-            // (OvipositionSpot rule: egg > 5ml). The model used to camp nests with
-            // an empty belly — hard-refuse the travel itself, not just the interact.
+            // Nest gate: a nest physically can't be used until egg >5ml AND energy >1
+            // (OvipositionSpot.CanUse). Two distinct refusals — the model used to read
+            // a "belly not full" note while carrying a poured guest-egg (real blocker:
+            // energy) and decided the check was broken, then tried play stations to
+            // "make eggs". Name the actual blocker, name the fix, and warn that
+            // waiting/stimulation create neither.
             string destCls = ClassifyUsable(name).ToLowerInvariant();
             if (destCls == "nest")
             {
-                bool ready = true; float vol = 0f;
-                try { vol = GetEggVolume(_kobold); ready = IsReadyToLayEgg(_kobold); } catch (Exception) { }
-                if (!ready)
-                    return new { ok = false, reason = "belly_not_full", name = _navTargetName, id = hasId ? p.S("id") : (object)null, dist = F(fullDist), eggs = F(vol), note = "a nest WON'T work with a belly of " + F(vol) + "ml (needs >5ml). Do NOT seek a nest until needs.eggs says READY_TO_LAY — play, explore or keep company instead" };
+                float vol = 0f;
+                try { vol = GetEggVolume(_kobold); } catch (Exception) { }
+                if (vol <= 5f)
+                    return new { ok = false, reason = "belly_not_full", name = _navTargetName, id = hasId ? p.S("id") : (object)null, dist = F(fullDist), eggs = F(vol), note = "you carry " + F(vol) + "ml egg — a nest needs >5ml; egg reagent comes ONLY from eating/swallowing, never from play stations or waiting. Do NOT seek a nest until needs.eggs says READY_TO_LAY — play, explore or keep company instead" };
+                float lay = LayEnergy(_kobold);
+                if (lay <= 1f)
+                    return new { ok = false, reason = "out_of_energy", name = _navTargetName, id = hasId ? p.S("id") : (object)null, dist = F(fullDist), eggs = F(vol), note = "you carry " + F(vol) + "ml egg — that IS enough — but your ENERGY is " + F(lay) + " and a nest lays only above 1: eat food (or bed-rest) first, then return. Nothing else raises energy — stimulation and sitting in stations don't, ever" };
             }
             float stopAt = Mathf.Max(0f, fullDist - at);
             float yaw = Mathf.Atan2(to.x, to.z) * Consts.Rad2Deg;
@@ -616,8 +622,6 @@ namespace KKLLMNPC
 
         // Resolve a human-ish name ("bed", "toilet", "player", "door") to a world
         // position from what we can currently find around the map body.
-        // Collider scratch buffer for name→usable scans (main-thread use only).
-        private readonly Collider[] _toolColliderBuf = new Collider[64];
         private Vector3? FindPlaceByName(string name)
         {
             if (!IsAlive(_kobold)) return null;
@@ -651,33 +655,55 @@ namespace KKLLMNPC
                 if (at != null) return (Vector3)at;
             }
             catch (Exception) { }
-            // Best matching GenericUsable (bed/toilet/tub/seat/door/swap...) in range.
-            // Marshalled to the main thread — Physics is a main-thread API and this ran
-            // on the LLM thread before. NonAlloc with our own buffer: a 60m sphere
-            // fully-allocation in a busy scene otherwise.
+            // Best matching place SCENE-WIDE (no perception radius): the key machines
+            // (nests, beds, farm plots, watering cans) are usually FAR from spawn —
+            // the old 60m OverlapSphere answered "unknown_place" for exactly them,
+            // the user's "it can't navigate the scene well enough". StationList() =
+            // every GenericUsable on the map; soil tiles + watering cans are not
+            // GenericUsables and come from the key-places scan. Kind aliases let
+            // `cd farm` / `cd water` / `cd can` / `cd nest` / `cd bed` match by KIND.
             try
             {
                 object res = RunOnMainThread(() =>
                 {
                     var origin = _kobold.transform.position;
-                    int count = Physics.OverlapSphereNonAlloc(origin, 60f, _toolColliderBuf, ~0, QueryTriggerInteraction.Collide);
-                    GenericUsable best = null; float bestD = float.MaxValue;
-                    for (int i = 0; i < count; i++)
+                    string needleLow = needle;
+                    // Kind aliases so a kind word resolves even when the object's
+                    // mesh name doesn't contain it ("SoilTile" vs "farm plot").
+                    bool wantsFarm = needleLow.Contains("farm") || needleLow.Contains("soil")
+                        || needleLow.Contains("plot") || needleLow.Contains("field");
+                    bool wantsWater = needleLow.Contains("water") || needleLow.Contains("watering")
+                        || needleLow == "can" || needleLow.Contains("kettle");
+                    Vector3 best = default(Vector3); bool found = false; float bestD = float.MaxValue;
+                    foreach (var u in StationList())
                     {
-                        var c = _toolColliderBuf[i];
-                        if (c == null || IsOwnCollider(c)) continue;
-                        GenericUsable u = null;
-                        try { u = c.GetComponent<GenericUsable>() ?? c.GetComponentInParent<GenericUsable>(); } catch (Exception) { continue; }
-                        if (u == null) continue;
+                        if (u == null || u.transform == null) continue;
                         string uName = CleanName(u.name).ToLowerInvariant();
-                        string uCls = ClassifyUsable(uName).ToLowerInvariant();
-                        if (uName.Contains(needle) || uCls.Contains(needle) || needle.Contains(uCls))
-                        {
-                            float d = Vector3.Distance(u.transform.position, origin);
-                            if (d < bestD) { bestD = d; best = u; }
-                        }
+                        // TYPE-first: a kind word ("cd door/nest/food") must match the
+                        // machine's own MonoBehaviour types, not just its mesh name.
+                        string uCls = (ClassifyByType(u.gameObject) ?? ClassifyUsable(uName)).ToLowerInvariant();
+                        bool matched = uName.Contains(needleLow) || uCls.Contains(needleLow) || needleLow.Contains(uCls);
+                        if (!matched) continue;
+                        float d = Vector3.Distance(u.transform.position, origin);
+                        if (d < bestD) { bestD = d; best = u.transform.position; found = true; }
                     }
-                    return best != null ? (object)best.transform.position : null;
+                    // Farm plots (SoilTile) — "farm"/"soil"/"plot".
+                    foreach (var t in SoilTileList())
+                    {
+                        if (t == null || t.transform == null) continue;
+                        if (!wantsFarm && !CleanName(t.name).ToLowerInvariant().Contains(needleLow)) continue;
+                        float d = Vector3.Distance(t.transform.position, origin);
+                        if (d < bestD) { bestD = d; best = t.transform.position; found = true; }
+                    }
+                    // Watering cans — "water"/"watering"/"can".
+                    foreach (var w in WateringCanList())
+                    {
+                        if (w == null || w.transform == null) continue;
+                        if (!wantsWater && !CleanName(w.name).ToLowerInvariant().Contains(needleLow)) continue;
+                        float d = Vector3.Distance(w.transform.position, origin);
+                        if (d < bestD) { bestD = d; best = w.transform.position; found = true; }
+                    }
+                    return found ? (object)best : null;
                 }, 5000);
                 if (res != null) return (Vector3)res;
             }
@@ -687,12 +713,17 @@ namespace KKLLMNPC
 
         // Store a fact in long-term memory ("bed upstairs", "player is friendly").
         // Deliberately store a fact (long-term memory, 24-item ring) the model reads
-        // every tick.
+        // every tick. Junk classes (viewer-relative text, goals-in-facts, momentary
+        // self/body states, transient object states) are refused with a teaching
+        // note describing where that info lives LIVE instead.
         private object ToolRemember(JsonObj p)
         {
             string fact = p.S("mem", "");
             if (string.IsNullOrWhiteSpace(fact)) return new { ok = false, reason = "empty_mem" };
             fact = Sanitize(fact);
+            string junk = TextUtil.JunkFactReason(fact);
+            if (junk != null)
+                return new { ok = false, reason = junk, note = TextUtil.JunkFactNote(junk) };
             RememberFact(fact);
             return new { ok = true, remembered = fact.Trim(), facts = _facts.Count };
         }
@@ -847,15 +878,19 @@ namespace KKLLMNPC
                 lock (_stateLock) { _yawDeg = Mathf.Repeat(yaw, 360f); _pitchDeg = pitch; }
                 _lastBigTurnTime = Time.unscaledTime; // make next tick attach a fresh image
 
-                // Nest gate (again, at use-time): empty belly can't lay — don't let
-                // the model grind a nest that will refuse it every turn.
+                // Nest gate (again, at use-time): an unusable lay can't be ground — but
+                // the refusal names the real blocker (egg vs energy), like go_to above.
                 if (ClassifyUsable(CleanName(target.name)).ToLowerInvariant() == "nest")
                 {
-                    float vol = 0f; bool ready = true;
-                    try { vol = GetEggVolume(_kobold); ready = IsReadyToLayEgg(_kobold); } catch (Exception) { }
-                    if (!ready)
+                    float vol = 0f;
+                    try { vol = GetEggVolume(_kobold); } catch (Exception) { }
+                    if (vol <= 5f)
                         return new { ok = false, reason = "belly_not_full", name = CleanName(target.name), dist = F(dist), eggs = F(vol),
-                            note = "a nest needs a FULL belly (>5ml egg); you have " + F(vol) + "ml — it will not work. Stop seeking nests until needs.eggs says READY_TO_LAY" };
+                            note = "you carry " + F(vol) + "ml egg — a nest needs >5ml; egg reagent comes ONLY from eating/swallowing, never from play stations or waiting. Stop seeking nests until needs.eggs says READY_TO_LAY" };
+                    float lay = LayEnergy(_kobold);
+                    if (lay <= 1f)
+                        return new { ok = false, reason = "out_of_energy", name = CleanName(target.name), dist = F(dist), eggs = F(vol),
+                            note = "you carry " + F(vol) + "ml egg — that IS enough — but your ENERGY is " + F(lay) + " and a nest lays only above 1: eat food (or bed-rest) first, then return. Nothing else raises energy — stimulation and sitting in stations don't, ever" };
                 }
                 if (!target.CanUse(_kobold))
                 {

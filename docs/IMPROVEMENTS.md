@@ -200,11 +200,11 @@ before wrap-up:
 7. **`EndpointStatusText` "not configured" unreachable** (Val() substitutes a default)
    — cosmetic, noted, left as defensive.
 
-## Wave 5 — playtest feedback (2026-10-02, evening)
+## Wave 5 — first playtest fixes (2026-10-02, evening)
 
 Four issues surfaced in the first real playtest with Ornith live, fixed same day:
 
-1. **"Agents get disoriented when the map slides around — don't rotate the ASCII map."**
+1. **The sliding, rotating ASCII map disoriented the agents — it must never rotate.**
    The sonar was a contradiction: the plot math was world-anchored, but it only sampled the
    camera-FOV cone and the prompt called row 0 "furthest forward". Fix: a fixed 16-ray
    compass sweep (absolute bearings, shared/memoized) + exact nearby positions plotted on a
@@ -213,14 +213,14 @@ Four issues surfaced in the first real playtest with Ornith live, fixed same day
    glyph filter (`radar(filter=…)` act tool / `sonar [filter]` console command). Windows got
    their own ray kind `v`/`V` so glass is nameable. New `Compass.cs` is pure C# + the
    `compass` test suite (convention: N=+Z, E=+X, world-fixed, defined in exactly one place).
-2. **"They wanted listing options by compass direction + distance as an ID"** — station
+2. **Station options needed a stable compass+distance ID** — station
    entries (perception `stations`, console `cat stations`) now carry addr `Blender#SW4`,
    world `bearing`, landmark hints scanned around the station (`near window, mailbox` —
    memoized 15s, 4.5m radius, fixture-keyword matching so windows/mailboxes are findable),
    an `id` target, and per-kind `closest_you`/`closest_player` flags for the "which station
    do we use together?" decision; prompts teach matching a player's "the one by the
    window" against the hints.
-3. **"Tool calling isn't exactly perfect — add a complaint/bug-report tool."** New
+3. **Tool calling was flaky — the agents needed a complaint/bug-report channel.** New
    `report`/`report_issue` (console + act tool) writes an AI-feedback block (message +
    position/facing/goal + last ~10 tool calls from a new ring buffer) to
    `BepInEx/config/kkllmnpc_ai_reports.log` behind `[Debug] AIReportLog` (default on;
@@ -287,7 +287,7 @@ valid path for the AI to copy (and follow-mode should replay their real path)".
 
 ## Wave 8 — correction: the quest system exists (2026-10-02, night)
 
-The user knew better than the Wave-6/7 research: **the game does have a quest system.**
+A correction pass beat the Wave-6/7 research: **the game does have a quest system.**
 A fuller pass surfaced `Scripts/Objectives/` (my greps hit "objective" matches but I
 skimmed the wrong hits, and `ls | grep -i task` obviously couldn't see a system named
 "Objectives"): `ObjectiveManager` — a chain of `DragonMailObjective` letters with

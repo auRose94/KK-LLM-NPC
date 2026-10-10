@@ -49,6 +49,7 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgVision;
         internal ConfigEntry<int> _cfgVisionEvery;
         internal ConfigEntry<string> _cfgVisionPrompt;
+        internal ConfigEntry<string> _cfgVisionPromptFile;
         internal ConfigEntry<bool> _cfgVisionDebug;
         internal ConfigEntry<string> _cfgVisModel;
         internal ConfigEntry<string> _cfgVisEndpoint;
@@ -91,7 +92,9 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgHornyBaseline;
         internal ConfigEntry<string> _cfgModelTier;
         internal ConfigEntry<bool> _cfgAutoSwitch;
+        internal ConfigEntry<string> _cfgThinking;
         internal ConfigEntry<bool> _cfgNameSelection;
+        internal ConfigEntry<string> _cfgNamePromptFile;
         internal ConfigEntry<int> _cfgFactDecay;
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
@@ -545,6 +548,7 @@ namespace KKLLMNPC
             _cfgVision = plugin._cfgVision;
             _cfgVisionEvery = plugin._cfgVisionEvery;
             _cfgVisionPrompt = plugin._cfgVisionPrompt;
+            _cfgVisionPromptFile = plugin._cfgVisionPromptFile;
             _cfgVisionDebug = plugin._cfgVisionDebug;
             _cfgVisModel = plugin._cfgVisModel;
             _cfgVisEndpoint = plugin._cfgVisEndpoint;
@@ -584,7 +588,9 @@ namespace KKLLMNPC
             _cfgHornyBaseline = plugin._cfgHornyBaseline;
             _cfgModelTier = plugin._cfgModelTier;
             _cfgAutoSwitch = plugin._cfgAutoSwitch;
+            _cfgThinking = plugin._cfgThinking;
             _cfgNameSelection = plugin._cfgNameSelection;
+            _cfgNamePromptFile = plugin._cfgNamePromptFile;
             _cfgFactDecay = plugin._cfgFactDecay;
             _cfgIdentityBot = plugin._cfgIdentityBot;
             _cfgIdentityAppId = plugin._cfgIdentityAppId;
@@ -1246,6 +1252,17 @@ namespace KKLLMNPC
         {
             if (string.IsNullOrWhiteSpace(fact)) return;
             string f = Sanitize(fact.Trim());
+            // Backstop: junk facts (goals-as-facts, momentary body states, viewer-
+            // relative text, transient object states) are useless long-term
+            // knowledge — drop them from EVERY writer. The remember tool refuses
+            // them loudly with a class-specific note; the auto-remember paths
+            // (ask answers, chat-derived text) land here silently.
+            string junk = TextUtil.JunkFactReason(f);
+            if (junk != null)
+            {
+                try { Logger.LogDebug("fact store refused junk fact (" + junk + "): " + f); } catch (Exception) { }
+                return;
+            }
             lock (_facts)
             {
                 // Deduplicate: replace if same prefix (category) already known, and

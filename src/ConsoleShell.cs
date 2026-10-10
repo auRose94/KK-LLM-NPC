@@ -247,7 +247,7 @@ namespace KKLLMNPC
             { "sleep",      "end your turn: sleep [secs] (secs also pauses that long; chat/events wake you)" },
 
             // ---- memory & goals ----
-            { "remember",   "store a fact: remember <fact>" },
+            { "remember",   "store a fact: remember <fact> — STICKY knowledge only: name the thing and its durable place ('bed is upstairs'); viewer-relative facts ('to my left', 'is here') are refused — they go stale the moment anything moves" },
             { "forget",     "drop a fact: forget <fact>" },
             { "goal",       "set goal: goal <text> | goal done | goal drop [why]" },
             { "ask",        "ask your inner world-model: ask <question>" },

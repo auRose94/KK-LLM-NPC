@@ -440,6 +440,16 @@ namespace KKLLMNPC
             try { return GetEggVolume(k) > 5f && k.GetEnergy() > 1f; } catch (Exception) { return false; }
         }
 
+        // The eater's current energy — the second half of the nest rule. Exposed for
+        // the lay gates so a refusal names the REAL blocker: the game refuses nests
+        // on egg ≤5ml OR energy ≤1, and a "belly not full" note while carrying a
+        // poured egg reads like a bug (the exact mistake a playtest eater made — it
+        // went to a play station to "make eggs").
+        private float LayEnergy(Kobold k)
+        {
+            try { return k.GetEnergy(); } catch (Exception) { return 0f; }
+        }
+
         // bellyContainer.OnChange fires on every fluid event (drink/spray/flood/metabolism).
         // The FIRST call after possession is just a snapshot of existing contents — treated
         // as baseline, never reported as a 'drank X' event.
@@ -838,6 +848,8 @@ namespace KKLLMNPC
         private void SyncPenetrationSubscriptions(Kobold target)
         {
             UnsubscribePenetrables();
+            _eggPassing = false;
+            _lastEggMidNotice = 0f;
             try
             {
                 _pen.Clear();
@@ -876,6 +888,52 @@ namespace KKLLMNPC
                 _penListeners.Clear();
                 lock (_pen) _pen.Clear();
                 lock (_dickIn) _dickIn.Clear();
+                _eggPassing = false;
+            }
+            catch (Exception) { }
+        }
+
+        // ---- oviposition narration state (an egg currently passing through us) ----
+        private bool _eggPassing;
+        private float _lastEggMidNotice;
+
+        // Egg passage = OVIPosition, narrated for what it is. Eggs are Penetrators
+        // (OvipositionSpot pushes the laid egg out through the laying spline at a
+        // fixed slow rate; loose egg props can also press against a body). This used
+        // to be misread as a partner entering, so the model thought it was having sex
+        // with an egg and panicked. Eggs never become sex state here — and their
+        // passage is described honestly: slow, self-driven, no thrusting needed.
+        private void HandleEggPassing(PenetrationTech.Penetrable pen, bool inside, float now)
+        {
+            try
+            {
+                string hole = ClassifyPenetrable(pen) ?? "the laying path";
+                if (inside)
+                {
+                    if (_eggPassing)
+                    {
+                        if (now - _lastEggMidNotice > 5f)
+                        {
+                            _lastEggMidNotice = now;
+                            PushWorldEvent("[lay] the EGG is still sliding out of your " + hole + " — this is egg-laying (oviposition), NOT sex. It moves slowly and steadily all by itself; nothing is thrusting, and it is not deepening like a partner would. Just let it pass.");
+                        }
+                        return;
+                    }
+                    _eggPassing = true;
+                    _lastEggMidNotice = now;
+                    Logger.LogInfo("egg passing (" + hole + ") — narrated as laying, not sex");
+                    PushWorldEvent("[lay] an EGG is pressed into / emerging from your " + hole + " — that is an egg traveling the laying path (oviposition), OR an egg simply pressed against you. It is NOT a partner and NOT sex: it slides slowly on its own; no thrusting, no bracing, no panic. When it clears you completely it becomes a real egg item.");
+                    return;
+                }
+                if (_eggPassing)
+                {
+                    _eggPassing = false;
+                    // The delivery is the WHOLE point of a lay — the playtest showed the
+                    // egg left at the nest forever when this line only said "real egg
+                    // item". Give the concrete hand-off: grab → cd to a plot → use.
+                    PushWorldEvent("[lay] the egg has cleared you completely — laying done, and now DELIVERY is your job: the egg is just an item at your feet. Look at it, get/grab it, cd to a farm plot (bare soil — `cat places` lists plots map-wide with ids), set it down on the dirt while facing it, then `use id:N` (or `plant` — the nearest-soil shortcut). It carries genes — it may well be someone reborn (your PLAYER, if they were swallowed): deliver it promptly; never sell, never eat it, never leave it lying around.");
+                    Logger.LogInfo("egg cleared");
+                }
             }
             catch (Exception) { }
         }
@@ -890,6 +948,21 @@ namespace KKLLMNPC
             {
                 if (penetrator == null) return;
                 float now = Time.unscaledTime;
+
+                // Eggs are Penetrators too (the game pushes them out through the laying
+                // path, OvipositionSpot — and loose egg props can press against a body).
+                // A Seed in the penetrator chain identifies them; they are OVIPosition,
+                // NEVER sex: excluded from _pen (so the anchor, rhythm graph, feel and
+                // penetration perception stay clean) and narrated as laying instead.
+                bool isEgg;
+                try { isEgg = penetrator.GetComponentInParent<Seed>(true) != null; }
+                catch (Exception) { isEgg = false; }
+                if (isEgg)
+                {
+                    HandleEggPassing(penetrable, worldSpaceDistanceToPenetrator > 0.001f, now);
+                    return;
+                }
+
                 string whoPen = penetrator.gameObject != null ? CleanName(penetrator.gameObject.name) : "something";
 
                 lock (_pen)

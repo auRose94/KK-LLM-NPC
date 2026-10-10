@@ -20,7 +20,7 @@ namespace KKLLMNPC
                 ["intensity"] = new Dictionary<string, object>
                 {
                     ["type"] = new object[] { "number", "null" },
-                    ["description"] = "thrust: 0-1 hip intensity (default 0.6)"
+                    ["description"] = "thrust: 0-1 hip intensity — SLOW deep strokes; the rate follows it (1.2+1.8×I strokes/s ≈ 2.3 slow/s at the default 0.6, deeper and faster up to ~3/s at 1.0). This is a gentle sustained push, not a jitter"
                 },
                 ["duration"] = new Dictionary<string, object>
                 {
@@ -86,7 +86,7 @@ namespace KKLLMNPC
             string head = lines.Count > 0
                 ? "what your body feels right now:"
                 : "nothing is touching you right now — everything is calm";
-            lines.Add("what moves it: your hips (thrust intensity=0..1, duration=secs — ride the rhythm), "
+            lines.Add("what moves it: your hips — thrust intensity=0..1 gives SLOW deep strokes (rate follows intensity, ~2/s at the default; duration=secs caps a burst), "
                 + "your partner's pace (ask with say/emote), the machine/mount itself. "
                 + "orgasm when the peak lands; unmount (or exit) leaves the animation.");
             var d = new Dictionary<string, object>
@@ -123,9 +123,15 @@ namespace KKLLMNPC
                     _thrustActive = false;
                     return;
                 }
-                // ~10Hz sine oscillation
-                float t = elapsed * 10f * (float)Math.PI * 2f;
-                float y = _thrustIntensity * Mathf.Sin(t);
+                // Slow, FELT strokes. The old ~10 Hz sine out-ran the animator's own
+                // 0.05s hip SmoothDamp — it low-passed the motion into a tiny shiver
+                // ("too fast and not very deep"; the agents freaked out). The rate now
+                // scales with intensity (1.2 + 1.8×I strokes/s ≈ 2.3 at the default
+                // 0.6 — the SmoothDamp tracks it fully) and the amplitude has a felt
+                // floor, so the ThrustX/ThrustY floats really carry the stroke.
+                float rate = 1.2f + 1.8f * _thrustIntensity; // strokes per second
+                float amp = Mathf.Clamp01(0.3f + 0.7f * _thrustIntensity);
+                float y = amp * Mathf.Sin(elapsed * rate * 2f * (float)Math.PI);
                 _charAnimator.SetHipVector(new Vector2(0f, y));
             }
             catch (Exception e)
@@ -150,8 +156,9 @@ namespace KKLLMNPC
             _thrustDuration = duration;
             _thrustStartTime = Time.unscaledTime;
             _thrustActive = true;
+            float strokesPerSecond = 1.2f + 1.8f * intensity;
 
-            return new { ok = true, thrusting = true, intensity, duration };
+            return new { ok = true, thrusting = true, intensity, duration, strokes_per_second = strokesPerSecond };
         }
 
         // ---- Tool: erection ----

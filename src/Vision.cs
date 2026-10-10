@@ -145,6 +145,46 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("vision dump: " + e.Message); }
         }
 
+        // The vision caption's static text. Precedence mirrors the act-loop
+        // system prompt: 1) an explicitly customized [Vision] Prompt config,
+        // 2) the [Vision] PromptFile chat template ({stereo} expands to the
+        // stereo clause below), 3) the built-in default. Only the STATIC text
+        // lives in the file — goal/blocked/Previously are appended per call in
+        // CaptionImage.
+        private string VisionPromptBase()
+        {
+            try
+            {
+                if (_cfgVisionPrompt != null)
+                {
+                    string v = _cfgVisionPrompt.Value;
+                    object def = _cfgVisionPrompt.DefaultValue;
+                    if (!string.IsNullOrWhiteSpace(v) && !object.Equals(v, def)) return v;
+                }
+            }
+            catch (Exception) { }
+            string file = _cfgVisionPromptFile != null ? (_cfgVisionPromptFile.Value ?? "").Trim() : "";
+            if (file.Length > 0)
+            {
+                string content = TryReadPromptFile(file);
+                if (content != null)
+                {
+                    var vars = new Dictionary<string, string> { ["{stereo}"] = StereoClause() };
+                    return TextUtil.ExpandTemplate(content, vars);
+                }
+            }
+            return Val(_cfgVisionPrompt);
+        }
+
+        // The stereo-vision sentence, built dynamically (the Config default bakes
+        // it in at STARTUP only — a dynamic build follows Enabled/StereoIPD live).
+        private string StereoClause()
+        {
+            if (_cfgVision == null || !_cfgVision.Value) return "";
+            return "You may have stereo vision (left+right) or a single image. If stereo, you may describe depth and relative positions. Eye separation is " +
+                (_cfgStereoIPD != null ? _cfgStereoIPD.Value.ToString() : "0.063") + " meters. ";
+        }
+
         // Send the JPEG to the vision model for a short scene caption. Uses the
         // [VisionModel] config when set; otherwise falls back to the main LLM
         // endpoint (which must then be a vision-capable model).
@@ -163,7 +203,7 @@ namespace KKLLMNPC
                 // tell *what changed* instead of describing from zero every time.
                 // Also give it the NPC's current goal so its steering suggestion is
                 // goal-driven, not just "most open space".
-                string visionText = Val(_cfgVisionPrompt) +
+                string visionText = VisionPromptBase() +
                     " Current goal: \"" + _lastThought + "\"" +
                     (_blockedInfo != null ? " Note: " + _blockedInfo + "." : "");
                 if (!string.IsNullOrEmpty(_lastVisionCaption))
@@ -190,6 +230,7 @@ namespace KKLLMNPC
                     ["temperature"] = (double)(_cfgVisTemperature != null ? _cfgVisTemperature.Value : 0.2f),
                     ["stream"] = false,
                 };
+                ApplyThinkingParams(payload);
                 string body = Json.Write(payload);
 
                 // 2 attempts but 60s each, so the worst case (60 + 1s backoff + 60)

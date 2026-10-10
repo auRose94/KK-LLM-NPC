@@ -71,6 +71,7 @@ if [ "$COMPILER" = "mcs" ]; then
       -r:"$MGMT/Assembly-CSharp.dll" \
       -r:"$MGMT/Naelstrof.PenetrationTech.dll" \
       -r:"$MGMT/com.naelstrof.orbitcam.dll" \
+      -r:"$MGMT/com.naelstrof.inflatable.dll" \
       -r:"$MGMT/NetStack.dll" \
       -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
       -r:"$MGMT/KoboldKare.ISavable.dll"
@@ -79,6 +80,8 @@ if [ "$COMPILER" = "mcs" ]; then
     # resolved relative to the plugin dir). Optional — built-in prompt is the fallback.
     [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
     [ -f system_prompt_console.txt ] && cp -f system_prompt_console.txt "$KDIR/BepInEx/plugins/system_prompt_console.txt"
+    [ -f system_prompt_vision.txt ] && cp -f system_prompt_vision.txt "$KDIR/BepInEx/plugins/system_prompt_vision.txt"
+    [ -f system_prompt_name.txt ] && cp -f system_prompt_name.txt "$KDIR/BepInEx/plugins/system_prompt_name.txt"
     # Module prompt extras (each module adds prompt_extras/<name>.txt).
     if [ -d prompt_extras ] && [ -n "$(ls -A prompt_extras/*.txt 2>/dev/null)" ]; then
       mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
@@ -108,6 +111,9 @@ elif [ "$COMPILER" = "dotnet" ]; then
     <Reference Include="com.naelstrof.orbitcam">
       <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/com.naelstrof.orbitcam.dll</HintPath>
     </Reference>
+    <Reference Include="com.naelstrof.inflatable">
+      <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/com.naelstrof.inflatable.dll</HintPath>
+    </Reference>
     <Reference Include="NetStack">
       <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/NetStack.dll</HintPath>
     </Reference>
@@ -131,6 +137,8 @@ PROJ
     dotnet build -c Release -o "$KDIR/BepInEx/plugins/"
     [ -f system_prompt_default.txt ] && cp -f system_prompt_default.txt "$KDIR/BepInEx/plugins/system_prompt_default.txt"
     [ -f system_prompt_console.txt ] && cp -f system_prompt_console.txt "$KDIR/BepInEx/plugins/system_prompt_console.txt"
+    [ -f system_prompt_vision.txt ] && cp -f system_prompt_vision.txt "$KDIR/BepInEx/plugins/system_prompt_vision.txt"
+    [ -f system_prompt_name.txt ] && cp -f system_prompt_name.txt "$KDIR/BepInEx/plugins/system_prompt_name.txt"
     if [ -d prompt_extras ] && [ -n "$(ls -A prompt_extras/*.txt 2>/dev/null)" ]; then
       mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
       cp -f prompt_extras/*.txt "$KDIR/BepInEx/plugins/prompt_extras/"

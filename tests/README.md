@@ -28,8 +28,10 @@ file can't silently never run.
 | `chat` | `test_chat_similarity.cs` | 19 | Jaccard similarity, Levenshtein ratio, fuzzy matching (6+ significant words) |
 | `console` | `test_console_shell.cs` | 90 | Console REPL parser: canonical/alias/fuzzy resolution, prose guard, prompt prefixes, headers, payload + quoted args, legacy call-style args, reply splitting (fences/bullets/mixed), help text, module `RegisterExtra` |
 | `safehttp` | `test_safehttp.cs` | 23 | Retry/backoff against a real loopback `HttpListener`: transient 5xx actually re-hits the server, permanent 4xx fails fast, error bodies surfaced, response size caps |
+| `spectate` | `test_spectate.cs` | 57 | Agent-eats-player gate (every reason reachable, zero-range guard), north-up azimuth math, size-scaled follow distance + clamps, follow-pose geometry (behind the eater at every cardinal), first-person eye offset (AI-vision convention) + third-person wall boom clamp, frame-rate-independent smoothing, spectator HUD line (hatch/no-hatch variants) |
+| `textutil` | `test_textutil.cs` | 43 | AsciiSafe, degenerate-say trimming (token/bigram runs), chat-template expansion, and viewer-relative fact hygiene (the remember gate: junk flagged, name-anchored/anchored-events pass) |
 
-**326 tests, all runnable headless, all in CI.**
+**Total: run `./run_tests.sh` — every suite must pass; it audits that no test file is unwired.**
 
 To run one suite by hand:
 

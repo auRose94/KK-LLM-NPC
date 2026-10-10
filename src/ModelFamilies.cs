@@ -274,6 +274,37 @@ namespace KKLLMNPC
         };
 
         /// <summary>
+        /// Server-facing fields that request HIDDEN-REASONING suppression, one
+        /// shape per known local server. Sent into every chat payload when
+        /// [LLM] Thinking=off (merged by NPCInstance.ApplyThinkingParams); any
+        /// field a server doesn't recognize is skipped by that server, so the
+        /// shapes coexist harmlessly:
+        ///   think=false                — Ollama (>= 0.9.3) reasoning toggle;
+        ///                                false is accepted for non-thinking
+        ///                                models too (no-op there)
+        ///   chat_template_kwargs:{...} — llama.cpp / vLLM / SGLang: feeds the
+        ///                                Qwen3-convention {enable_thinking}
+        ///                                template variable directly
+        ///   reasoning_budget=0         — llama.cpp hybrid-reasoning models
+        ///                                (0 = thinking disabled)
+        /// LM Studio / KoboldCpp expose the toggle in their model GUI; unknown
+        /// request fields are ignored there. Client-side think-strip still
+        /// catches any markers that leak anyway. Pure — unit-testable.
+        /// </summary>
+        public static System.Collections.Generic.Dictionary<string, object> ThinkingOffPayloadPart()
+        {
+            return new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["think"] = false,
+                ["chat_template_kwargs"] = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["enable_thinking"] = false,
+                },
+                ["reasoning_budget"] = 0,
+            };
+        }
+
+        /// <summary>
         /// Token-budget floor: reasoning models burn tokens on hidden reasoning
         /// BEFORE the answer, so the user's value only stands when it already covers
         /// defaultValue + the family's think headroom. Families with no reasoning
@@ -385,6 +416,212 @@ namespace KKLLMNPC
         {
             if (string.IsNullOrEmpty(reply)) return false;
             return reply.IndexOf("<" + "think", System.StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // ------------------------------------------------------------------
+        // Unmarked-CoT name salvage
+        // ------------------------------------------------------------------
+        // Some templates print the ENTIRE reasoning pass as plain text with no
+        // reasoning markers at all — StripThinkBlocks has nothing to strip, and
+        // with a tight token budget the reply dies mid-monologue so the name
+        // never appears (observed 2026-10 on local name selection: three full
+        // replies of "Here's a thinking process: 1. **Analyze the
+        // constraints:**…" each cut off mid-sentence). When the reply DID
+        // complete, the reasoning conventionally ends with a labeled or verbal
+        // conclusion, so the last trustworthy candidate can be read out of it.
+
+        /// <summary>Words reasoning text is full of — a candidate matching one
+        /// of these is the model restating the prompt (or grammar), not
+        /// answering. Includes the name-prompt's own vocabulary so echoed
+        /// constraint bullets can't pass ("Name: one kobold character",
+        /// "Gender: female.").</summary>
+        private static readonly System.Collections.Generic.HashSet<string> CoTStopwords =
+            new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+            {
+                "the","a","an","i","me","my","we","you","your","she","he","her","him","his","it",
+                "its","they","them","their","this","that","these","those","myself",
+                "is","are","am","be","been","being","was","were","will","would","shall","should",
+                "can","could","may","might","must","do","does","did","doing",
+                "to","of","and","or","in","on","with","for","from","by","at","as","if","so","but",
+                "then","than","when","what","which","who","whom","how","why","not","no","nor",
+                "out","up","down","over","under","about","into","onto",
+                "name","names","named","answer","answers","choice","choices","final","chosen",
+                "pick","picked","thinking","process","analysis","constraints","constraint",
+                "taken","use","used","using","reply","only","letter","letters","digit","digits",
+                "never","number","numbers","attached","invent","actual","kobold","kobolds",
+                "character","gender","species","personality","female","male","unknown",
+                "house","setting","drink","eat",
+            };
+
+        /// <summary>
+        /// Read the final name out of a reply that is visible chain-of-thought
+        /// with NO reasoning markers (StripThinkBlocks has nothing to strip).
+        /// Only call this on COMPLETE replies (finish_reason != "length"): a
+        /// reply cut mid-reasoning has no answer in it at all, and any
+        /// "Name: X" line it does show may have lost its tail mid-candidate.
+        /// Scans from the last line backward — reasoning ends with its
+        /// conclusion — and accepts three end-anchored shapes:
+        /// labeled ("Final Answer: Ember" / "Name is: Ember"), verbal
+        /// ("I'll call her Ember"), or bare (the very last line is a single
+        /// token after markdown/list markers are stripped). Constraint
+        /// restatements can't slip through: every shape is end-of-line
+        /// anchored, and candidates matching prompt-echo stopwords, already-
+        /// taken names, or the species unit label are dropped.
+        /// Pure — unit-testable (tests/test_modelfamilies.cs).
+        /// </summary>
+        public static string SalvageNameFromCoT(string content, string takenList, string species)
+        {
+            if (string.IsNullOrEmpty(content)) return null;
+            string[] lines = content.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+
+            var taken = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(takenList))
+                foreach (string t in takenList.Split(','))
+                {
+                    string trimmed = t.Trim();
+                    if (trimmed.Length > 0) taken.Add(trimmed);
+                }
+
+            int lastNonEmpty = -1;
+            for (int i = lines.Length - 1; i >= 0; i--)
+                if (lines[i].Trim().Length > 0) { lastNonEmpty = i; break; }
+
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                string line = lines[i].Trim();
+                if (line.Length == 0) continue;
+                string candidate = ValidSalvageCandidate(LabeledAnswerCandidate(line), taken, species);
+                if (candidate != null) return candidate;
+                candidate = ValidSalvageCandidate(VerbalAnswerCandidate(line), taken, species);
+                if (candidate != null) return candidate;
+                if (i == lastNonEmpty)
+                {
+                    candidate = ValidSalvageCandidate(BareTokenCandidate(line), taken, species);
+                    if (candidate != null) return candidate;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>True when candidate is the species word (± digits/hyphen
+        /// tail — "Kobold", "Kobold2", "Deuzear-3"): a unit label, not a name.
+        /// Single source of truth for the Llm-side validator and the salvage
+        /// filter. Pure.</summary>
+        public static bool IsSpeciesUnitLabel(string candidate, string species)
+        {
+            if (string.IsNullOrEmpty(candidate) || string.IsNullOrEmpty(species)) return false;
+            string spLower = species.ToLowerInvariant();
+            if (spLower.Length == 0) return false;
+            if (!candidate.ToLowerInvariant().StartsWith(spLower, System.StringComparison.Ordinal)) return false;
+            string tail = candidate.Substring(spLower.Length).TrimStart('-');
+            return tail.Length == 0 || System.Text.RegularExpressions.Regex.IsMatch(tail, "^[0-9]+$");
+        }
+
+        private static string ValidSalvageCandidate(string candidate,
+            System.Collections.Generic.HashSet<string> taken, string species)
+        {
+            if (candidate == null || candidate.Length < 2 || candidate.Length > 12) return null;
+            if (!System.Text.RegularExpressions.Regex.IsMatch(candidate, "^[a-zA-Z0-9]+$")) return null;
+            if (CoTStopwords.Contains(candidate)) return null;
+            if (taken.Contains(candidate)) return null;
+            if (IsSpeciesUnitLabel(candidate, species)) return null;
+            return candidate;
+        }
+
+        /// <summary>Candidate after the LAST ':' or '=' when the heading's
+        /// last word is a label (name/answer/choice/pick/final) and the rest
+        /// of the line is soft junk. Null otherwise.</summary>
+        private static string LabeledAnswerCandidate(string line)
+        {
+            int colon = line.LastIndexOf(':');
+            int eq = line.LastIndexOf('=');
+            int sep = colon > eq ? colon : eq;
+            if (sep < 1) return null;
+            string head = line.Substring(0, sep).Trim().TrimEnd('*', '"', '\'');
+            // Drop trailing copulas so "Name is:" / "Name will be:" still count
+            // as labeled headings.
+            head = System.Text.RegularExpressions.Regex.Replace(
+                head, @"(\s+(?:is|will|be|am|'ll|to\s+be))+\s*$", "",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                    | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            string label = LastWord(head);
+            if (label == null) return null;
+            switch (label.ToLowerInvariant())
+            {
+                case "name":
+                case "answer":
+                case "choice":
+                case "pick":
+                case "final":
+                    break;
+                default:
+                    return null;
+            }
+            return TrailingTokenCandidate(line.Substring(sep + 1));
+        }
+
+        /// <summary>Candidate from a "call her Ember" / "named him Puff" shape,
+        /// verb + pronoun + candidate, end-of-line anchored. Null otherwise.</summary>
+        private static string VerbalAnswerCandidate(string line)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(line,
+                @"(?:call|calls|calling|called|named|naming|name)\s+" +
+                @"(?:her|him|them|it|myself|this\s+one|this\s+kobold|the\s+kobold|the\s+little\s+one)\s+" +
+                @"[""']?([A-Za-z0-9]{2,12})[""']?[\s.,!;:\-*""']*$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                    | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            if (!match.Success) return null;
+            return match.Groups[1].Value;
+        }
+
+        /// <summary>Candidate when the line is one bare token after markdown
+        /// and list markers are stripped ("… 2. something short" / "Puddle").
+        /// Null otherwise.</summary>
+        private static string BareTokenCandidate(string line)
+        {
+            line = System.Text.RegularExpressions.Regex.Replace(
+                line, @"^\s*(?:[-*>]+|[0-9]{1,3}[.)])\s*", "");
+            line = line.Replace("*", "").Replace("_", "").Replace("\"", "").Replace("'", "").Trim();
+            if (line.Length < 2 || line.Length > 12) return null;
+            for (int i = 0; i < line.Length; i++)
+                if (!char.IsLetterOrDigit(line[i])) return null;
+            return line;
+        }
+
+        /// <summary>First alphanumeric token of the tail, accepted ONLY when
+        /// the remainder is quote/bold/punctuation — mid-sentence candidates
+        /// ("Name: one kobold character") fail this and return null.</summary>
+        private static string TrailingTokenCandidate(string tail)
+        {
+            tail = tail.Trim();
+            int start = 0;
+            while (start < tail.Length && !char.IsLetterOrDigit(tail[start])) start++;
+            int end = start;
+            while (end < tail.Length && char.IsLetterOrDigit(tail[end])) end++;
+            if (end == start) return null;
+            string rest = tail.Substring(end).Trim();
+            for (int i = 0; i < rest.Length; i++)
+            {
+                char c = rest[i];
+                if (char.IsLetterOrDigit(c)) return null;
+                if (c == '.' && i + 1 < rest.Length && char.IsLetterOrDigit(rest[i + 1])) return null;
+            }
+            return tail.Substring(start, end - start);
+        }
+
+        /// <summary>Last word of s, trailing non-alphanumeric characters
+        /// (bold markers, closing parens, colons) dropped. Null when s holds
+        /// no word at all.</summary>
+        private static string LastWord(string s)
+        {
+            s = s.Trim();
+            if (s.Length == 0) return null;
+            int i = s.Length - 1;
+            while (i >= 0 && !char.IsLetterOrDigit(s[i])) i--;
+            if (i < 0) return null;
+            int j = i;
+            while (j >= 0 && (char.IsLetterOrDigit(s[j]) || s[j] == '-')) j--;
+            return s.Substring(j + 1, i - j);
         }
     }
 }

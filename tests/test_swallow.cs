@@ -157,6 +157,43 @@ internal static class TestSwallow
         Eq(false, SwallowLogic.IsOnOrAboveHead(0.4f, 1.0f), "well below the head → shoved from underneath, not a head-shove");
         Eq(false, SwallowLogic.IsOnOrAboveHead(0f, 1.0f), "at the receiver's feet → no head-shove");
 
+        // ---- Grow sex genes (curves/groin absorption) ----
+        // Busty female meal into a flat-chested, dickless male eater: breasts grow by
+        // the fraction, no groin change.
+        var sx1 = SwallowLogic.GrowSexGenes(0, 2.5f, 0f, 0f, 0, 15f, 0f, 0f, 0f, 0.1f);
+        True(sx1 != null && sx1.BreastsGrew && !sx1.DickGrew && !sx1.DickGained, "busty meal → breasts grow only");
+        Near(4f, sx1.BreastSize, "breast gain = eater 2.5 + 10% of 15 → 4.0");
+        // Flat meal on every curve: nothing changes → null (caller applies no genes).
+        Eq(null, SwallowLogic.GrowSexGenes(0, 2.5f, 0f, 0f, 0, 0f, 0f, 0f, 0f, 0.1f),
+            "flat dickless meal → nothing to apply");
+        // A zero percent also absorbs nothing.
+        Eq(null, SwallowLogic.GrowSexGenes(0, 2.5f, 0f, 0f, 0, 20f, 0f, 0f, 0f, 0f),
+            "0% take → nothing to apply");
+        // The fraction is clamped both ways.
+        Near(5f, SwallowLogic.GrowSexGenes(0, 2.5f, 0f, 0f, 0, 2.5f, 0f, 0f, 0f, 2f).BreastSize,
+            "frac > 1 clamps to a full 100% take");
+        // Two equipped groins: the eater's dick grows by the meal's (length + thickness
+        // together), the equip id is untouched.
+        var sx2 = SwallowLogic.GrowSexGenes(1, 5f, 12f, 2f, 2, 0f, 20f, 4f, 9f, 0.5f);
+        True(sx2 != null && sx2.DickGrew && !sx2.DickGained && !sx2.BreastsGrew, "dicked eater + dicked meal → own dick grows");
+        Near(22f, sx2.DickSize, "dick length = 12 + 50% of 20 → 22");
+        Near(4f, sx2.DickThickness, "dick thickness = 2 + 50% of 4 → 4");
+        Eq(0, (int)sx2.DickEquip, "no equip change when the eater already had a dick");
+        // A dickless eater that ate a dick-having victim GAINS the groin wholesale:
+        // equip id copied, sizes copied exactly (no fraction stub).
+        var sx3 = SwallowLogic.GrowSexGenes(0, 2.5f, 0f, 0f, 7, 0f, 18f, 3f, 9f, 0.1f);
+        True(sx3 != null && sx3.DickGained && !sx3.DickGrew, "dickless eater's gain is wholesale, not growth");
+        Near(18f, sx3.DickSize, "gained length = the victim's exactly");
+        Near(3f, sx3.DickThickness, "gained thickness = the victim's exactly");
+        Near(9f, sx3.BallSize, "balls come with the groin");
+        Eq(7, (int)sx3.DickEquip, "gained equip id = the victim's");
+        // A dickless meal never strips or grows the eater's existing dick.
+        Eq(null, SwallowLogic.GrowSexGenes(4, 0f, 15f, 2f, 0, 0f, 0f, 0f, 0f, 0.1f),
+            "dickless meal → the eater's own dick is untouched");
+        // Negative fractional input can't invert a take (clamped to 0 → nothing applies).
+        Eq(null, SwallowLogic.GrowSexGenes(0, 2.5f, 0f, 0f, 0, 5f, 0f, 0f, 0f, -0.5f),
+            "negative frac clamps to 0 — no shrinking takes");
+
         if (_failed == 0) Console.WriteLine("test_swallow: all OK");
         else Console.WriteLine("test_swallow: " + _failed + " failure(s)");
         Environment.Exit(_failed);

@@ -8,6 +8,264 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The nest lay gate now names the REAL blocker — the swallowed-egg birth loop closes.**
+  The game's lay rule is `egg > 5ml AND energy > 1` (OvipositionSpot.CanUse), but every
+  refusal channel used to phrase the whole thing as "belly not full": a nest rejected an
+  eater carrying a poured guest-egg (20ml, plenty) only because ENERGY was ≤1, and the
+  model was told it wasn't full — so it decided the check was broken, the player saw the
+  same and assumed a bug ("use the OviStation anyway"), and the eater drifted to a play
+  station to "make eggs" — which produced nothing, ever. Fixes, so a swallowed person
+  actually comes back: the go_to/interact nest gates split into `belly_not_full`
+  ("you carry Xml egg — a nest needs >5ml; egg reagent comes ONLY from eating/swallowing")
+  and `out_of_energy` ("you carry Xml egg — that IS enough — but energy is Y and a nest
+  lays only above 1: eat food (or bed-rest) first; nothing else raises energy"); the
+  `needs.eggs` perception reports which side is missing ("egg is enough, but ENERGY too
+  low to lay") instead of a blanket "belly not full"; the BellyEgg completion event and
+  the eat_player outcome note now spell out the pour → NEST LAY (needs energy too) →
+  plant → hatch protocol at the moment it starts; the nest station purpose and every
+  prompt line say "needs >5ml egg AND energy >1" instead of "belly is full"; and one
+  wrong log line ("poured into the player's belly" for any eater) follows the truth now.
+- **Sex stations can't be talked into energy or egg duty, and a two-slot station isn't
+  a solo machine.** Every prompt surface (act built-ins in Main.cs + `system_prompt_default.txt`,
+  console built-ins in Console.cs + `system_prompt_console.txt`, in exact pairs) now says
+  plainly: stimulation/sex/play NEVER create energy or egg reagent — food (metabolized)
+  and bed rest are the ONLY energy sources; egg reagent only arrives from eating/swallowing;
+  and a TWO-SLOT station (play/breeding) does NOTHING with one body in it — no stimulation,
+  no egg, no energy — so enter one alone only on purpose (waiting to be topped) and exit
+  when the partner isn't coming instead of camping. Same-day fix for the eaten-player
+  session where the eater hopped between a play station and the nest on faith alone.
+- **Grow-mode gene absorption — curves and groin (`SwallowGrowSex`, on with the other Grow toggles).**
+  Absorbing someone in `SwallowEffect=Grow` now also takes their secondary sex genes, not
+  just size/strength: the eater's `breastSize` += `SwallowGrowPercent`% of the meal's; a dick
+  the eater already has grows by the same % (length + thickness together); and a victim's dick
+  on a dickless eater is GAINED whole — their equip id plus their dick/ball sizes copied
+  exactly (10% of a dick is invisible, so a gained groin transfers without sampling).
+  Everything flows through the game's own `SetGenes`, so new curves or a newly grown dick
+  render on the body the moment digestion completes — on AI kobolds and on the player's own
+  body (self-eat) alike. The pure decision table lives in `SwallowLogic.GrowSexGenes` (tested
+  in the `swallow` suite); every narration channel was made honest about it: the eaten one's
+  swallow promise now lists what is actually being taken (the three toggles), the eater's
+  completion world event names its own body changes (the generic fanout deliberately skips
+  that instance), and the digest-awareness `belly` anchor line says "size, curves, groin".
+- **The [limit] STALL — the real "won't navigate" bug, diagnosed LIVE through the new
+  web UI.** Watching an actual spectating agent's terminal showed the whole failure loop:
+  the turn's command budget (12/cycle, shared across reply rounds) got eaten by repeated
+  `echo`+`sonar`+`ls`, then the model's `sleep` was refused by the same budget while the
+  message it just received said "sleep to continue later" — a self-contradiction the weak
+  model fell into FOREVER (turn after turn of "[limit] … sleep": zero `cd`s, zero
+  walks, goal never cleared). Four fixes: (1) `sleep` is now ALWAYS honored at the limit
+  (it's the turn terminator the prompts tell the model to send); (2) a suppressed
+  echo/emote returns its budget slot (repeating speech no longer burns actions);
+  (3) once the limit hits, the turn ENDS that round instead of asking the model again
+  inside the same exhausted turn (the old behavior printed "[limit]" over and over);
+  (4) `FmtResult` renders arrays/lists as joined text — the mysterious `System.Object[]`
+  the model received for some command output can no longer reach it in that form.
+  Also visible in that live session and NOT yet fixed: the spectate-session goal was
+  never `goal done`-ed after the swallow (the agent literally cannot act until this
+  build) — expect the new build to unstick it. A second live-session failure
+  shape — `cat facts` returning "error: Method has zero rva" (a mono invoke error with no
+  code-level cause in the CatFacts path — it deterministically blocked the agent from
+  reading `player_wants`) — is now INSTRUMENTED: the console's catch logs the exception
+  TYPE + STACK to the BepInEx log (tail visible in /api/state), so the next occurrence
+  names its real culprit.
+- **DLL hot-reload NEVER fired on this setup — fixed with a write-time poll.** The game
+  install is an SMB network drive (`S:\`), and `FileSystemWatcher` does not report
+  changes on shares: `build.sh` deploys silently never hot-reloaded. Update now polls the
+  plugin file's LastWriteTimeUtc (>1s delta → same queued-restart path as the watcher);
+  deploys hot-reload from the NEXT game launch onward. (The current session predates this
+  build and still needs one manual restart to pick up all of the above.)
+- **Think-only STALL auto-retry (round 4 — the 'stuck standing in thought with no action').**
+  The playtest's dominant failure: glm-4.6v-flash streamed reasoning_content ("Wait"/"Okay")
+  with EMPTY content, burned its whole token budget on hidden CoT, and the turn did
+  nothing — repeatedly. Now `PostChatPayload` detects the shape (200-OK + reasoning_content
+  + empty content) and re-posts ONCE with the token budget QUADRUPLED (cap 16384) in the
+  same tick (act + console paths share the POST code); the next-turn hint remains as the
+  second line of defense.
+- **Fact hygiene round 2 — the junk classifier went full-spectrum (stale goals, stale
+  object states, stale landmark orientation data, and still-queryable body states were
+  filling the fact ring).** `TextUtil.JunkFactReason` (pure, suite `textutil` → 63 asserts)
+  classifies now: `goalish_fact` (goal:…/my goal/… — the goal SLOT owes the plan;
+  goal-facts are why cleared goals lingered), `self_state_fact` (i am in/near/at, i am
+  hungry/tired/horny, i have 3 eggs — ALL live-queryable via ls/status/sonar/cat needs/
+  feel), `stale_state_fact` (the door is open / the can was empty — transient; read live),
+  `stale_relative_fact` (round 1). The remember tool refuses per-class with a note naming
+  the live surface; `RememberFact` drops stragglers from every writer (ask answers,
+  chat-derived). Persona/lessons/durable places/past-tense events all still pass.
+- **Egg delivery narrated as the JOB it is (an egg failed to travel from the station to
+  the plot).** The `[lay]` completion event no longer says 'a real egg item now' — it
+  hands over the concrete flow: the egg sits at your feet → get/grab → cd a farm plot
+  (`cat places` lists plots map-wide w/ ids) → set on dirt facing it → `use id:N` / `plant`,
+  never sell/eat/leave it, and a swallowed-PLAYER egg = deliver promptly.
+- **WebUI — the debug console is now a browser page.** `src/WebUI.cs`: loopback HTTP
+  (`[Web] Enabled` default ON, `[Web] Port` 8338 — 127.0.0.1 ONLY, read-only):
+  `/` = a single-file dark UI (vanilla JS, 2s polling; one tab per instance: goal/
+  facts/history/terminal/thread state; boxes for spectate status, mod-log tail,
+  AI-reports tail), `/api/state` = the JSON the page polls, `/api/reports` = the report
+  log tail. Everything the handler thread reads is lock-guarded strings/volatiles — NO
+  Unity object reads — so it answers even while the main thread is WEDGED (the freeze
+  forensics case). The dev assistant can fetch it too: `curl http://127.0.0.1:8338/api/
+  state` mid-session. The F6 IMGUI overlay stays as the in-game glance.
+  - *Fix (same day, before first successful boot):* the original `WebUI.Ensure` call sat
+    in Awake BEFORE its `[Web]` config binds — null entry, silent bail, server never
+    started. The call moved into Update (after binds): idempotent, config-guaranteed, and
+    it now also stops/re-binds within a frame when `[Web] Enabled/Port` changes at runtime.
+- **Key places: the map's survival machines known from boot (playtest round 3).** User:
+  the agent can't find the egg-laying station/bed/farm patches/water because they're far
+  from spawn and a small model "can't navigate the scene well enough" on its own. Three
+  root fixes:
+  - *The resolver's range wall was the real blocker for travel:* `FindPlaceByName`
+    (`cd nest` / `go_to name`) searched a **60m OverlapSphere** — beyond it,
+    "unknown_place". It now resolves names SCENE-WIDE against the existing `StationList`
+    (every GenericUsable) **plus** `SoilTile` farm plots and `WateringCanWeapon` cans
+    (which were never searchable at all), with kind aliases (`cd farm`/`soil`/`plot`,
+    `cd water`/`watering`/`can`) so a kind word finds its machine however far. The old
+    collider-scratch buffer is gone (it also truncated silently in busy scenes).
+  - *New `places` directory (perception + `cat places` + BOOT LINE):* every nest (egg
+    laying), bed (rest), farm plot (planting) and watering can (water source) on the map
+    with addr (Kind#SW22 style), distance, world bearing, landmark hints for stations,
+    live slot text, a stable `id`, and `:busy` — sorted nearest-first, 5s-cached shared
+    scan (`FindObjectsOfType<SoilTile/WateringCanWeapon>` sits alongside the existing
+    GenericUsable cache; both are map-wide). The console BOOT LINE now carries
+    `key places: ...` so the knowledge exists the moment the body does — the "from the
+    beginning" ask — and `cat places` reprints it on demand.
+  - *Dead-end notes now navigate:* `water` with no can in reach reports the nearest can
+    MAP-WIDE (addr + distance + bearing, "cd water, then try again near it") instead of
+    "no watering can nearby"; `unknown_place` says to check `cat places`/`ls`. Prompts
+    teach it in all four sites (act TOOLS/perception/NAVIGATION × built-in + default.txt;
+    console persona + console.txt NAVIGATION rewritten: `too_far` is answered by
+    `cat places`, not by giving up).
+- **Spectate: the agent can EAT THE PLAYER — and the player is forced to watch.**
+  New opt-in pair `[LittleTreats] SwallowAgentEat` (default OFF) + `SwallowAgentEatRange`
+  (default 2.5m). The feature inverts the swallow-vore direction:
+  - *Playtest round 2 fix — THE CAMERA HOOK WAS DEAD: KoboldKare renders under URP, and
+    `Camera.onPreCull` is not invoked under the Scriptable Render Pipeline — both playtests
+    left the taken-over view frozen at a degenerate configless OrbitCamera pose (the user's
+    "spectate still sends me to the far corner of the map"). The writer now hangs on
+    `RenderPipelineManager.beginCameraRendering` (per-camera pre-cull under URP; verified by
+    reflection probe: CoreModule has ScriptableRenderContext + begin/endCameraRendering
+    `Action<ctx, Camera>`), with `onPreCull` kept as built-in-pipeline insurance, and a
+    one-shot "spectate: camera override live" log line so the hook's health is visible on
+    the very first spectate.*
+  - *Fact hygiene — ONLY USEFUL FACTS (the facts machine filled with 'object to
+    left'-style junk that goes stale the moment anything moves). Three layers:* (1) the
+    mod's own landmark auto-remember (`"kind is front-right here"` on every spotting,
+    Senses.cs) is REMOVED — it was the junk factory, and its text had no category dedupe
+    so it churned the 24-slot fact ring; (2) the `remember` tool (act `remember(mem=)`,
+    console `remember <fact>`) now REFUSES viewer-relative facts — `TextUtil.IsViewer-
+    RelativeFact` (pure, suite `textutil` +22 asserts) flags "(to/on/at/from)(my/the)?(left|
+    right)", "left/right/behind/ahead of me", "next to me", "my left side", bare "ahead/
+    behind" and "is/are here" — while name-anchored facts pass ("in front of the house",
+    "left of the fireplace", "bed is upstairs", lessons, past-tense events); the refusal
+    note teaches the restatement ("facts are STICKY knowledge — name the thing and its
+    durable place"); (3) `NPCInstance.RememberFact` silently drops any stragglers from the
+    other writers (ask answers, chat-derived text) with a debug log. Prompts teach it too
+    (act TOOLS remember description in Main.cs + system_prompt_default.txt; console
+    remember Help line + console.txt WORLD paragraph).
+  - *The act.* Every mod-driven NPC gains the **`eat_player`** module tool (console mode:
+    `eat_player`; act mode: a JSON tool in the schema). When the local player is within
+    range and the eater's mouth is empty, they swallow the player WHOLE through the normal
+    swallow pipeline — pull-in (~2.2s), hidden once fully swallowed, digest
+    (`SwallowDigestSeconds`), settle — exactly like a kobold victim. The tool result, the
+    eater's first-person event, the world fanout, and the shared `belly`/console anchors
+    are all player-aware ("you just swallowed the PLAYER WHOLE — their camera is gone,
+    they WATCH everything through your body's eyes…"). The `swallow abort` chat commands
+    now honor the feature even when `SwallowEnabled` is off, and also release a **parked**
+    player (below).
+  - *Camera takeover.* From the swallow's first frame the player's camera is taken over
+    and never released until the cycle ends: `SpectateManager` writes the follow pose on
+    **`Camera.onPreCull`** — last-writer before render, so OrbitCamera configurations,
+    camera hotkeys, mouse look and pause can never win a frame back, and restoring costs
+    nothing (the game's own config stack is never touched). First frame snaps; after that
+    it settles smoothly. NEW default after the first playtest: **FirstPerson — through the
+    eater's own eyes** (`SwallowAgentEatPOV`): position = the eater's head bone at the AI-vision eye offset
+    (`[Senses] CameraForward`, TransformPoint so grown eaters scale cleanly), rotation =
+    the head's, nearClip swapped to `[Senses] CameraNearClip` and restored on release —
+    you watch literally what the AI watches. ThirdPerson keeps the size-scaled orbit and
+    gained a wall-safe boom (linecast head→wanted-spot pulls the camera in when
+    furniture/walls sit between you — the playtest's eater sat in a cramped bathtub).
+  - *The parked body.* The player body is NEVER destroyed (that hits the game's death
+    machinery and breaks `TagObject`): after consume it parks inside the eater — pinned,
+    hidden, colliders off — and FOLLOWS the eater's belly position each tick, so sonar/
+    `cat player`/trail-watching stay honest while they watch. Input is suppressed
+    (`SetMovementEnabled(false)` + reflection-clearing the grab/rotate/hip/switch flags
+    every tick); game chat, ESC menus and the abort command still work. An
+    **always-on HUD** (independent of the F6 overlay) tells the spectator who they're
+    inside, what they're waiting for, and the escape command.
+  - *Hatch (= rebirth).* Egg mode: the eater's lay pops the egg exactly as before and the
+    rebirth registry is marked `IsPlayer`; when the plant chain spawns that body,
+    `SpectateManager.HatchRevive` copies the hatched genes onto the parked player body
+    (`SetGenes`), revives it at the hatch spot, schedules the duplicate NPC body for
+    despawn (deferred ~0.5s — destroying mid-`OnPhotonInstantiate` is unsafe), and hands
+    the camera + movement back. BellyEgg mode rides the `OnOviposition` relay so the
+    nest-laid egg's link keeps `IsPlayer`. Grow/Destroy park without a hatch pending —
+    the HUD says so and the only exits are abort or leaving the world.
+  - *Lifecycle safety.* Eater body destroyed mid-watch → the player is released at the
+    eater's last known position; scene leave (`LeavingWorld`) and DLL-restart
+    (`RestartPlugin`) release spectate; Photon-refused despawns retry up to 20×.
+  - *Pure core + tests.* `src/SpectateLogic.cs` (gate with machine-readable reasons,
+    azimuth math, follow distance/pose, smoothing, HUD lines) is Unity-free — new suite
+    `spectate` (48 asserts; run_tests.sh + tests/README updated). `check_build.sh` was
+    also missing the `com.naelstrof.orbitcam`/`com.naelstrof.inflatable`/`NetStack`
+    references that `build.sh` already had (drifted during the swallow work) — fixed so
+    the semantic check compiles clean again: 45 files, 0 errors, 0 warnings.
+  - *Prompts in sync* (Main.cs built-ins + system_prompt_default.txt + Console.cs
+    built-in + system_prompt_console.txt): act TOOLS list gained `eat_player`, both modes
+    gained an EATING THE PLAYER paragraph — the eater is told the player is a person in
+    their care, to keep living their ordinary life (that IS the show) and to talk to them.
+    Playtest gap closed: GLM small-tier misread "try to eat me" as an invitation to play
+    (bath stations, "you mount me") — all four prompt sites now say explicitly that a
+    player ASKING to be eaten means `eat_player`, get close and run it, NOT an invitation
+    to play.
+- **Swallow: the EATER is aware now — and stations narrate WHO left.** Two awareness
+  gaps closed.
+  - *Eater awareness (swallow flow).* `SwallowState` now carries the EATER's own mind
+    (`EaterNpc`): a swallow BEGIN delivers a direct first-person line to a driven eater
+    ("you just swallowed X WHOLE — they are inside you now…") — self-swallows previously
+    reached the eater only as a third-person fanout that read like watching yourself from
+    outside; digest milestones mirror to them ("your stomach churns around X — they are in
+    there, alive… ~Ns left"); every outcome lands first-person (Egg: "you laid an EGG —
+    plant it in soil…"; BellyEgg: "egg reagent + genes inside YOUR belly — sit on a
+    nest"; Grow: the existing `[absorb]` line; Destroy: "nothing left of them"), the
+    mid-swallow ABORT is reported from the eater's side too (placement corrected to
+    "at the eater's feet" everywhere — narrator now uses `BodyLabel(st.Eater)` instead of
+    assuming the player), and a live `you have someone INSIDE YOU: …` line rides the
+    state anchors every turn (console anchor line next to the sex line; act perception
+    `belly` key) via `SwallowManager.BellyGuestText`. `FanoutWorldEventExcept` is new:
+    the generic "you watch X…" spectator copies now skip the eater/victim minds that get
+    dedicated first-person lines.
+  - *[station] departure events.* `StationLeaveWatch` (Main.Update heartbeat, ~1/s, main
+    thread) snapshots the occupants of every `IAnimationStationSet` within the 14m
+    perception radius; a snapshot diff narrates the transition ("[station] the player
+    left the bed station — you are on it alone now" / "… near you"). Joins are
+    deliberately not evented (the per-turn slots text already shows them the same turn);
+    the NPC's own exits aren't narrated to themselves.
+- **`[LLM] Thinking=off` — disable the hidden reasoning pass so the NPC acts faster.**
+  Reasoning families burn their entire token floor on invisible chain-of-thought before
+  every visible answer (the struggled-trio note in docs/MODELS.md: thinking families take
+  "slow/lost turns"). The new config sends server-native suppression fields into EVERY
+  chat payload — `think=false` (Ollama), `chat_template_kwargs {enable_thinking:false}`
+  (llama.cpp / vLLM / SGLang, Qwen3-style templates), `reasoning_budget=0` (llama.cpp
+  hybrid models) — wired into all six call sites (act loop, console REPL, comment invite,
+  self-ask, name selection, vision caption). Fields a server doesn't recognize are
+  skipped server-side, so the shapes coexist; LM Studio / KoboldCpp users get the same
+  effect from their per-model GUI. `auto` (default) never touches the payload. The
+  family token-headroom floors and the client-side think-strip stay in place, so an
+  ignored knob degrades to exactly today's behavior; leftover reasoning markers are
+  still stripped silently. Fields table is the pure `ModelFamilies.ThinkingOffPayloadPart`
+  (unit-tested) — kept in sync with this entry.
+- **Per-mode chat-template files.** Each LLM call mode ships and reads an editable
+  chat-template file next to the DLL. The act loop (`[LLM] SystemPromptFile` →
+  `system_prompt_default.txt`) and console REPL (`[Console] SystemPromptFile` →
+  `system_prompt_console.txt`) already did; the remaining two call modes join them:
+  the VISION CAPTION pass (`[Vision] PromptFile` → `system_prompt_vision.txt`,
+  placeholder `{stereo}` expands live from `[Vision] Enabled`/`StereoIPD` — an
+  explicitly customized `[Vision] Prompt` still wins) and the one-shot NAME prompt
+  (`[LLM] NamePromptFile` → `system_prompt_name.txt`, placeholders
+  `{gender}`/`{species}`/`{traits}`/`{taken}`). build.sh ships both new files and the
+  code built-ins must stay byte-equal with them (the standing prompt-sync-trap rule,
+  noted at both built-ins). Expansion is `TextUtil.ExpandTemplate` (pure, tested) —
+  unknown `{tokens}` pass through untouched so a hand-edited template degrades
+  gracefully instead of corrupting the prompt.
 - **Player swallow-vore — in the new opt-in [LittleTreats] config category (ALL OFF by
   default).** A Harmony prefix on `Grabber.TryDrop` turns the drop gesture into a
   swallow when enabled, the view camera points up (forward.y ≥ 0.55) and a PERSON is in
@@ -90,7 +348,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry/fact now carry the eater's label (`RebirthLink`) since the stomach owner
   isn't always the player — the reborn person's fact no longer claims "the player"
   swallowed them.
-- **North-up sonar (playtest feedback, "the map slides around").** The ASCII radar was
+
+  Playtest round 5 — laying-misread + hip rhythm: (1) EGGS ARE PENETRATORS — the game
+  pushes a laid egg out through the laying path (OvipositionSpot's spline push), and
+  loose egg props can press against a body, so `OnPenetrationTick` fired sex events
+  ("BEING PENETRATED by Egg(Clone)") and the model thought it was having sex with an
+  egg. Egg-sourced penetrators (a `Seed` in the chain — eggs are the only
+  Penetrator+Seed objects) are now routed to `HandleEggPassing`: never sex state
+  (excluded from `_pen`, so the [sex] anchor, rhythm graph, `feel` and stimulation
+  sourcing stay clean) and narrated as `[lay]` events instead — entry ("an egg is
+  pressed into / emerging from your <hole>… NOT a partner, NOT sex… no thrusting, no
+  panic"), 5s-rate-limited mid-pass, and a completion ("cleared you completely —
+  plant it in soil"). State resets on body swap/teardown. Prompt teaching added in
+  BOTH locations (Main.cs built-in + system_prompt_console.txt): [lay] = laying, not
+  sex. (2) THE THRUST was a ~10 Hz sine — faster than the animator's own 0.05s hip
+  `SmoothDamp`, which low-passed it into a tiny shiver: literally "too fast and not
+  very deep" in one bug. Strokes/s now follows intensity (1.2 + 1.8×I ≈ 2.3 at the
+  default 0.6, ~3.0 at max) and the amplitude has a felt floor (+30%) — the SmoothDamp
+  fully tracks it, so the hips visibly stroke deep and slow. The `feel` "what moves
+  it" line, the tool schema + result (`strokes_per_second`) and the prompts teach the
+  new pace. Lesson for future hip work: keep any SetHipVector modulation under ~3 Hz
+  or the animator's SmoothDamp eats it.
+
+  Playtest round 6 — THE LOCKUP + blind forensics (2026-10-09 log): a session froze
+  with 9 identical "LLM loop: System.TimeoutException: main thread timeout (5000ms)"
+  lines and NOTHING from the hang watcher. The freeze began right after a successful
+  chat turn whose LLM server hiccuped ("LLM raw response (empty content)" with
+  reasoning chunks streaming, then `HTTP 400 — {"error":"Engine protocol predict
+  request failed: fetch failed"}`) — LM Studio-side trouble in the same window; the
+  wedge cause on the main thread UNNAMED because **THE HANG WATCHER WAS BLIND**: it
+  compared two Time.unscaledTime reads, and unscaledTime only advances on the main
+  thread, so when the game truly hung the watchdog's own readings froze with it and
+  the gap never grew. Fixes: (1) main-thread heartbeats now stamp both game-time and
+  WALL CLOCK (`MainClock`/`LastMainTickWallTick` via one `Beat()` helper) — the
+  background watchdog compares wall clock, so a real hang reports the stuck PHASE
+  every second; (2) `RunOnMainThread` timeouts throw with the diagnosis inline
+  ("main thread timeout (5000ms) — main thread last beat 47.0s ago, in phase
+  'Swallow.Tick'") so even the LLM loop's spam lines name the wedged section;
+  (3) the LLM loop backs off in 10s cycles (+ one "stuck, waiting it out" line) after
+  3 consecutive marshal timeouts instead of hammering every 2s; the counter un-arms
+  on the first successful marshal; (4) the ladder classifies "predict request" /
+  "fetch failed" as transient_engine (retry-unchanged) — the old matcher only knew
+  "predict stream", so that engine-only failure was mis-filed as "context" and a
+  perfectly good payload got shrunken for nothing. The next wedge names itself.
+
+  Playtest round 7 — Grow mode ABSORBS memories: `SwallowEffect=Grow`
+  no longer deletes the eaten one's saved life — it POOURS INTO THE EATER: facts
+  (their knowledge — places, wants, dangers) transfer to whoever consumed them, the
+  eater's own name/persona/pronouns never touched (absorbing is not becoming). A
+  live LLM eater (force-fed NPC) gets the memories injected into their session this
+  turn ([absorb] event + plain facts — RememberFact dedupes one-slot-per
+  ':'-prefix category, so shared prefixes would collapse the set; one 'absorbed:'
+  marker fact summarizes it), persisted by their own teardown. An unclaimed eater
+  gets the merged record written under THEIR body key — a vanilla AI kobold later
+  claimed by the mod wakes up remembering the person they ate. Destroy mode keeps
+  the deletion; egg modes keep the records for rebirth. Narration updated (the
+  eaten one is told their memories live on in the eater; fanouts say it too).
+  DISCOVERED while wiring this — pre-existing key-collision risk: `BodyKey` =
+  CleanName(object name), and freshly-spawned Photon kobolds are ALL "Kobold(Clone)"
+  → they all share the "Kobold" memory key (observed: a `Kobold.json` + two "Soot"
+  saves under different keys on disk); the live-name restoration guard
+  masks double-claims, but plain-prefab bodies overwrite each OTHER's saved lives.
+  Affects plain-Kobold spawns' memory saves (incl. this feature's) — needs a
+  stable per-body key (game save identity) as a follow-up.
+- **North-up sonar.** The ASCII radar was
   world-anchored in code but documented to the model as *facing-relative* ("row 0 = furthest
   forward") and only ever drew the camera-FOV cone, so every turn re-scrambled what the map
   showed and the model misread it. It is now a true sonar: a fixed 16-ray **compass sweep**
@@ -138,8 +459,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Compass.cs`** — pure-C# world-fixed compass helpers (north = +Z, east = +X) shared by
   the sonar, station bearings, facing text and the arrow glyphs, with a new `compass` unit
   suite (9 suites total now).
-- **Watched, not memorized: the player's current activity (playtest feedback, "know the
-  objective without a fact").** The game has no quest list to read, so the AI now reads the
+- **Watched, not memorized: the player's current activity.** The game has no quest list to read, so the AI now reads the
   player the way other players do — by looking. Every 0.4s (main thread, plugin tick) the
   host player is snapshotted: position, heading, speed, station (via the same
   `CharacterControllerAnimator.IsAnimating()` the NPC body uses), ragdolled state, and what
@@ -179,7 +499,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   box from the `MailMachine` sell danger; the AI can `use mailbox` / `interact` to GET
   mail for its player. Prompts in all three locations describe both objective layers
   (scroll letters + player_wants + player_activity watching).
-- **Hands the AI can finally see (playtest feedback, "the AI can't let go of a player").**
+- **Hands the AI can finally see (an AI couldn't let go of a player).**
   Research into the game source settled the mechanics: `Grabber` holds grabs on a physics
   spring anchored ~1m in front of the view (DriverConstraint + a hip joint for kobold
   victims), grab takes whatever's in a ~1m bubble in front of the face, `TryActivate` is
@@ -208,6 +528,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a tenderly-not-sellables rule.
 
 ### Fixed
+- **Name selection survives unmarked chain-of-thought replies.** Some templates print
+  the whole reasoning pass as PLAIN text ("Here's a thinking process: 1. …") — no
+  reasoning markers for the stripper to see — and with the old fixed 320-token budget
+  every reply died mid-monologue, so a kobold burned all three name attempts and fell
+  back to the mechanical name every time (observed 2026-10 across three consecutive
+  logs). Three layers now: `ChooseNameWithLLM` reads `finish_reason` and retries with a
+  bigger budget per attempt (320/960/1920 on thinking families, 128/384/768 otherwise)
+  so the monologue can complete; the prompt forbids thinking out loud but allows a
+  reasoning reply that ENDS with a `Name: <name>` line; and a completed non-name reply
+  is mined for the conclusion (`ModelFamilies.SalvageNameFromCoT`: "Final Answer: X" /
+  "Name is: X" / "I'll call her X" / a bare one-word final line, last candidate wins,
+  scanned line backward). Constraint restatements can't slip through (every shape is
+  end-of-line anchored) and candidates hitting prompt-echo stopwords ("female",
+  "letters", "them"…), the taken-list, or the species unit label are dropped — the
+  unit-label check also moved into `ModelFamilies.IsSpeciesUnitLabel` as the single
+  source of truth.
 - **"Not really aware they're having sex" — console mode now has a full intimacy
   channel.** Console mode drains only chat + reagent events: being entered, withdrawn,
   and filling up reached the model only as late belly/egg numbers ("they just notice
@@ -216,7 +552,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ALSO never landed in console before); the per-turn state anchor carries a live sex
   line when anything is happening ("being penetrated (Dick: steady, 1.2 strokes/s,
   depth varying 0.2m to 0.6m, deepening)"); and the new `feel` tool (BodyControl module;
-  console: `feel`) is the on-demand detailed read the user asked for — who is inside
+  console: `feel`) is the on-demand detailed read — who is inside
   whom, the depth/rhythm curve in words (strokes/sec from the last 3s of the game's
   calculated depth values, depth range, deepening/pulling-out trend), stimulation, egg
   state, and WHAT MOVES the stimulation (your hips: thrust; the partner's pace; the

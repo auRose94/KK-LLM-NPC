@@ -245,18 +245,25 @@ namespace KKLLMNPC
             {
                 energy = F(_kobold.GetEnergy()) + "/" + F(_kobold.GetMaxEnergy()),
                 horniness = HorninessText(),
-                // Egg need is ONLY real when the belly is full (game rule: nest needs
-                // egg > 5ml). With an empty belly the nest can't work — the model used
-                // to chase nests with 0ml, so state it explicitly both ways.
+                // Egg need is ONLY real past the nest's two conditions (game rule:
+                // egg > 5ml AND energy > 1). State which side is missing — a blanket
+                // "belly not full" while carrying a poured guest-egg reads like a bug
+                // and sends the model hunting play stations for "eggs".
                 eggs = eggReady
-                    ? F(eggVol) + "ml READY_TO_LAY — belly full, find a nest now"
-                    : F(eggVol) + "ml belly not full — a nest WON'T work yet; seek a nest ONLY when it says READY_TO_LAY",
+                    ? F(eggVol) + "ml READY_TO_LAY — find a nest now (laying spends energy)"
+                    : eggVol > 5f
+                        ? F(eggVol) + "ml egg is enough, but your ENERGY is too low to lay (nests need >1) — eat/rest first, skip play stations (they raise nothing)"
+                        : F(eggVol) + "ml — not enough egg for a nest (>5ml; egg comes from eating/swallow-pours, never from play) — seek a nest ONLY when this says READY_TO_LAY",
                 crouch = F(_crouch),
                 // The game ships no day/night clock (verified in the game source) —
                 // "how long has this body been awake in this session" is the honest
                 // stand-in a model can reason with ("I've been here 2h, time to nap").
                 awake = UptimeText(),
             };
+            // Swallow eater awareness (opt-in [LittleTreats] flow): who is digesting
+            // inside this body right now, with progress + pending fate. Null when
+            // the belly holds nobody, so the key is omitted entirely.
+            try { string belly = SwallowManager.BellyGuestText(_kobold); if (belly != null) result["belly"] = belly; } catch (Exception) { }
             // Shared full-scene walk map state (all agents): building %, or ready.
             try { result["map"] = WorldMap.StatusText(); } catch (Exception) { }
             // Follow state (if active the body stays near the host player). Breaking
@@ -314,6 +321,11 @@ namespace KKLLMNPC
             // rays can't see them — the model's "map" of stations in this world.
             var stations = DescribeStations();
             if (stations.Count > 0) result["stations"] = stations;
+            // KEY PLACES: the survival machines (nest/bed/farm plot/watering can)
+            // listed map-wide in one tight list the moment the body exists — small
+            // models must never have to guess that a nest exists across the map.
+            var places = KeyPlacesList();
+            if (places.Count > 0) result["places"] = places;
             string areaTxt = SpatialLayout();
             result["area"] = areaTxt;
             // Visionless fallback: the caption pass never runs (Vision.Enabled=false),
@@ -608,6 +620,22 @@ namespace KKLLMNPC
                 if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
                     body = CleanName(pp.kobold.name);
                 if (chat == null && body == null) return null;
+                // CONSUMED PLAYER TRUTH: the parked body lives AT the eater's own
+                // position — reading station activity off it makes a consuming agent
+                // conclude "the player is at/needs my play station". Say what's true:
+                // they are inside a stomach; no station can help them.
+                try
+                {
+                    if (pp != null && pp.kobold != null
+                        && SpectateManager.SpectatingEaterLabel(pp.kobold) != null)
+                        return new
+                        {
+                            chat,
+                            body,
+                            consumed_by = SpectateManager.SpectatingEaterLabel(pp.kobold),
+                        };
+                }
+                catch (Exception) { }
                 return new { chat, body };
             }
             catch (Exception) { return null; }
@@ -999,7 +1027,7 @@ namespace KKLLMNPC
             {
                 case "play": return "pleasure station — play/sex ONLY, never for resting";
                 case "bed": return "rest/sleep ONLY — NOT a play station";
-                case "nest": return "egg laying (only works when belly is full: egg > 5ml)";
+                case "nest": return "egg laying (needs >5ml egg AND energy >1 to lay)";
                 case "machine": return "mounted play/farming";
                 case "toilet": return "relief";
                 case "bath": return "clean";
@@ -1009,8 +1037,56 @@ namespace KKLLMNPC
                 case "food": return "cook/eat — drop items into blender to make edible food";
                 case "contract": return "buy to unlock a machine";
                 case "bodyswap": return "swap bodies";
+                case "farm": return "planting plot — bare soil for seeds AND planted eggs (cd here, plant, water)";
+                case "water": return "watering can — stand by it (or grab it) and use `water` on nearby plants";
                 default: return null;
             }
+        }
+
+        // ------------------------------------------------------------------
+        // TYPE-first classification ("know based on the type of MonoBehaviour
+        // attached"): display names lie — "BlenderUpgrade" reads like an upgrade
+        // and a door mesh may not say door, but the MACHINE TYPES on the object
+        // don't. Keywords run over the GO's own + one parent's MonoBehaviour type
+        // names; null = no type opinion (caller falls back to ClassifyUsable
+        // on the display name). Verified type roster (Assembly-CSharp):
+        // OvipositionSpot:GenericUsable=nest, BedMachine/UsableMachine=bed,
+        // Toilet=toilet, BreedingStation/BreedingMount=play, GenericDoor=door,
+        // ElectricBlender/SuckingMachine=food, BrainSwapperMachine=bodyswap,
+        // MailboxUsable=letterbox, SoilTile=farm, WateringCanWeapon=water.
+        // ------------------------------------------------------------------
+        internal static string ClassifyByType(GameObject go)
+        {
+            if (go == null) return null;
+            string s;
+            try
+            {
+                var names = new List<string>();
+                foreach (var mb in go.GetComponents<MonoBehaviour>())
+                    if (mb != null) names.Add(mb.GetType().Name.ToLowerInvariant());
+                var parent = go.transform.parent;
+                if (parent != null)
+                    foreach (var mb in parent.GetComponents<MonoBehaviour>())
+                        if (mb != null) names.Add(mb.GetType().Name.ToLowerInvariant());
+                if (names.Count == 0) return null;
+                s = string.Join("|", names.ToArray());
+            }
+            catch (Exception) { return null; }
+            if (s.Contains("oviposition") || s.Contains("ovi")) return "nest";
+            if (s.Contains("breeding") || s.Contains("breed") || s.Contains("actionstation")
+                || s.Contains("koboldanimationusable") || s.Contains("playstation") || s.Contains("sex")
+                || s.Contains("erotic")) return "play";
+            if (s.Contains("bedmachine") || s.Contains("sleeper") || s.Contains("bedstation") || s.Contains("bed")) return "bed";
+            if (s.Contains("toilet") || s.Contains("potty")) return "toilet";
+            if (s.Contains("adultcheckshower") || s.Contains("shower") || s.Contains("bath")) return "bath";
+            if (s.Contains("mailboxusable") || s.Contains("dragonmail")) return "mailbox";
+            if (s.Contains("brainswapper") || s.Contains("swapper")) return "bodyswap";
+            if (s.Contains("electricblender") || s.Contains("blender") || s.Contains("grinder")) return "food";
+            if (s.Contains("genericdoor") || s.Contains("stardoor") || s.Contains("freezerdoor") || s.Contains("door")) return "door";
+            if (s.Contains("constructioncontract")) return "contract";
+            if (s.Contains("soiltile")) return "farm";
+            if (s.Contains("wateringcan")) return "water";
+            return null;
         }
 
         // OverlapSphere within 14m, deduped by root, tagged: k=kobold p=player u=usable,
@@ -1081,7 +1157,9 @@ namespace KKLLMNPC
                     if (u != null)
                     {
                         nm = CleanName(nm);
-                        string kind = ClassifyUsable(nm);
+                        // TYPE-first: mesh names lie ("BlenderUpgrade" is still food),
+                        // the attached machine types don't.
+                        string kind = ClassifyByType(rootComp.gameObject) ?? ClassifyUsable(nm);
                         bool canUse = true;
                         try { canUse = u.CanUse(_kobold); } catch (Exception) { }
 
@@ -1116,8 +1194,20 @@ namespace KKLLMNPC
                         }
                         catch (Exception) { }
 
-                        info = kind + stateTag + (canUse ? "" : ":busy")
-                               + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : "");
+                        // NOT-BUILT MACHINES PITCH NOTHING (user: the model thought an
+                        // unbuilt, INVISIBLE blender had food): a not-built/needs-buy
+                        // machine offers zero service — say so instead of the purpose
+                        // text that invites feeding an empty husk.
+                        if (stateTag == ":not_built" || stateTag == ":needs_buy")
+                        {
+                            info = kind + stateTag
+                                + " (INVISIBLE husk — NOTHING usable here: no food, no service, nothing to drop in; buy its ConstructionContract and build it first)";
+                        }
+                        else
+                        {
+                            info = kind + stateTag + (canUse ? "" : ":busy")
+                                   + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : "");
+                        }
                         // Live occupancy for station machines ("slots 1/2 taken — you ARE
                         // in one") so ':busy' can't be misread as 'no room for me'.
                         try
@@ -1126,8 +1216,13 @@ namespace KKLLMNPC
                             if (slots != null) info += " | " + slots;
                         }
                         catch (Exception) { }
-                        // Landmark memory: remember where things are once seen.
-                        if (canUse) RememberFact(kind + " is " + RelBearing(d) + " here");
+                        // LANDMARK AUTO-REMEMBER REMOVED (2026-10-09, user): it stored
+                        // "kind is front-right here" — viewer-relative junk that went
+                        // stale the moment anything moved, with no category dedupe, so
+                        // it also churned the fact ring. Sticky landmark facts are the
+                        // model's job now (prompts teach naming durable places); any
+                        // viewer-relative text still reaching the store is dropped at
+                        // RememberFact (TextUtil.IsViewerRelativeFact).
                     }
                     // Stable addressable id so the model can target this exact object:
                     // go_to id:N / interact id:N. Door/usable/kobold all get one.
@@ -1443,7 +1538,7 @@ namespace KKLLMNPC
                 var minPlayer = new Dictionary<string, float>(StringComparer.Ordinal);
                 foreach (var t in stations)
                 {
-                    string kind = ClassifyUsable(t.Item2);
+                    string kind = ClassifyByType(t.Item6 != null ? t.Item6.gameObject : null) ?? ClassifyUsable(t.Item2);
                     float ds; if (!minSelf.TryGetValue(kind, out ds) || t.Item1 < ds) minSelf[kind] = t.Item1;
                     if (t.Item5 >= 0f)
                     {
@@ -1457,7 +1552,7 @@ namespace KKLLMNPC
                 {
                     var t = stations[i];
                     string nm = t.Item2;
-                    string kind = ClassifyUsable(nm);
+                    string kind = ClassifyByType(t.Item6 != null ? t.Item6.gameObject : null) ?? ClassifyUsable(nm);
                     Vector3 p = t.Item4;
                     Vector3 d = p - pos;
                     var entry = new Dictionary<string, object>
@@ -1516,6 +1611,199 @@ namespace KKLLMNPC
             }
         }
 
+        // ------------------------------------------------------------------
+        // KEY PLACES — the survival machines, scene-wide, known from boot.
+        // StationList() already scans every GenericUsable in the scene (any
+        // distance); this adds the two machines that are NOT GenericUsables —
+        // SoilTile farm plots and WateringCanWeapon water sources — and
+        // distills everything to the four kinds a small model must be able to
+        // find the moment its body exists: nest (egg-laying), bed (rest),
+        // farm (planting), water (watering can). Cached 5s like StationList;
+        // FindObjectsOfType isn't free.
+        // ------------------------------------------------------------------
+        private static List<WateringCanWeapon> _waterCanCache;
+        private static List<SoilTile> _soilTileCache;
+        private static float _keyCacheTime = -99f;
+        private static readonly object _keyLock = new object();
+
+        private static void RefreshKeyScan()
+        {
+            lock (_keyLock)
+            {
+                if (_waterCanCache != null && Time.unscaledTime - _keyCacheTime <= 5f) return;
+                try
+                {
+                    var cans = new List<WateringCanWeapon>();
+                    foreach (var w in UnityEngine.Object.FindObjectsOfType<WateringCanWeapon>())
+                        if (w != null) cans.Add(w);
+                    var tiles = new List<SoilTile>();
+                    foreach (var t in UnityEngine.Object.FindObjectsOfType<SoilTile>())
+                        if (t != null) tiles.Add(t);
+                    _waterCanCache = cans;
+                    _soilTileCache = tiles;
+                    _keyCacheTime = Time.unscaledTime;
+                }
+                catch (Exception) { }
+            }
+        }
+
+        // Shared scene-wide candidate lists for travel resolution + the water note.
+        internal static List<WateringCanWeapon> WateringCanList()
+        {
+            RefreshKeyScan();
+            return _waterCanCache;
+        }
+
+        internal static List<SoilTile> SoilTileList()
+        {
+            RefreshKeyScan();
+            return _soilTileCache;
+        }
+
+        // One KeyPlaces candidate: kind, displayed name, transform.
+        private struct KeyPlace
+        {
+            public string Kind;
+            public string Name;
+            public Vector3 Pos;
+            public Transform Tf;
+        }
+
+        private static List<KeyPlace> BuildKeyPlaceList()
+        {
+            var list = new List<KeyPlace>();
+            foreach (var u in StationList())
+            {
+                if (u == null || u.transform == null) continue;
+                string nm = CleanName(u.name);
+                if (nm.Length == 0) continue;
+                // TYPE-first so a nest/bed whose mesh name lies still lands here.
+                string kind = ClassifyByType(u.gameObject) ?? ClassifyUsable(nm);
+                if (kind != "nest" && kind != "bed") continue;
+                list.Add(new KeyPlace { Kind = kind, Name = nm, Pos = u.transform.position, Tf = u.transform });
+            }
+            foreach (var t in SoilTileList())
+            {
+                if (t == null || t.transform == null) continue;
+                list.Add(new KeyPlace { Kind = "farm", Name = CleanName(t.name), Pos = t.transform.position, Tf = t.transform });
+            }
+            foreach (var w in WateringCanList())
+            {
+                if (w == null || w.transform == null) continue;
+                list.Add(new KeyPlace { Kind = "water", Name = CleanName(w.name), Pos = w.transform.position, Tf = w.transform });
+            }
+            return list;
+        }
+
+        // Map-wide directory for the perception payload: every nest/bed/farm
+        // plot/watering can with distance, world bearing, addr and a stable id —
+        // sorted nearest-first, no perception-radius limit.
+        internal List<object> KeyPlacesList()
+        {
+            var list = new List<object>();
+            try
+            {
+                if (_kobold == null) return list;
+                Vector3 pos = _kobold.transform.position;
+                var places = BuildKeyPlaceList();
+                places.Sort((a, b) =>
+                {
+                    float da = (a.Pos - pos).magnitude;
+                    float db = (b.Pos - pos).magnitude;
+                    return da.CompareTo(db);
+                });
+                for (int i = 0; i < places.Count && i < 8; i++)
+                {
+                    var pl = places[i];
+                    Vector3 d = pl.Pos - pos;
+                    var entry = new Dictionary<string, object>
+                    {
+                        ["k"] = pl.Kind,
+                        ["n"] = pl.Name,
+                        ["addr"] = StationAddr(pl.Name, pos, pl.Pos),
+                        ["d"] = F(d.magnitude),
+                        ["bearing"] = Compass.NameOfOffset(d.x, d.z),
+                        ["id"] = TargetIdFor(pl.Tf, pl.Name),
+                    };
+                    if (pl.Kind == "nest" || pl.Kind == "bed")
+                    {
+                        // Station extras: landmark hints ("near window") + live slots.
+                        GenericUsable u = null;
+                        try { u = pl.Tf.GetComponent<GenericUsable>() ?? pl.Tf.GetComponentInParent<GenericUsable>(); } catch (Exception) { }
+                        if (u != null)
+                        {
+                            string hints = LandmarkHintsFor(u);
+                            if (hints != null) entry["hint"] = hints;
+                            string slots = StationSlotsFor(u);
+                            if (slots != null) entry["slots"] = slots;
+                            try { if (!u.CanUse(_kobold)) entry["busy"] = true; } catch (Exception) { }
+                        }
+                    }
+                    list.Add(entry);
+                }
+            }
+            catch (Exception e) { Logger.LogWarning("key places: " + e.Message); }
+            return list;
+        }
+
+        // Compact one-liner for the console BOOT line ("known from the beginning").
+        internal string KeyPlacesLine()
+        {
+            try
+            {
+                if (_kobold == null) return "";
+                List<object> l = KeyPlacesList();
+                if (l.Count == 0) return "";
+                var parts = new List<string>();
+                foreach (var o in l)
+                {
+                    var d = o as Dictionary<string, object>;
+                    if (d == null) continue;
+                    object a, dd, br;
+                    d.TryGetValue("addr", out a);
+                    d.TryGetValue("d", out dd);
+                    d.TryGetValue("bearing", out br);
+                    object k, n;
+                    d.TryGetValue("k", out k);
+                    d.TryGetValue("n", out n);
+                    parts.Add((k ?? "?") + " " + (n ?? "") + "#" + (a ?? "?") + " ~" + (dd ?? "?") + "m " + (br ?? ""));
+                }
+                return "key places: " + string.Join("; ", parts.ToArray());
+            }
+            catch (Exception) { return ""; }
+        }
+
+        // Multi-line console rendering for `cat places`.
+        internal string KeyPlacesText()
+        {
+            try
+            {
+                if (_kobold == null) return "no body";
+                List<object> l = KeyPlacesList();
+                if (l.Count == 0) return "(no nests, beds, farm plots or watering cans found on this map)";
+                var sb = new StringBuilder();
+                sb.AppendLine("key places (map-wide, known from boot — cd <kind> or cd id:N; the route planner handles any distance):");
+                foreach (var o in l)
+                {
+                    var d = o as Dictionary<string, object>;
+                    if (d == null) continue;
+                    object a, dd, br, k, n, id, hint;
+                    d.TryGetValue("k", out k); d.TryGetValue("n", out n); d.TryGetValue("addr", out a);
+                    d.TryGetValue("d", out dd); d.TryGetValue("bearing", out br); d.TryGetValue("id", out id);
+                    sb.Append("  ").Append(k).Append("  ").Append(n).Append("#").Append(a)
+                      .Append("  ~").Append(dd).Append("m ").Append(br);
+                    if (id != null) sb.Append("  id:").Append(id);
+                    if (d.TryGetValue("hint", out hint)) sb.Append("  (").Append(hint).Append(')');
+                    object busy, slots;
+                    if (d.TryGetValue("busy", out busy)) sb.Append("  :busy");
+                    if (d.TryGetValue("slots", out slots)) sb.Append("  | ").Append(slots);
+                    sb.AppendLine();
+                }
+                return sb.ToString().TrimEnd();
+            }
+            catch (Exception e) { return "places error: " + e.Message; }
+        }
+
         // The plain activity wording (shared by the perception object and the console).
         private string PlayerActivityWords(bool ragdolled, bool inStation, string stKind, string stName, float vel, float heading)
         {
@@ -1545,6 +1833,33 @@ namespace KKLLMNPC
         // every moment, never stored as a fact or memory.
         private object BuildPlayerActivity()
         {
+            // CONSUMED PLAYER TRUTH (user: the agent thought sex stations/machines
+            // would help the player it ate): the parked body rides AT the eater's
+            // position, so station detection reads the EATER'S station as the
+            // player's. When they are consumed, override everything with the real
+            // state — inside a stomach, no station applies, the egg cycle is the
+            // only way home.
+            try
+            {
+                if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
+                {
+                    string eater = SpectateManager.SpectatingEaterLabel(pp.kobold);
+                    if (eater != null)
+                    {
+                        Vector3 dp = pp.kobold.transform.position - _kobold.transform.position;
+                        return new
+                        {
+                            activity = "CONSUMED by " + eater + " — the player is INSIDE their stomach (spectating, cannot act): no station applies to them, and play/bed machines CANNOT help. Bring them home the egg way — nest-lay the egg, plant it in soil, they hatch out. Their chat reaches you mid-digest; talk, don't 'help' with stations.",
+                            d = F(dp.magnitude),
+                            bearing = Compass.NameOfOffset(dp.x, dp.z),
+                            station_id = -1,
+                            seat = (object)null,
+                            holds = (object)null,
+                        };
+                    }
+                }
+            }
+            catch (Exception) { }
             var s = PlayerTrail.Snap;
             if (s == null || !s.Has || Time.unscaledTime - s.SampleTime > 10f) return null;
             Vector3 d = s.Pos - _kobold.transform.position;
@@ -1628,6 +1943,109 @@ namespace KKLLMNPC
                 return StationSlotsForSet(set, false);
             }
             catch (Exception) { return null; }
+        }
+
+        // ------------------------------------------------------------------
+        // [station] departures — who LEFT a station near you
+        // ------------------------------------------------------------------
+        // The per-turn slots text ("slots 1/2 taken; occupied by …") shows
+        // occupancy, but models can't be trusted to DIFF it across turns — a
+        // partner (or the player) walking away mid-use passed unremarked.
+        // So occupancy transitions come as world events instead. Runs on the
+        // MAIN thread (Main.Update, ~1/s): snapshot every IAnimationStationSet's
+        // occupants within the perception radius (14m), then when an occupant
+        // of a set we've seen before is gone from this scan, narrate the
+        // departure. Joining is deliberately not evented — the slots line
+        // already shows it the same turn it happens; leaving is the state that
+        // silently flipped. The NPC's own slots are labelled "you" and their
+        // own exits are not narrated to them.
+        private readonly Dictionary<int, List<string>> _stationWatchPrev = new Dictionary<int, List<string>>();
+
+        internal void StationLeaveWatch()
+        {
+            if (!IsAlive(_kobold)) return;
+            var now = new Dictionary<int, List<string>>();
+            try
+            {
+                var colliders = Physics.OverlapSphere(_kobold.transform.position, 14f, ~0, QueryTriggerInteraction.Collide);
+                if (colliders == null) return;
+                for (int i = 0; i < colliders.Length; i++)
+                {
+                    var c = colliders[i];
+                    if (c == null) continue;
+                    IAnimationStationSet set = null;
+                    try { set = c.GetComponentInParent<IAnimationStationSet>(); } catch (Exception) { continue; }
+                    if (set == null) continue;
+                    int setId;
+                    try { setId = ((UnityEngine.Object)set).GetInstanceID(); }
+                    catch (Exception) { continue; }
+                    if (now.ContainsKey(setId)) continue;
+                    var occupants = new List<string>();
+                    try
+                    {
+                        var stations = set.GetAnimationStations();
+                        if (stations == null) continue;
+                        foreach (var s in stations)
+                        {
+                            if (s == null || s.info.user == null) continue;
+                            string lbl = OccupantLabel(s.info.user);
+                            if (lbl != null) occupants.Add(lbl);
+                        }
+                    }
+                    catch (Exception) { }
+
+                    List<string> prev;
+                    if (_stationWatchPrev.TryGetValue(setId, out prev))
+                        for (int p = 0; p < prev.Count; p++)
+                        {
+                            string was = prev[p];
+                            if (was == null || was == "you" || occupants.Contains(was)) continue;
+                            string kind = StationSetKind(set);
+                            string ev = "[station] " + was + " left the " + kind + " station"
+                                + (occupants.Contains("you") ? " — you are on it alone now" : " near you");
+                            try { PushWorldEvent(ev); } catch (Exception) { }
+                        }
+                    now[setId] = occupants;
+                }
+            }
+            catch (Exception) { }
+            // Replace the snapshot wholesale so destroyed/abandoned sets (Unity
+            // nulls) drop out instead of living on the map forever.
+            _stationWatchPrev.Clear();
+            foreach (var kv in now) _stationWatchPrev[kv.Key] = kv.Value;
+        }
+
+        // "you" for this body, the player label, a sibling agent's name, else the
+        // cleaned mesh name. Main thread (component reads).
+        private string OccupantLabel(Kobold user)
+        {
+            if (user == null) return null;
+            if (user == _kobold) return "you";
+            if (IsPlayerKobold(user)) return "the player";
+            try
+            {
+                string agentName = AgentNameForBody(user.GetInstanceID());
+                if (!string.IsNullOrEmpty(agentName)) return agentName;
+            }
+            catch (Exception) { }
+            return CleanName(user.name);
+        }
+
+        // The perception's kind word for the machine a station set belongs to
+        // ("bed"/"play"…) — from the implementing machine's GameObject name.
+        private string StationSetKind(IAnimationStationSet set)
+        {
+            try
+            {
+                var mb = set as MonoBehaviour;
+                if (mb != null)
+                {
+                    string kind = ClassifyUsable(CleanName(mb.gameObject.name));
+                    if (!string.IsNullOrEmpty(kind) && kind != "usable") return kind;
+                }
+            }
+            catch (Exception) { }
+            return "station";
         }
 
         private string CaptureImageB64()

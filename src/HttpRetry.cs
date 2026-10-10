@@ -32,8 +32,12 @@ namespace KKLLMNPC
             string e = err.ToLowerInvariant();
             // Engine-side grammar/decode hiccups (the server's own complaint is a
             // nested 500) — the payload was ACCEPTED, the output stream wasn't.
-            // Retrying the identical payload is the fix.
-            if (e.Contains("peg-native") || e.Contains("predict stream")
+            // Retrying the identical payload is the fix. "predict request failed:
+            // fetch failed" (2026-10-09) is the same class with NO nested 500: LM
+            // Studio's engine fetch hiccuped — a payload property it is not; don't
+            // shrink a request that was never read.
+            if (e.Contains("peg-native") || e.Contains("predict stream") || e.Contains("predict request")
+                || e.Contains("fetch failed")
                 || e.Contains("\"type\":\"server_error\"") || e.Contains("code\":500"))
                 return "transient_engine";
             if (e.Contains("image") || e.Contains("vision") || e.Contains("multimodal"))
