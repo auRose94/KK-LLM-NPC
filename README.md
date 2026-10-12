@@ -6,8 +6,28 @@ Possesses unoccupied AI kobolds in the world and plays them through an OpenAI-co
 chat-completion endpoint: each NPC perceives, plans, moves, interacts, talks in chat,
 and reacts to the world continuously, as if a player was at the wheel.
 
-> Requires BepInEx 5.4x, and a local OpenAI-compatible server (LM Studio, Ollama, llama.cpp).
-> Vision optionally uses a multimodal model.
+## Requirements
+
+- **BepInEx 5.4x** in the game install.
+- **An OpenAI-compatible chat-completions server** — LM Studio, Ollama, llama.cpp,
+  KoboldCpp, vLLM — serving whatever LLM should play the NPC. Where it runs is your
+  call, three good options:
+  - **A second GPU in the same machine** — the game and the server each get one.
+  - **A second machine on your network** with a GPU — point `[LLM] Endpoint` at it
+    (`http://<its-LAN-address>:<port>/v1/chat/completions`); set `[LLM] ApiKey` if it
+    needs one. This is the roomy option: game performance untouched, full-size models.
+  - **A cloud hosting service** — any hosted OpenAI-compatible endpoint (a rented GPU
+    VM running vLLM/llama.cpp, LM Studio's remote, or a commercial inference host)
+    works the same way: set `[LLM] Endpoint` (+ `ApiKey`) to its URL. Latency is the
+    cost — the closer (LAN/nearest region), the livelier the NPCs.
+  There is no "local-only" lock: the mod works with any endpoint it can reach.
+- **(Optional) vision**: a multimodal model for the vision pass / first-person images —
+  either the same server ([VisionModel] left blank uses it) or a separate endpoint
+  (a dedicated small vision model on the second GPU/machine/cloud, if the action model
+  is text-only).
+- The game itself needs a GPU as usual; sharing the one GPU with a small LLM (4–9B,
+  quantized) works but both run slower — that's what the second-GPU/second-machine/
+  cloud options are for.
 
 ## What it does
 
@@ -17,7 +37,7 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 - **Pickup awareness** — knows when its body is grabbed, tracks a position trail while carried, and reports where it was moved (thrown is flagged as startling); it also auto-recovers if ragdolled next to the mail/sell machine and will never interact with that machine, since climbing in starts the sell timer.
 - **Swallow-vore & spectate (opt-in, in [LittleTreats], all OFF by default)** — two opt-in flows, each a complete loop: the player can swallow a kobold whole (digestion narrated to a real mind, ending per `SwallowEffect`: egg / belly-egg / absorb / destroy, with a no-cheat chat abort and force-feeding variant), and an agent can `eat_player` — taking over your camera to spectate its whole game session from inside until you hatch or abort. Grief guards keep player bodies safe everywhere except the explicit spectate act; a swallowed person is always kept alive as a mind and restored on their terms. **Full mechanics, config and tests: [docs/VORE.md](docs/VORE.md).**
 - **Multiplayer handshake (mod-to-mod)** — with two modded clients in one room, the room's own player properties carry presence + claimed-body lists + beats: the kobold-LLM duty is SHARED (each client claims its share, no doubling), and a frozen peer's bodies become reclaimable by the survivor — the crash mitigation. See [docs/VORE.md](docs/VORE.md) for the multiplayer vore channel the same infrastructure carries.
- are events** — a per-second occupancy watcher narrates "[station] the player left the bed station — you are on it alone now" when a partner walks away from a shared station within perception range, so the one left behind notices without re-diffing slot text.
+- **Station departures are events** — a per-second occupancy watcher narrates "[station] the player left the bed station — you are on it alone now" when a partner walks away from a shared station within perception range, so the one left behind notices without re-diffing slot text.
 
 - **Frustum raycasts** around the head (down/level/up rows) — what's where, with distances.
 - **8-direction clearance** — which way is open, what's a wall/sill/window.

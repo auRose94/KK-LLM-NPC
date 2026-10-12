@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A Requirements section heads the README**: BepInEx + an OpenAI-compatible chat
+  server, with the three ways to host that server laid out at the top — a second GPU
+  in the same machine, a second GPU machine on the network (endpoint/ApiKey point at
+  it), or a cloud hosting service (any hosted OpenAI-compatible inference endpoint;
+  latency is the cost). Notes the optional vision model and that sharing one GPU with
+  a small model works but slows both. Also repairs a bullet prefix two docs rounds had
+  mangled (station-departures).
 - **Multiplayer vore + a mod-to-mod handshake.** Both over the game's own PUN channel;
   no new networking. (1) **Player↔player swallow** (`[LittleTreats] SwallowPlayerVictims`,
   default OFF — with it off, every player-body guard holds): the swallow gesture and
