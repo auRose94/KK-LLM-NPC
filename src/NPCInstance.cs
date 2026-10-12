@@ -99,12 +99,14 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
         internal ConfigEntry<float> _cfgFarmScanRadius;
+        internal ConfigEntry<bool> _cfgWateringAssist;
         internal ConfigEntry<int> _cfgFarmScanMax;
         // ---- console (bash-like REPL) mode ----
         internal ConfigEntry<bool> _cfgConsoleEnabled;
         internal ConfigEntry<int> _cfgConsoleMaxRounds;
         internal ConfigEntry<int> _cfgConsoleMaxTokens;
         internal ConfigEntry<int> _cfgConsoleHistory;
+        internal ConfigEntry<bool> _cfgConsoleNativeTools;
         internal ConfigEntry<int> _cfgConsoleAutoShot;
         internal ConfigEntry<string> _cfgConsolePromptFile;
 
@@ -505,9 +507,7 @@ namespace KKLLMNPC
         private float _lastBigTurnTime = -99f;
 
         // LLM async (ask tool).
-        private volatile string _pendingQuestion;
-        private volatile string _lastAnswer;
-        private volatile bool _answerBusy;
+        // (the `ask` tool was removed 2.x — its question/answer fields went with it)
 
         // Constants.
         private const float WalkProbeRange = 4.0f;
@@ -595,11 +595,13 @@ namespace KKLLMNPC
             _cfgIdentityBot = plugin._cfgIdentityBot;
             _cfgIdentityAppId = plugin._cfgIdentityAppId;
             _cfgFarmScanRadius = plugin._cfgFarmScanRadius;
+            _cfgWateringAssist = plugin._cfgWateringAssist;
             _cfgFarmScanMax = plugin._cfgFarmScanMax;
             _cfgConsoleEnabled = plugin._cfgConsoleEnabled;
             _cfgConsoleMaxRounds = plugin._cfgConsoleMaxRounds;
             _cfgConsoleMaxTokens = plugin._cfgConsoleMaxTokens;
             _cfgConsoleHistory = plugin._cfgConsoleHistory;
+            _cfgConsoleNativeTools = plugin._cfgConsoleNativeTools;
             _cfgConsolePromptFile = plugin._cfgConsolePromptFile;
             _cfgConsoleAutoShot = plugin._cfgConsoleAutoShot;
         }
@@ -938,7 +940,6 @@ namespace KKLLMNPC
             _pendingShotB64 = null;
             _consoleSlept = false;
             _sleepUntilTime = 0f;
-            _consoleAnswerDelivered = true;
             _pendingSayNudge = false;
             _emptyContentRetry = false;
             _lastSays.Clear();
@@ -1179,10 +1180,14 @@ namespace KKLLMNPC
         // Small models (≤13B) have tight context windows; large models can afford more.
         // The ContextManager escalates compaction when context pressure builds.
         // ------------------------------------------------------------------
-        private int MaxHistory { get { return _ctxMgr != null ? _ctxMgr.DynamicMaxHistory(IsSmallModel ? 5 : IsLargeModel ? 15 : 10) : (IsSmallModel ? 5 : IsLargeModel ? 15 : 10); } }
-        private int MaxThoughts { get { return _ctxMgr != null ? _ctxMgr.DynamicMaxThoughts(IsSmallModel ? 3 : IsLargeModel ? 8 : 6) : (IsSmallModel ? 3 : IsLargeModel ? 8 : 6); } }
-        private int MaxFacts { get { return _ctxMgr != null ? _ctxMgr.DynamicMaxFacts(IsSmallModel ? 10 : IsLargeModel ? 30 : 20) : (IsSmallModel ? 10 : IsLargeModel ? 30 : 20); } }
-        private int MaxChatLog { get { return IsSmallModel ? 5 : IsLargeModel ? 30 : 15; } }
+        // 2026-10-11: caps raised (history 5/10/15 → 10/18/40; thoughts 3/6/8 → 6/10/14;
+        // facts 10/20/30 → 12/24/40; chat 5/15/30 → 8/20/40). The old floors pushed the
+        // story out from under small models — a 5-entry history meant each turn started
+        // from amnesia while big models kept 15 lines for the same reasoning.
+        private int MaxHistory { get { return _ctxMgr != null ? _ctxMgr.DynamicMaxHistory(IsSmallModel ? 10 : IsLargeModel ? 40 : 18) : (IsSmallModel ? 10 : IsLargeModel ? 40 : 18); } }
+        private int MaxThoughts { get { return _ctxMgr != null ? _ctxMgr.DynamicMaxThoughts(IsSmallModel ? 6 : IsLargeModel ? 14 : 10) : (IsSmallModel ? 6 : IsLargeModel ? 14 : 10); } }
+        private int MaxFacts { get { return _ctxMgr != null ? _ctxMgr.DynamicMaxFacts(IsSmallModel ? 12 : IsLargeModel ? 40 : 24) : (IsSmallModel ? 12 : IsLargeModel ? 40 : 24); } }
+        private int MaxChatLog { get { return IsSmallModel ? 8 : IsLargeModel ? 40 : 20; } }
 
         private string ThoughtHistoryJson()
         {

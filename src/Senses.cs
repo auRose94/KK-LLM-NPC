@@ -303,8 +303,6 @@ namespace KKLLMNPC
             result["stim_from"] = StimFromText();
             result["partners"] = PartnersList();
             result["heard"] = RecentPlayerChat();
-            result["asked"] = _pendingQuestion;
-            result["answered"] = _answerBusy ? null : _lastAnswer;
             // Goal machine: the persistent goal ("bigger thinking") + repetition guard.
             // This is what the model works toward instead of re-deriving a goal each turn.
             result["goal"] = GoalPerception();
@@ -779,6 +777,66 @@ namespace KKLLMNPC
         // stays clear, which headings are open, a suggested best heading, and the
         // nearest named things (wall vs. usable vs. kobold). Lets the model describe
         // the room and pick a corridor/doorway without ever seeing it.
+        // --------------------------------------------------------------
+        // RP self-portrait + spawn context — things a model could otherwise
+        // never know: it can't SEE its own body (no mirror), and a fresh
+        // spawn "just is somewhere" with no description at all.
+        // --------------------------------------------------------------
+
+        // One-line gene-derived appearance (MAIN thread): scale color from the
+        // game's hue/saturation/brightness body paint, size/build from the
+        // inflate+fat genes, curves/groin from their genes. The model reads this
+        // in whoami and writes its body truthfully.
+        internal string BodyAppearanceLine()
+        {
+            if (!IsAlive(_kobold)) return null;
+            try
+            {
+                var g = _kobold.GetGenes();
+                if (g == null) return null;
+                string color = SkinColorWord(g.hue, g.saturation, g.brightness);
+                // baseSize ~20 typical (gaussian mean 20) on the game's inflate scale;
+                // fatSize grows one-way from 0.
+                string size = g.baseSize < 14f ? "tiny" : g.baseSize < 18f ? "small" : g.baseSize <= 23f ? "average-sized" : g.baseSize <= 28f ? "big" : "huge";
+                string build = g.fatSize > 4f ? "plump" : g.fatSize > 1.5f ? "thick" : "slim";
+                var bits = new List<string>();
+                bits.Add(color + " scales");
+                bits.Add(size + " (a " + build + " body)");
+                if (g.breastSize > 0.15f) bits.Add(g.breastSize < 6f ? "small breasts" : g.breastSize < 15f ? "full breasts" : "large breasts");
+                bool hasDick = g.dickEquip != 0; // 1-based penis-database id; 0 = none
+                if (hasDick) bits.Add("a dick (" + g.dickSize.ToString("0", CultureInfo.InvariantCulture) + "-length, " + (g.dickThickness > 0.6f ? "thick" : "slender") + ")");
+                else bits.Add("no dick");
+                return string.Join(", ", bits.ToArray());
+            }
+            catch (Exception) { return null; }
+        }
+
+        // Name the body's paint color from the hue/saturation/brightness bytes
+        // (the CharacterCustomization triple). Wheel position + lightness/sat
+        // qualifiers; low saturation names the greyscales.
+        private static string SkinColorWord(byte hue, byte saturation, byte brightness)
+        {
+            float h = (hue % 256) * 360f / 255f;
+            string name;
+            if (h < 15) name = "red";
+            else if (h < 40) name = "orange";
+            else if (h < 60) name = "amber";
+            else if (h < 90) name = "yellow";
+            else if (h < 150) name = "green";
+            else if (h < 185) name = "teal";
+            else if (h < 220) name = "blue";
+            else if (h < 255) name = "violet";
+            else if (h < 290) name = "purple";
+            else if (h < 320) name = "magenta";
+            else if (h < 345) name = "pink";
+            else name = "rose";
+            if (saturation < 50)
+                name = brightness < 64 ? "dark grey" : brightness > 210 ? "silvery-grey" : "grey";
+            else if (brightness < 64) name = "dark " + name;
+            else if (brightness > 210) name = "pale " + name;
+            return name;
+        }
+
         private string SpatialLayout()
         {
             try

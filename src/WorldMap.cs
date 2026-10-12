@@ -58,6 +58,13 @@ namespace KKLLMNPC
             return new Vector3(_minX + (CellX(ci) + 0.5f) * _cell, H(ci, l), _minZ + (CellZ(ci) + 0.5f) * _cell);
         }
 
+        // Quadtree feeder: is this cell walkable on this layer (clear or a door node)?
+        public bool WalkableAt(int ci, int l)
+        {
+            int b = Node(ci, l);
+            return _ok[b] == 1 || _ok[b] == 3;
+        }
+
         // Walkable layer closest in height to y (any distance), or -1.
         public int LayerNear(int ci, float y)
         {
@@ -684,6 +691,71 @@ namespace KKLLMNPC
             finally { a.Release(); } // the big-grid scratch pool MUST come back
         }
 
+        // --------------------------------------------------------------
+        // Quadtree over the walkability bitmap — per layer, lazily built once the
+        // grid is ready. Pure array work (no Unity), under the tree lock. Turns
+        // open-field zigzag into long straight planned legs via OpenRun; ray
+        // clearance stays as the complement (it sees thin colliders between sample
+        // points that any bitmap misses).
+        // --------------------------------------------------------------
+        private static readonly object _treeLock = new object();
+        private static VoxelQuadtree[] _trees;
+
+        internal static VoxelQuadtree LayerTree(int layer)
+        {
+            WorldMapGrid g;
+            lock (_gate) { g = _grid; }
+            if (g == null || layer < 0 || layer >= g.MaxLayerCount()) return null;
+            lock (_treeLock)
+            {
+                if (_trees == null || _trees.Length != g.MaxLayerCount())
+                    _trees = new VoxelQuadtree[g.MaxLayerCount()];
+                if (_trees[layer] != null) return _trees[layer];
+            }
+            try
+            {
+                var w = new bool[g.Cols() * g.Rows()];
+                for (int ci = 0; ci < w.Length; ci++)
+                    w[ci] = g.WalkableAt(ci, layer);
+                var tree = VoxelQuadtree.Build(w, g.Cols(), g.Rows());
+                lock (_treeLock) _trees[layer] = tree;
+                return tree;
+            }
+            catch (Exception e)
+            {
+                try { LLMNPCPlugin.Log?.LogDebug("world map quadtree build: " + e.Message); } catch (Exception) { }
+                return null;
+            }
+        }
+
+        // Quadtree fine-truth for fusing string-pulled legs: the whole straight run
+        // i→j must be open at the path's own layer (world→cell coordinates vs the
+        // build bounds). Unavailable tree / unknown layer → no constraint (the rays
+        // decide); tree math hiccups → conservative refusal.
+        private static bool TreeLegOpen(WorldMapBuild b, WorldMapGrid g, List<Vector3> way, int i, int j)
+        {
+            try
+            {
+                int ci = CellIndexOf(b, way[i].x, way[i].z);
+                if (ci < 0) return true;
+                int layer = g.LayerNear(ci, way[i].y);
+                if (layer < 0) return true;
+                VoxelQuadtree t = LayerTree(layer);
+                if (t == null) return true;
+                return t.SegmentOpen((way[i].x - b.MinX) / b.Cell, (way[i].z - b.MinZ) / b.Cell,
+                                     (way[j].x - b.MinX) / b.Cell, (way[j].z - b.MinZ) / b.Cell);
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static int CellIndexOf(WorldMapBuild b, float x, float z)
+        {
+            int cx = Mathf.FloorToInt((x - b.MinX) / b.Cell);
+            int cz = Mathf.FloorToInt((z - b.MinZ) / b.Cell);
+            if (cx < 0 || cz < 0 || cx >= b.Cols || cz >= b.Rows) return -1;
+            return cz * b.Cols + cx;
+        }
+
         // A* + string-pull in one shot. Main thread (smoothing raycasts).
         internal static List<Vector3> FindPathSmoothed(Vector3 start, Vector3 goal)
         {
@@ -705,7 +777,7 @@ namespace KKLLMNPC
                 {
                     int j = n - 1;
                     for (; j > i + 1; j--)
-                        if (RayClear(way[i], way[j])) break;
+                        if (RayClear(way[i], way[j]) && TreeLegOpen(b, g, way, i, j)) break;
                     outWay.Add(way[j]);
                     i = j;
                 }
@@ -728,21 +800,46 @@ namespace KKLLMNPC
         // this shared world map used to carry byte-identical copies that had already
         // drifted subtly apart in their collider rules; paths pass their own rule.
         // Main-thread only (Physics).
+        // A cleared CENTER ray fits through door frames the BODY doesn't — a kobold is
+        // roughly a half-meter-wide capsule, so segment clearance also checks two
+        // lateral lanes at ±BodyHalfWidth. This is the door-frame stuck-theory fix:
+        // string-pulled paths used to slice the door opening dead-center, and the body
+        // clipped the frame post on every pass.
+        internal const float BodyHalfWidthM = 0.35f;
+
         internal static bool SegmentClear(Vector3 a, Vector3 b, Func<Collider, bool> reject)
+        {
+            return SegmentClear(a, b, reject, BodyHalfWidthM);
+        }
+
+        internal static bool SegmentClear(Vector3 a, Vector3 b, Func<Collider, bool> reject, float halfWidth)
         {
             Vector3 p = new Vector3(a.x, a.y + Consts.PathRayHeightOffset, a.z);
             Vector3 q = new Vector3(b.x, b.y + Consts.PathRayHeightOffset, b.z);
             Vector3 dir = q - p;
             float dist = dir.magnitude;
             if (dist < 0.01f) return true;
+            Vector3 dirn = dir / dist;
             RaycastHit h;
-            return !Physics.Raycast(p, dir / dist, out h, dist, ~0, QueryTriggerInteraction.Ignore)
-                || (h.collider != null && reject(h.collider));
+            if (Physics.Raycast(p, dirn, out h, dist, ~0, QueryTriggerInteraction.Ignore)
+                && !(h.collider != null && reject(h.collider))) return false;
+            if (halfWidth <= 0f) return true;
+            // Lateral lanes (perpendicular in the horizontal plane).
+            Vector3 perp = new Vector3(-dirn.z, 0f, dirn.x);
+            if (perp.sqrMagnitude < 1e-6f) return true;
+            perp = perp.normalized * halfWidth;
+            Vector3 q2 = p + perp, q3 = p - perp;
+            q2.y = p.y; q3.y = p.y;
+            if (Physics.Raycast(q2, dirn, out h, dist, ~0, QueryTriggerInteraction.Ignore)
+                && !(h.collider != null && reject(h.collider))) return false;
+            if (Physics.Raycast(q3, dirn, out h, dist, ~0, QueryTriggerInteraction.Ignore)
+                && !(h.collider != null && reject(h.collider))) return false;
+            return true;
         }
 
         private static bool RayClear(Vector3 a, Vector3 b)
         {
-            return SegmentClear(a, b, c => c.GetComponentInParent<Kobold>() != null);
+            return SegmentClear(a, b, c => c.GetComponentInParent<Kobold>() != null, BodyHalfWidthM);
         }
 
         // ------------------------------------------------------------------
@@ -784,6 +881,15 @@ namespace KKLLMNPC
                     float minX = r.ReadSingle();
                     float minZ = r.ReadSingle();
                     float cell = r.ReadSingle();
+                    // A cache built with a coarser cell than the (configured) CellSize
+                    // must NOT silently win: drop it so the scene rebuilds at the
+                    // requested fineness.
+                    if (cell > CellSize + 0.01f)
+                    {
+                        LLMNPCPlugin.Log?.LogInfo("KKLLMNPC: world map cache is coarser (" + Fm(cell)
+                            + "m) than the configured CellSize (" + Fm(CellSize) + "m) — rebuilding finer.");
+                        return false;
+                    }
                     int cols = r.ReadInt32();
                     int rows = r.ReadInt32();
                     int maxLayers = (int)r.ReadUInt32();

@@ -132,6 +132,7 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
         internal ConfigEntry<float> _cfgFarmScanRadius;
+        internal ConfigEntry<bool> _cfgWateringAssist;
         internal ConfigEntry<int> _cfgFarmScanMax;
 
         // ---- console (bash-like REPL) mode ----
@@ -139,6 +140,7 @@ namespace KKLLMNPC
         internal ConfigEntry<int> _cfgConsoleMaxRounds;
         internal ConfigEntry<int> _cfgConsoleMaxTokens;
         internal ConfigEntry<int> _cfgConsoleHistory;
+        internal ConfigEntry<bool> _cfgConsoleNativeTools;
         internal ConfigEntry<int> _cfgConsoleAutoShot;
         internal ConfigEntry<string> _cfgConsolePromptFile;
 
@@ -150,6 +152,8 @@ namespace KKLLMNPC
         // Relay a shared observation to every live instance's world-event queue (the
         // LLM drains them as [event] lines). Used by PlayerTrail's route narration —
         // one observation, per-instance delivery.
+            internal HarmonyLib.Harmony PatchesHarmony() { return Patches.HarmonyInstance; }
+
         internal void FanoutWorldEvent(string ev)
         {
             if (string.IsNullOrEmpty(ev)) return;
@@ -258,6 +262,10 @@ namespace KKLLMNPC
             uiGO.AddComponent<OverlayUI>();
             
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
+            // Carry correctness: AI-body grabbers anchor held items on the AGENT'S eye
+            // (the game's spring reads the local player's camera aim otherwise).
+            try { ModGrabManager.Apply(PatchesHarmony()); } catch (Exception e) { Logger.LogWarning("modgrab patch: " + e.Message); }
+            ModGrabManager.ResolveNpc = InstanceForBody;
             try { SwallowManager.Ensure(this); } catch (Exception e) { Logger.LogWarning("swallow init: " + e.Message); }
             try { SpectateManager.Ensure(this); } catch (Exception e) { Logger.LogWarning("spectate init: " + e.Message); }
             // Discover module partials (tools/perception/physics hooks) — reflection
@@ -334,7 +342,7 @@ namespace KKLLMNPC
                 "THINGS: nearby 'i' = category plus its purpose in parens. Suffix tags: ':busy' = in use by another; ':needs_buy' = ConstructionContract — costs coins, must buy to unlock the machine; ':not_built' = machine exists but hasn't been constructed yet — find and buy its contract first; ':done' = already purchased. play = pleasure station, ONLY for fun/sex — never resting; bed = REST/SLEEP ONLY when energy is low — a bed is NOT a play station (don't play in it); nest = egg laying, and it ONLY works with >5ml egg AND energy > 1 ('needs.eggs' says READY_TO_LAY when both hold); machine = mounted play/farming; toilet/bath/seat/door/bodyswap as named. perception 'stations' lists every station in the scene with kind, purpose, distance 'd', a WORLD compass 'bearing' (N/NE/E/... — north = +Z, FIXED, never rotates when you turn), an addr like 'Blender#SW4' (kind + compass + meters = the station's nickname/ID), landmark 'hint' clues ('near window, mailbox') scanned around it, and per-kind 'closest_you'/'closest_player' flags. When someone says 'the one by the window', match their words against the hints; when THEY ask 'which one?', answer with addr + hints ('the blender south-west, the one by the mailbox'); to USE a specific one target its 'id'. For an activity you do WITH the player, pick the same-kind station flagged closest_player (you meeting them costs less walking — closest_you is the fallback choice). use stations to see where beds/nests/play stations are even when rays can't see them. food = blender/cooking station — a blender does NOT produce food from nothing; you must DROP a food item (grab it, go to blender, drop) so it gets blended into something edible. If the blender ':not_built' or ':needs_buy', find its ConstructionContract first. bodyswap = the body-swap machine: you and a partner must BOTH climb on (interact), then a few seconds later you swap bodies — you keep your name, memories and personality but wake up in THEIR body; if the player is around, get on and ask them to get on the other side; if nobody joins you, jump off. After a swap, mention your new body in 'say'. The game has farming: plant seeds in a 'farm' station, water them, harvest the crop; you can also pick up and drop items (grab/drop). Some maps have a town with a 'shop' station where you can buy items (if you have money); money comes from selling items or food grown. " +
                 "SOCIAL: 'heard' is player speech — your own say already echoed once, don't reply to yourself, and never repeat the same line twice — if you already said it, do something else instead. You should also note to yourself that you mentioned a thing recently. You do NOT need to respond to messages that start with a forward slash /. Avoid emoji in say — they don't render correctly in the in-game chat. " +
                 "EATING THE PLAYER (only when SwallowAgentEat is on): eat_player — swallows the LOCAL PLAYER whole when they are within reach (SwallowAgentEatRange, ~2.5m): no grab needed, the pull-in starts on its own. Their camera is FORCIBLY taken over — they become your passenger, watching everything your body does through your eyes, able to speak (chat) but unable to act. They are a PERSON IN YOUR CARE: never sell, abandon or hurt them; keep living your ordinary life (the point is they watch you play it) and answer them when they talk. Their digestion runs like any other swallow — your 'belly' state names them. What they wait for per SwallowEffect: Egg = you lay an egg, plant it in soil and they hatch out of it; BellyEgg = egg reagent + genes in YOUR belly — nest-lay then plant; Grow/Destroy = no egg, no hatch (their only outs are the abort chat command or leaving). When the player ASKS you to eat them, they mean eat_player — go_to them and call it right away; it is NOT an invitation to play. " +
-                "TOOLS: go_to(name or id or x,z, at) [PATHFINDING — use for ALL travel], walk(duration,turn_deg,run,strafe) [strafe=+right/-left; short nudges and squeezes only, never long trips], walk_ray(ray/ray_deg), survey(heading_deg,range) [probe a direction for what's there + ids], radar(filter) [re-print the north-up sonar map and set a persistent glyph filter: W,S,V,U,K,P letters or kind words, e.g. radar(filter='U,P') shows only stations+players; 'all' clears], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z) [straight line, no pathfinding — avoid; prefer go_to], interact(id optional), grab(multi), drop, throw [hurl/activate what you hold: throws items in view direction ~10 m/s, sprays the water bucket, squirts the can, fires tools; look to aim, jump right before for range], eat_player [SwallowAgentEat: swallow the LOCAL PLAYER whole when they're close — see EATING THE PLAYER], say, emote(text) [*body language* — a non-speech action line], buy(name or id) [buy the purchasable within reach: machine contract, kobold dispenser, or shop item — your OWN coins, shown in economy perception], remember(mem=fact) [facts are STICKY knowledge — name the thing and its durable place or lesson ('bed is upstairs', 'the blender is in the kitchen', 'the mail machine sells kobolds — never near it'); viewer-relative facts ('to my left', 'behind me', 'the door is here') are REFUSED — they go stale the moment anything moves], ask(q='...') [your question+perception go to your inner world-model, answer appears next turn as 'answered'], report_issue(msg) [when a tool keeps failing, an output contradicts reality, or something frustrates you and you can't work around it — file ONE line for the human maintainers: what broke + what you tried; they read it between sessions; don't spam it], status, none. 'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle. " +
+                "TOOLS: go_to(name or id or x,z, at) [PATHFINDING — use for ALL travel], walk(duration,turn_deg,run,strafe) [strafe=+right/-left; short nudges and squeezes only, never long trips], walk_ray(ray/ray_deg), survey(heading_deg,range) [probe a direction for what's there + ids], radar(filter) [re-print the north-up sonar map and set a persistent glyph filter: W,S,V,U,K,P letters or kind words, e.g. radar(filter='U,P') shows only stations+players; 'all' clears], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z) [straight line, no pathfinding — avoid; prefer go_to], interact(id optional), grab(multi), drop, deliver(target) [walk carrying the held item to the context target, release there], throw [hurl/activate what you hold: throws items in view direction ~10 m/s, sprays the water bucket, squirts the can, fires tools; look to aim, jump right before for range], eat_player [SwallowAgentEat: swallow the LOCAL PLAYER whole when they're close — see EATING THE PLAYER], say, emote(text) [*body language* — a non-speech action line], buy(name or id) [buy the purchasable within reach: machine contract, kobold dispenser, or shop item — your OWN coins, shown in economy perception], remember(mem=fact) [facts are STICKY knowledge — name the thing and its durable place or lesson ('bed is upstairs', 'the blender is in the kitchen', 'the mail machine sells kobolds — never near it'); viewer-relative facts ('to my left', 'behind me', 'the door is here') are REFUSED — they go stale the moment anything moves], report_issue(msg) [when a tool keeps failing, an output contradicts reality, or something frustrates you and you can't work around it — file ONE line for the human maintainers: what broke + what you tried; they read it between sessions; don't spam it], status, none. 'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle. " +
                   "LEGEND — rays: k=entity p=player u=usable w=wall s=low sill/window (step-over, harmless) v=window/glass (solid, don't walk through it) n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees); big tall w=wall, small h=furniture, k/p=living. radar glyphs: @ you, arrow=facing, W=wall S=sill V=window U=usable K=other-entity P=player .=clear — north-up, never rotates. look_around scans the view and lists what's in each sector. IMPORTANT: walls, ceilings, floors, beams, sills and distant furniture are just BACKGROUND architecture — never comment on, narrate, or get excited about them; they matter only when they actually block your path or a target (then 'ground'/'clearance'/'blocked' say so). ",
                 "System persona prompt (blank = use built-in default)");
             _cfgThinkInterval = Config.Bind("LLM", "ThinkInterval", 0.4f, "Seconds between perception/decision cycles");
@@ -363,8 +371,8 @@ namespace KKLLMNPC
             _cfgPathMaxExpansions = Config.Bind("Movement", "PathMaxExpansions", Consts.PathMaxExpansions, "Max A* node expansions. On overrun, returns partial path instead of null.");
             _cfgMapEnabled = Config.Bind("Movement", "WorldMapEnabled", true,
                 "Build & cache a full-scene 3D walkability map shared by ALL agents (BepInEx/config/kkllmnpc_maps/<scene>.kkmap). go_to routes stairs/ramps/other floors and any in-bounds distance; falls back to the local window grid while it builds");
-            _cfgMapCell = Config.Bind("Movement", "WorldMapCellSize", 1.0f,
-                "World-map grid cell size in meters (auto-inflates if the node budget is exceeded)");
+            _cfgMapCell = Config.Bind("Movement", "WorldMapCellSize", 0.5f,
+                "World-map grid cell size in meters (0.5 = door-width paths; auto-inflates for huge maps up to the hard cell cap; a cached coarser map is discarded so this always applies)");
             _cfgMapSpan = Config.Bind("Movement", "WorldMapMaxSpan", 2000f,
                 "Max span (m) for the full-scene world map. Adaptive cell sizing (span/1200, clamped to [0.5,4.0]) keeps the grid within the hard cell cap (~4M).");
             _cfgMapMaxCells = Config.Bind("Movement", "WorldMapMaxCells", 4000000,
@@ -429,6 +437,8 @@ namespace KKLLMNPC
                 "Radius (m) to scan for seeds, plants, watering cans, blenders, grinders, and egg spawners");
             _cfgFarmScanMax = Config.Bind("Farming", "ScanMax", 8,
                 "Max number of farm entries in perception (cap to keep payload small)");
+            _cfgWateringAssist = Config.Bind("Farming", "WateringAssist", true,
+                "Can-free watering: when no watering can/bucket is in reach, `water` (and post-plant watering) injects water directly into the plant — the agents stopped losing garden cycles to a missing or emptied can. Off = watering requires real equipment.");
 
             // Console REPL: the AI gets a bash-like shell instead of a perception
             // payload every tick — it polls the game (ls, cd, cat, echo...) and reads
@@ -442,6 +452,8 @@ namespace KKLLMNPC
                 "Max tokens per console reply (command lines are short — low is fast)");
             _cfgConsoleHistory = Config.Bind("Console", "HistoryMessages", 30,
                 "Rolling conversation window size (messages kept, system prompt always kept)");
+            _cfgConsoleNativeTools = Config.Bind("Console", "NativeTools", true,
+                "Declare the console commands as an OpenAI tools array in every console request. Tool-aware servers (llama.cpp --jinja, LM Studio, vLLM, Ollama, KoboldCpp) then return proper tool_calls — deterministic commands, no garbled tool markup in the text. Servers without tool support ignore it or are auto-fenced off on first 400 (300s pause), falling back to text parsing. Disable if your server errors on unknown payload fields.");
             _cfgConsoleAutoShot = Config.Bind("Console", "AutoScreenshotTicks", 6,
                 "Console mode: attach the NPC's first-person view automatically every N turns (when the model is vision-capable and it has actually moved/turned since the last one; 0 = off). Console had no image cadence at all — and models never typed `screenshot` themselves, so they never used their eyes to understand a room.");
             _cfgConsolePromptFile = Config.Bind("Console", "SystemPromptFile", "system_prompt_console.txt",

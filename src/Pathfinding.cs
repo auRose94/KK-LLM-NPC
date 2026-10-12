@@ -173,7 +173,7 @@ namespace KKLLMNPC
         // both path pipelines; this side rejects our own body geometry.
         private bool RayClear(Vector3 a, Vector3 b)
         {
-            return WorldMap.SegmentClear(a, b, IsOwnCollider);
+            return WorldMap.SegmentClear(a, b, IsOwnCollider, WorldMap.BodyHalfWidthM);
         }
 
         // Pick the goal cell/layer. Prefers the exact cell on the floor closest to

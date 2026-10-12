@@ -17,6 +17,7 @@ namespace KKLLMNPC
     internal static class Patches
     {
         private static Harmony _harmony;
+        internal static Harmony HarmonyInstance { get { return _harmony; } }
 
         public static void Apply(BepInEx.Logging.ManualLogSource log)
         {

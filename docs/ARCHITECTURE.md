@@ -167,8 +167,11 @@ Perception:
     → JSON payload
 
 LLM (console mode — default):
-    drain world events ([chat]/[event]/[ask]) + state anchor + "$" prompt
-    → model replies with command lines (ls, cd, echo, cat ...)
+    drain world events ([chat]/[event]) + identity/plan/goal state anchor + "$" prompt
+    → model replies with command lines (ls, cd, echo, cat, plan ...); NativeTools declares
+      them as an OpenAI tools array so tool-aware servers answer with real tool_calls (one
+      call per command; a multi-call reply executes as a multi-command turn), and text
+      replies go through the lenient parsers + tool-call-markup salvage
     → parse + execute each line → print terse terminal output
     → model reads output, sends more commands (or `sleep` to end the turn)
     → repeat up to MaxRounds; rolling window (HistoryMessages) bounds the context
@@ -196,8 +199,12 @@ Movement:
 | LLM thread | Decision loop: perception → LLM query → tool execution |
 | Vision thread | Background caption: render on main, caption on worker |
 | Commentary thread | Free-form musings via Task.Run (both console and legacy modes since 2026-10) |
-| Ask thread | Question answering via Task.Run |
 | Plan steps thread | Background plan execution via Task.Run |
+
+(The dedicated Ask thread went with the removed `ask` tool — the tool asked the model
+about its own perception through a second LLM call; the model instead polls what it
+needs with commands, and the worker's long self-narrating answers no longer flood
+facts/history.)
 
 Note on mind wipes: `ResetMind` requested from the main thread is applied by the LLM
 loop at the next turn boundary (volatile pending-flag) — the only thread-safe place to

@@ -50,10 +50,25 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
 |-------|----------|
 | **Read (poll the game)** | `ls` (nearby), `ps` (who's around — players AND fellow agent NPCs), `pwd` (where + facing in compass words), `whoami` (me), `cat facts\|goal\|chat\|needs\|history\|stations\|map\|body\|hold\|player\|quest`, `status` (one-line snapshot incl. coins + awake time + holding + quest), `find <place\|deg>`, `sonar [filter]` (north-up ASCII map — never rotates), `look left\|right\|up\|down\|around\|<deg>` |
 | **Act** | `echo <words>` (**speak**), `emote <what you do>` (**body language**, renders `*like this*`), `cd <place\|id:N>`, `use <thing\|id:N>`, `run [secs] [left\|right]`, `turn [deg]`, `jump`, `crouch [0..1]`, `exit`, `get` (grab what's ~1m in front of the face — result names it), `drop`, `throw` (hurl held item / spray the bucket / fire tools in view direction), `hold` (what's in your hands), `follow on\|off`, `stop`, `sleep [secs]` (ends the turn; with secs it *pauses* that long — chat/events wake it early) |
-| **Memory & goals** | `remember <fact>`, `forget <fact>`, `goal <text>\|done\|drop`, `ask <question>` |
+| **Memory & goals** | `remember <fact>`, `forget <fact>`, `goal <text>\|done\|drop`, `plan <step>\|\|next\|clear` (goal's step ladder — see Planning) |
 | **Economy** | `buy [name\|id:N]` — purchase whatever's within reach: machine contracts, the kobold dispenser, shop items. The NPC spends its OWN coins (shown in status/economy perception). |
 | **Module tools** | `thrust`, `erection`, `mount`, `unmount`, `orgasm`, `plant`, `water`, `harvest`, `plant_egg`, `feed_blender`, `grind`, `rename` (positional args: `target`, `amount`) |
 | **Misc** | `screenshot` (on-demand vision), `report <what's broken>` (files a dev bug note — AI feedback), `help` (list commands), `clear` |
+
+### Speech adaptation
+
+- **Response blocks** — an RP model can simply write its dialogue/actions as a roleplay
+  block; the mod detects the block shape (quoted dialogue, `*actions*`, an {{user}}-style
+  address) and sends it to the chat window verbatim — no `echo` required. Commands and a
+  block can share one reply. Solo-voice (no one spoke, nobody around) is throttled to
+  about one block per 90 s so it can't monologue, and identical repeats keep ending the
+  turn instead of stacking.
+
+- **RP placeholder heads** — SillyTavern-trained models speak in `{{user}}`/`{{char}}`;
+  say/emote expand them at the moment of speaking: the live engagement partner first,
+  then the nearest person within 14 m (player avatar before sibling NPCs), then the host
+  player. `{{char}}` = the NPC's own name; the placeholder stays literal only when
+  nobody at all is known.
 
 ### Perception keys
 
@@ -75,9 +90,11 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
 ## Behavior highlights
 
 - **Walks by default**, runs only when asked (`run: true`). Bounded bursts that auto-stop.
-- **Obstacle-aware movement** — validates before walking, slips along walls via fan-steering,
-  treats low sills/windows as climbable instead of walls, ledges report drop height so it can
-  hop down small ones.
+- **Obstacle-aware movement** — validates before walking (three body-width lanes: the
+  path and the steering only go where the capsule fits — no more door-frame grinding),
+  auto-hops fences/sills/low walls when there's ground beyond, slips along walls via
+  fan-steering, ledges report drop height so it can hop down small ones, and a
+  stuck-breaker sidesteps then re-plans the route around a spot it keeps bumping.
 - **Whole-map pathfinding** — background worker thread computes A* paths off the main thread;
   milestone-based replanning (only replans when the target moved, path is exhausted, or deviation
   exceeds threshold). Time-budgeted expansion prevents frame hitches on large maps.
@@ -103,6 +120,11 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
   The reverse exists too (**`SwallowAgentEat`**, opt-in): an agent can `eat_player` —
   the local player's camera is taken over and they spectate the AI's game session from
   inside the eater until the planted egg hatches (or they abort/quit).
+- **Swallowed minds can talk but not act** — while their body is inside a stomach (any
+  swallow flow), body-attached commands (`grab`/`get`, `drop`, `throw`, `use`, `cd`,
+  `run`, `jump`, …) are refused with an honest explanation; speech, memory, goals/plan
+  and read-only polling still work. And when a body is absorbed, its saved memory file
+  is erased after its knowledge pours into the eater — no ghost records left behind.
 - **Farming & cooking** — `plant` → `water` → `harvest` cycle, `plant_egg`, `feed_blender`, `grind`.
   Perception reports nearby plants and cooking equipment.
 - **Identity** — per-NPC orientation, trans status, expressed persona. `rename` tool with
@@ -115,7 +137,18 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
   with the agents in front of it. The snapshot thread reads only lock-guarded strings,
   so the page answers even while the main thread is wedged. The F6 IMGUI overlay stays
   for the in-game glance; `Enabled: false` returns to overlay-only.
-- **Asks itself questions** (`ask` tool) — answers land next tick and auto-remember as facts.
+- **Plans and executes (`plan` ladder)** — a goal stores WHAT to do; `plan <step>` stores
+  the ordered HOW. Steps persist across turns (the state anchor carries the current one and
+  `cat plan` shows them all), so a small model never re-derives its approach: set goal →
+  lay the steps once → work them one per turn → `plan next` marks each done. The ladder
+  clears automatically when the goal completes or is dropped.
+- **Native tool calling, when the server has it** — every console request can declare the
+  console commands as an OpenAI tools array (`NativeTools`, default on). Tool-aware servers
+  (llama.cpp --jinja, LM Studio, vLLM, Ollama, KoboldCpp) then parse the model's output into
+  real `tool_calls` — deterministic commands with real arguments, and a multi-call reply is
+  a multi-command turn — instead of the old garbled `<tool_call>` markup in free text. Servers
+  without tool support are fenced off automatically on the first 400 (300 s pause) and the
+  text fallback (parsers + the tool-call-markup salvage) keeps working either way.
 - **Fact hygiene** — facts are STICKY knowledge only: the `remember` tool (and the fact
   store itself, for every writer) refuses viewer-relative facts like "object to left" or
   "the door is here" — those go stale the moment anything moves. Good facts name the thing
@@ -249,7 +282,8 @@ Logs one line per NPC: `model family 'qwen' from 'qwen3:14b' — …`.
 | `Enabled` | true | bool | Console REPL mode (default ON); false = legacy perception loop |
 | `MaxRounds` | 3 | 1–8 | Command rounds per think cycle (each round = one LLM call after reading output) |
 | `MaxTokens` | 256 | 64–4096 | Max tokens per console reply (command lines are short — low is fast). Reasoning families: automatic floor `256 + headroom`; your value stands when higher. |
-| `HistoryMessages` | 30 | 6–120 | Rolling conversation window (system prompt always kept) |
+| `HistoryMessages` | 30 | 6–120 | Rolling conversation window (system prompt always kept). When the window trims, the dropped span is replaced by a compact "[session memory]" digest instead of vanishing, so the story survives. |
+| `NativeTools` | true | on/off | Declare the console commands as an OpenAI tools array in console requests (see Native tool calling above). Auto-disabled for 300 s on a first tools-400; disable if your server errors on unknown payload fields. |
 | `AutoScreenshotTicks` | 6 | 0–60 | Attach the NPC's first-person view automatically every N console turns (vision-capable models only, and only when it moved/turned; also right after a stuck streak); 0 = off |
 | `SystemPromptFile` | `system_prompt_console.txt` | — | Console persona/world-rules file (command list + protocol appended automatically) |
 

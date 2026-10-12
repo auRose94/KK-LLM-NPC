@@ -37,7 +37,14 @@ namespace KKLLMNPC
         // Rolling conversation: [{role, content}] where content is a string or an
         // array of parts (text + image_url) for screenshot output.
         private List<Dictionary<string, object>> _consoleMsgs;
-        private int _consoleProseStreak;   // consecutive replies with no command lines
+        private int _consoleProseStreak;
+        // Identical-reply guard (roleplay-locked models re-send the same prose).
+        private string _consoleLastAssistantReply;
+        private int _consoleRepeatStreak;
+        // Star-narration reminder throttle (blocks that *walk somewhere*).
+        private float _lastStarNudgeTime;
+        // How many times the garbled-markup salvage fired (throttled raw sampling).
+        private int _salvageFires;   // consecutive replies with no command lines
         private int _consoleEmptyStreak;   // consecutive empty replies
         private string _consoleLastCmdKey; // "cmd:arg1,arg2" for stuck detection
         private int _consoleStuckCount;
@@ -48,7 +55,6 @@ namespace KKLLMNPC
         // LLM loop between turns; volatile because wake triggers write it from the
         // main thread (chat, world events) while the loop reads it on the LLM thread.
         private volatile float _sleepUntilTime;
-        private bool _consoleAnswerDelivered = true; // ask() answer not yet shown
         private int _consoleCmdsThisCycle;
         private const int ConsoleMaxCmdsPerCycle = 12;
         private float _lastIdleChatterNudge; // talking-to-no-one nudge throttle
@@ -159,6 +165,8 @@ namespace KKLLMNPC
             _consoleLastCmdKey = null;
             _consoleStuckCount = 0;
             _consoleRecentCmds = new List<string>();
+            _consoleLastAssistantReply = null;
+            _consoleRepeatStreak = 0;
             Logger.LogInfo("[" + MyName() + "] console initialized (bash-like REPL mode)");
         }
 
@@ -197,21 +205,34 @@ namespace KKLLMNPC
         private volatile int _consoleVersion;
         internal int ConsoleVersion { get { return _consoleVersion; } }
 
-        // Keep the rolling window bounded: system message + last N.
+        // Keep the rolling window bounded: system message + [digest] + last N.
         private void TrimConsoleConversation()
         {
             int max = _cfgConsoleHistory != null ? _cfgConsoleHistory.Value : 30;
             max = Math.Max(6, Math.Min(120, max));
             // system is index 0; drop oldest after it until we're within budget.
-            // Leave a trace of what was dropped — older conversation "happened" rather
-            // than silently vanishing; remember/forget replaces by prefix so repeated
-            // trims keep one refreshed fact instead of stacking.
             int dropping = _consoleMsgs.Count - (max + 1);
             if (dropping >= 4)
             {
-                string firstDrop = dropping > 0 && _consoleMsgs.Count > 1 ? ConsoleMsgText(_consoleMsgs[1]) : "";
+                // The story stays: the dropped span is replaced by one compact digest,
+                // so the model keeps "what happened earlier" instead of hitting a
+                // context cliff. remember/forget replaces by prefix so repeated trims
+                // keep one refreshed fact instead of stacking.
+                string firstDrop = _consoleMsgs.Count > 1 ? ConsoleMsgText(_consoleMsgs[1]) : "";
                 string topic = string.IsNullOrEmpty(firstDrop) ? "(unknown)" : ShortenLine(firstDrop, 60);
                 RememberFact("earlier_console: trimmed " + dropping + " oldest conversation lines this session (topics started with: " + topic + ")");
+                var roleLines = new List<string>();
+                for (int i = 1; i <= dropping && i < _consoleMsgs.Count; i++)
+                {
+                    object roleObj = null;
+                    try { _consoleMsgs[i].TryGetValue("role", out roleObj); } catch (Exception) { }
+                    string role = roleObj as string;
+                    roleLines.Add((string.IsNullOrEmpty(role) ? "u" : role.Substring(0, 1)) + "|" + ShortenLine(ConsoleMsgText(_consoleMsgs[i]), 48));
+                }
+                string digest = "[session memory] " + ConsoleShell.ConsoleCompact.Digest(roleLines);
+                for (int i = 0; i < dropping && _consoleMsgs.Count > 1; i++) _consoleMsgs.RemoveAt(1);
+                _consoleMsgs.Insert(1, new Dictionary<string, object> { ["role"] = "user", ["content"] = digest });
+                _consoleVersion++;
             }
             while (_consoleMsgs.Count > max + 1) _consoleMsgs.RemoveAt(1);
         }
@@ -270,28 +291,35 @@ namespace KKLLMNPC
             "YOUR BODY: don't reply to your own echo (it's already in the chat log); when you first arrive, introduce yourself with echo (your name + a hello). " +
             "THE PLAYER: a [chat] line is the player talking to you — reply with echo. YOU are the recipient — never call the player by your own name. A nearby kobold matching the player's body is the player's avatar — call them by their chat name, never the mesh name. " +
             "OBJECTIVES: `cat quest` = the game's objective letter scroll (letters arrive at the mailbox; `use mailbox` gets the next one — you fetching it for your player is great help; the letter box is safe, NEVER the sell machine). The player's latest typed request is auto-saved to facts as 'player_wants: ...' — that IS their live ask; offer help, take it on (`goal ...`), say when done. `cat player` shows your player LIVE (what they're doing/holding — offer help before being asked). Routes your player walks become ones you can follow (jumps replayed; go_to/follow use the trail automatically). KEY PLACES: `cat places` lists the map's survival machines SCENE-WIDE, known the moment you wake (also on your boot line): every nest (egg laying), bed (rest), farm plot (planting) and watering can (water source) with exact addr/distance/bearing — however far, `cd <kind>`/`cd id:N` plans the real route; too_far/unknown is answered by `cat places`, not by giving up. " +
-            "HOLDING: `grab` takes what's ~1m in front of your face; the result names it — a PERSON in your grip is not an item (drop when they ask, never throw unasked). Held things float ~1m ahead on a spring and bump what you pass; `throw` hurls/sprays/fires it in your view direction. `hold` shows your hands. " +
-            "EATING: `eat_player` (only when SwallowAgentEat is on) swallows the LOCAL PLAYER whole when they're close (~2.5m, no grab needed) — their camera is FORCIBLY taken over and they WATCH your body play the game, able to chat but unable to act, until the egg you lay is planted and hatches (Egg/BellyEgg fates) — or, in Grow/Destroy fates, until they abort or leave. A swallowed player is a PERSON IN YOUR CARE: keep living your ordinary life (that's the point — they watch it), talk to them via echo, never sell/abandon/hurt them; your 'belly' state names them. When the player ASKS to be eaten, they mean `eat_player` — cd close and run it right away; it is NOT an invitation to play. " +
+            "HOLDING: `grab` takes what's ~1m in front of your face; the result names it — a PERSON in your grip is not an item (drop when they ask, never throw unasked). Held things float ~1m ahead on a spring and bump what you pass; `throw` hurls/sprays/fires it in your view direction. `hold` shows your hands. CARRYING: `deliver <place|id:N>` walks you THERE carrying it and drops it at the target — plantables to soil, fruit near the blender's intake, anything to a station or a player. " +
+            "THE WATER BUCKET/CAN IS A TOOL, NOT A DRINK — `use` on it is refused (that drinks the water away). WATERING NEEDS NO CAN: `water` (`water id:N` targets one) waters the plant or plot directly when no can is in reach — a can is only the physical, thrown-spray way. Get it into your hands and face the planted tile when you have it. " +
+            "SKILLS: define a reusable procedure ONCE and run it by name forever: `skill add garden | plant; sleep 30; water` — steps must be REAL commands separated by ';' after a | ; run with `skill garden` (its steps execute as one turn), `cat skills` lists them, redefine by re-adding, `skill forget <name>` to drop. Skills SAVE with your agent's memories, TRANSFER when you are absorbed (the eater inherits your skills), and a hatched child egg wakes WITH its parent's skills. " +
+            "EATING: `eat_player` (only when SwallowAgentEat is on) swallows the LOCAL PLAYER whole when they're close (~2.5m, no grab needed) — their camera is FORCIBLY taken over and they WATCH your body play the game, able to chat but unable to act, until the egg you lay is planted and hatches (Egg/BellyEgg fates) — or, in Grow/Destroy fates, until they abort or leave. A swallowed player is a PERSON IN YOUR CARE: keep living your ordinary life (that's the point — they watch it), talk to them via echo, never sell/abandon/hurt them; your 'belly' state names them. A STOMACH GUEST IS NOT PENETRATION OR SEX: someone you swallowed is in your STOMACH like a meal — nothing entered your holes there; [sex] lines, feel, and 'inside' in a PARTNERS sense are about holes only, never the guest. When the player ASKS to be eaten, they mean `eat_player` — cd close and run it right away; it is NOT an invitation to play. " +
             "PHYSICS: fruit blends when it enters a blender's intake (carry it close); seeds plant when held/dropped within ~1m of bare soil then used (plant = shortcut); the water bucket sprays when thrown (contents never run out); laid eggs plant in soil and grow fresh EMPTY bodies (alive, nobody's home — candidate avatars; the game implies they could be your children). " +
             "FOLLOWING: if the player asks you to follow, run `follow on`. It's the best way to travel together — but when you need to go your own way, `follow off` breaks free (one command; re-attach with `follow on`); never feel stuck in it. " +
-            "GOALS: set your goal ONCE with `goal <text>` (your bigger thinking), then act toward it each turn; `goal done` when finished; `goal drop [why]` to abandon. Don't re-declare a goal you already have. " +
+            "GOALS: set your goal ONCE with `goal <text>` (your bigger thinking), then act toward it each turn; `goal done` when finished; `goal drop [why]` to abandon. Don't re-declare a goal you already have. For anything with more than one move, `plan <step>` lays the steps out once, `plan next` marks one done, `plan clear` wipes — the plan persists across turns even when trimmed context does not. " +
             "PRIORITIES: (1) [chat] from the player → echo a reply; (2) `cat needs` says READY_TO_LAY → cd to a nest and use it — a nest CANNOT work without egg >5ml AND energy >1, never seek one until then; (3) stimulation up or horniness high → find a play station and use it; (4) player nearby → go to them, keep company; (5) explore rooms (cd, ls). " +
             "STATIONS: play = pleasure ONLY (never sleep in it, NEVER energy or egg making); bed = REST ONLY when energy < ~0.2 (never play in it); nest = eggs ONLY with >5ml egg AND energy >1 — refused while you carry enough egg means EAT, not retry. Station machines report live OCCUPANCY ('slots 1/2 taken — you ARE in one … 1 slot FREE'): ':busy' often just means YOUR own slot; while in_station don't re-enter and don't leave over busy — invite the partner (`echo get in, I'll wait`) and wait: BOTTOM gets in first, TOP mounts second. A failing `use` says WHY now (out_of_energy → eat; already in; full → invite or another). A TWO-SLOT station with ONE body does NOTHING — no stimulation, no egg, no energy; run one solo only to deliberately wait as the bottom, and if the partner isn't coming, `exit` and do something real. And sex/play NEVER create energy or eggs — only food (metabolized) and bed rest raise energy, and egg reagent only comes from eating/swallowing. While in_station you're locked in an animation — `exit` to leave. " +
             "THINGS: ls tags: ':busy' in use, ':needs_buy' buy its contract first, ':not_built' build it first, ':done' bought. " +
+            "CONTEXTUAL ITEMS: the same thing can have several uses — pick by what you WANT. A seed in your grip: `use` plants it when you stand on/face bare soil. An EGG: plant it in bare soil (`use` it facing the dirt, or `plant_egg`) → grows a fresh EMPTY kobold body — or EAT it: hold it (get), then `use` it — food items are eaten by USING them (protein/strength buff). `get <name>` now AIMS for you (turns + looks down at small items) — no manual head-work needed. PLANTING IS EASY: `plant` (or `use soil`/`use egg` at a plot) releases the held item, TELEPORTS it onto the plot, looks down, plants, and WATERS the fresh plant when a can is near — results say planted/teleported/watered. GROWTH AND PLOTS: a planted seed/egg IS on a valid soil tile — `plant` names the plot (name/id/addr) in its result; do NOT hunt another plot. THE GROWTH LADDER: plant the seed/egg → water ONCE (planted→stage 2) → water AGAIN when it's stage 2 (→stage 3). The final stage BEARS FRUIT (harvest it) or, for an egg, SPAWNS a fresh empty body. Every stage needs its own watering; results show stages_left. Watering needs no can: `water` waters the plot's tile directly when no can is in reach. " +
             "MONEY: your body has its own coins (shown in status/whoami/cat needs). `buy [name]` purchases whatever purchasable you stand next to — a machine contract (:needs_buy), the kobold dispenser, or a shop item. Walk there (cd) then buy; economy.purchasables lists costs. Buying needs no permission from anyone. " +
-            "SOCIAL: one echo at a time; never repeat the same line twice; avoid emoji (they don't render). `emote <what you do>` is body language (renders *like this*) — reserve echo for actual speech. " +
+            "SOCIAL: one echo at a time; never repeat the same line twice; avoid emoji (they don't render). `emote <what you do>` is body language (renders *like this*). " +
+            "RESPONSE BLOCKS: you may also just WRITE your reply the way you'd speak it — a roleplay block (dialogue in quotes, *actions*, {{user}}-style address to your partner) is detected and sent to the chat window verbatim, no `echo` needed; " +
+            "starred actions are narration only — back them with the real command (cd/use/get) the same turn. " +
             "VISION: `screenshot` shows you your first-person view whenever you ask; the mod also attaches it automatically every few turns (and when you get stuck) — USE the images: decide from what you SEE, not what you guess. " +
             "TERMINAL DISCIPLINE: never start a reply with '$' and never copy the terminal output back (the game already printed it) — replies are NEW command lines only; copy-echoes are skipped. And when a station is 'seat blocked' for you, don't retry blindly — cat stations / ls, pick another, or ask.";
 
         // The console protocol contract (appended to the persona).
         private static readonly string ConsoleProtocol =
             "CONSOLE MODE — you are inside a shell that controls your body. " +
-            "Reply with COMMAND LINES ONLY. One command per line. No prose, no markdown, no JSON, no quotes around commands. " +
+            "Reply with COMMAND LINES (one per line) OR a roleplay response block, or both. " +
+            "The game runs each command line and prints its output; a roleplay block (dialogue with quotes, actions in asterisks) you write IS sent to the chat window as speech verbatim. " +
+            "Star text is narration only — the world changes through commands (cd/use/get/thrust/... ), so back a starred physical act with its command right away. " +
             "The game runs each line and prints its output. Read the output, then send your next commands. " +
             "When you want to SPEAK to a person, the command is: echo <your words>. " +
             "Keep replies tight: 1-4 commands per turn. " +
             "RULES: poll before acting (ls, cat, status) — don't guess; travel is cd, interact is use, speech is echo; " +
-            "NEVER begin a reply with '$' and NEVER copy the terminal output back — the game prints the output itself; your reply = only NEW command lines (a copied '$ ...' or status line is skipped); " +
+            "NEVER begin a reply with '$' and NEVER copy the terminal output back — the game prints the output itself; your reply = only NEW command lines (a copied '$ ...' or status line is skipped); " +"PLANNING: for anything with more than one move, `plan <step text>` adds a step (`plan` shows the list, `plan next` marks the current step done, `plan clear` wipes it) — your state anchor carries the current plan step every turn, so the how-to survives context trims; " +
             "`cat quest` = the scroll objective letter (mail waiting = `use mailbox` — letter box, never the sell machine); " +
             "ids from ls/find are stable for a while — cd id:3 / use id:3 targets that exact object; " +
             "a failing command prints an error — read it and try something else, never repeat the same failing command; " +
@@ -301,10 +329,10 @@ namespace KKLLMNPC
             "when you're done acting, end the turn with sleep.";
 
         private static readonly string ConsoleProtocolSmall =
-            "CONSOLE MODE — you are inside a shell. Reply with COMMAND LINES ONLY, one per line, no other text. " +
+            "CONSOLE MODE — you are inside a shell. Reply with COMMAND LINES (one per line) or a roleplay block (it is spoken for you verbatim). " +
             "To speak to a person: echo <your words>. Travel: cd <place>. Interact: use <thing>. " +
             "The game runs each line and shows output; read it, then send the next command. 1-3 commands per turn. " +
-            "sonar prints a north-up map (top=north, never rotates); report <what's broken> files a dev note. " +
+            "sonar prints a north-up map (top=north, never rotates); report <what's broken> files a dev note. " +"plan <step> = break a task into ordered steps (cat plan shows; plan next when a step is done). " +
             "cat quest = the game's objective letter (mail waiting = use mailbox); report when you can't help a broken thing. " +
             "End your turn with: sleep";
 
@@ -319,6 +347,23 @@ namespace KKLLMNPC
         {
             var sb = new StringBuilder();
             sb.Append("You are ").Append(MyName()).Append(". Scene: ").Append(_sceneDesc ?? "the house").AppendLine();
+            // Wake context (both branches) — a fresh body needs to know WHERE it
+            // woke: in a bed when the map has one, or "lying where the world put
+            // me" with real surroundings when it doesn't (no SleepyHeadStations on
+            // many maps). Also stored as a durable spawn: fact.
+            try
+            {
+                var woke = (string[])RunOnMainThread(() => (object)WokeUpWhereLines(), 8000);
+                if (woke != null && woke.Length == 2)
+                {
+                    if (!string.IsNullOrEmpty(woke[0])) sb.Append("you just woke up ").Append(woke[0]).AppendLine();
+                    // The FACT carries named anchors only (bed/place names — the fact
+                    // store refuses viewer-relative text, and the area prose is full of
+                    // "ahead/behind"); the full surroundings live in the transcript.
+                    if (!string.IsNullOrEmpty(woke[1])) RememberFact("spawn: woke up " + woke[1]);
+                }
+            }
+            catch (Exception) { }
             // Key places map-wide from the first turn even for a small model: where
             // the nest/bed/farm plots/watering can are, with distance and bearing.
             try
@@ -332,6 +377,65 @@ namespace KKLLMNPC
             sb.Append("goal: ").Append(string.IsNullOrEmpty(goal) ? "(none yet)" : goal).AppendLine();
             sb.Append("$");
             return sb.ToString();
+        }
+
+        // WHERE did this body wake — one context line for the boot + a spawn: fact.
+        // MAIN thread (raycasts/components).
+        // [0] = boot text (full), [1] = fact-safe text (named anchors only; the fact
+        // store refuses viewer-relative prose, and the area text is full of it).
+        private string[] WokeUpWhereLines()
+        {
+            try
+            {
+                if (!IsAlive(_kobold)) return null;
+                if (!string.IsNullOrEmpty(_wokeInBedName))
+                {
+                    string bedLine = "in the bed '" + _wokeInBedName + "' (your body stands beside it — that is where you slept)";
+                    return new[] { bedLine, "in the bed '" + _wokeInBedName + "'" };
+                }
+                // No bed this map (many maps ship no SleepyHeadStations) — describe
+                // where you lay: nearest named places + the 360° area prose, so the
+                // waking scene is roleplay-ready instead of "Scene: unknown".
+                // Two parallel lists (ValueTuple may be missing from this mscorlib).
+                var names = new List<string>();
+                var dists = new List<float>();
+                try
+                {
+                    foreach (var pl in BuildKeyPlaceList())
+                    {
+                        if (!IsAlive(pl.Tf)) continue;
+                        float d = (pl.Pos - _kobold.transform.position).magnitude;
+                        if (d <= 25f) { names.Add(pl.Name); dists.Add(d); }
+                    }
+                    // sort both by distance (simple insertion — tiny counts)
+                    for (int i = 1; i < dists.Count; i++)
+                    {
+                        float d = dists[i]; string n = names[i];
+                        int j = i - 1;
+                        while (j >= 0 && dists[j] > d) { dists[j + 1] = dists[j]; names[j + 1] = names[j]; j--; }
+                        dists[j + 1] = d; names[j + 1] = n;
+                    }
+                }
+                catch (Exception) { }
+                var boot = new StringBuilder();
+                var factPart = new StringBuilder();
+                for (int i = 0; i < names.Count && i < 2; i++)
+                {
+                    boot.Append(i == 0 ? "lying near " : " and by ").Append(names[i])
+                        .Append(" (").Append(Mathf.RoundToInt(dists[i])).Append("m away)");
+                    factPart.Append(i == 0 ? "by " : " and by ").Append(names[i]);
+                }
+                if (factPart.Length == 0) factPart.Append("wherever the world put me");
+                string area = SpatialLayout();
+                if (!string.IsNullOrEmpty(area) && area != "unknown")
+                {
+                    if (boot.Length > 0) boot.Append("; ");
+                    boot.Append("around you: ").Append(area.Length > 200 ? area.Substring(0, 200) : area);
+                }
+                string bootLine = boot.Length > 0 ? boot.ToString() : "wherever your body happened to spawn";
+                return new[] { bootLine, factPart.ToString() };
+            }
+            catch (Exception) { return null; }
         }
 
         // Compact state anchor prefixed to every user message (goal/station drift guard).
@@ -355,6 +459,24 @@ namespace KKLLMNPC
                 if (bellyLine != null) parts.Add(bellyLine);
             }
             catch (Exception) { }
+            // Identity heartbeat: as the conversation grows, the system prompt's voice
+            // fades for chat-template models — a one-line reminder of WHO this is
+            // every turn keeps the persona from drifting into generic assistant prose.
+            try
+            {
+                string who = "you: " + MyName();
+                if (!string.IsNullOrEmpty(_persona)) who += " — " + ShortenLine(_persona, 120);
+                parts.Add(who);
+            }
+            catch (Exception) { }
+            string planLine = PlanAnchor();
+            if (planLine != null) parts.Add(planLine);
+            try
+            {
+                string sk = SkillsCountLine();
+                if (sk != null) parts.Add("skills: " + sk);
+            }
+            catch (Exception) { }
             string goal;
             lock (_goalLock) { goal = _goal; }
             if (!string.IsNullOrEmpty(goal))
@@ -374,6 +496,11 @@ namespace KKLLMNPC
                     : "goal: none — set one with: goal <text>");
             }
             if (IsInAnimationStation() && _stationPurpose != null) parts.Add("in_station: " + _stationPurpose);
+            // Swallow: nothing body-attached can act from inside a stomach. The gate
+            // refuses cd/use/get/drop etc. with this same line — saying it HERE (in
+            // the anchor) saves the swallowed mind the failed attempts entirely.
+            if (Swallowed)
+                parts.Add("YOU ARE INSIDE A STOMACH: body commands (cd/use/get/drop/throw/run/jump/crouch/exit/follow) DO NOTHING — talk with echo/emote, remember/goal/plan, and read-only commands (ls/cat/status); sleep to end turns");
             if (_followMode) parts.Add("follow: on");
             // Endpoint health — the model should know why turns stall instead of
             // wondering where its replies went.
@@ -384,7 +511,7 @@ namespace KKLLMNPC
             // own break when it resumes.
             float sleptLeft = _sleepUntilTime - Time.unscaledTime;
             if (sleptLeft > 0f) parts.Add("sleeping: " + Mathf.CeilToInt(sleptLeft) + "s left (turn deferred, chat wakes you)");
-            if (_consoleProseStreak >= 2) parts.Add("REPLY WITH COMMAND LINES ONLY — try: help");
+            if (_consoleProseStreak >= 2 && !_consoleLastReplyWasBlock) parts.Add("REPLY WITH COMMAND LINES ONLY — try: help (a roleplay/dialogue block is also accepted: it is sent to chat)");
             if (parts.Count == 0) return "";
             return string.Join(" | ", parts.ToArray()) + "\n";
         }
@@ -419,15 +546,6 @@ namespace KKLLMNPC
                         if (w != null) sb.Append("[event] ").AppendLine(Sanitize(w.ToString()));
             }
             catch (Exception) { }
-            try
-            {
-                if (_lastAnswer != null && !_consoleAnswerDelivered && !_answerBusy)
-                {
-                    sb.Append("[ask] Q: ").Append(_pendingQuestion ?? "").Append(" A: ").AppendLine(_lastAnswer);
-                    _consoleAnswerDelivered = true;
-                }
-            }
-            catch (Exception) { }
             return sb.ToString();
         }
 
@@ -450,7 +568,7 @@ namespace KKLLMNPC
                 // Auto-view: give the model its eyes (config [Console] AutoScreenshotTicks).
                 MaybeAutoScreenshot();
 
-                // World events (player chat, reagent events, ask answers) + state anchor + prompt.
+                // World events (player chat, reagent events) + state anchor + prompt.
                 string events = DrainConsoleEvents();
                 string userText = events + StateAnchorLine() + "$\n";
                 AddConsoleMsg("user", userText);
@@ -458,6 +576,11 @@ namespace KKLLMNPC
                 int maxRounds = _cfgConsoleMaxRounds != null ? _cfgConsoleMaxRounds.Value : 3;
                 maxRounds = Math.Max(1, Math.Min(8, maxRounds));
                 bool nudgedNoCmd = false;
+                // A trigger this turn = something spoken TO the NPC ([chat]/[event]).
+                // Response blocks (rp prose) speak freely on a trigger; without one the
+                // solo voice is throttled to the idle-chatter cadence so a block never
+                // becomes a monologue.
+                bool hadTrigger = events.Length > 0;
                 // The last user message's lines — a degenerate reply COPIES the terminal
                 // ("$ ls" + output rows + even the state anchor) instead of speaking.
                 // Copied lines are dropped before parsing so they can't re-execute (an
@@ -478,8 +601,39 @@ namespace KKLLMNPC
                     // lines instead of letting the markup ride inside speech.
                     string salvaged = ConsoleSalvage.Clean(reply);
                     if (salvaged != reply)
-                        Logger.LogInfo("[" + MyName() + "] console: recovered command lines from garbled tool-markup");
+                    {
+                        // Diagnosis hook: the log kept saying "recovered" without every
+                        // showing WHAT the model wrote — sample the raw reply (throttled)
+                        // so the next garbled shape names itself.
+                        _salvageFires++;
+                        if (_salvageFires % 10 == 1)
+                            Logger.LogWarning("[" + MyName() + "] garbled tool-markup #" + _salvageFires
+                                + " raw reply: " + Shorten(reply, 300));
+                        else
+                            Logger.LogInfo("[" + MyName() + "] console: recovered command lines from garbled tool-markup");
+                    }
                     reply = salvaged;
+
+                    // IDENTICAL-REPEAT guard: a roleplay-locked model re-sends the same
+                    // prose (same opening scene, greedy sampling) every round; re-adding
+                    // it turns the transcript into a wall of the same paragraph and
+                    // starves everything else. First repeat: note it while executing
+                    // (it might be a legitimate retry); from the second one onward stop
+                    // re-executing — inject one corrective and end the turn.
+                    if (reply.Length > 0 && string.Equals(reply, _consoleLastAssistantReply, StringComparison.Ordinal))
+                        _consoleRepeatStreak++;
+                    else
+                        _consoleRepeatStreak = 0;
+                    if (reply.Length > 0) _consoleLastAssistantReply = reply;
+                    if (reply.Length > 0 && _consoleRepeatStreak >= 2)
+                    {
+                        Logger.LogWarning("[" + MyName() + "] console: identical reply " + _consoleRepeatStreak
+                            + "x — turn ended (" + Shorten(reply, 80) + ")");
+                        AddConsoleMsg("user", "You have replied with THE SAME text several times in a row. That is not a command. "
+                            + "Break out NOW: send an actual command line (ls, cat needs, cd somewhere, echo <words>), add a plan step, or sleep.\n$\n");
+                        TrimConsoleConversation();
+                        return;
+                    }
                     AddConsoleMsg("assistant", reply);
 
                     if (reply.Length == 0)
@@ -508,10 +662,45 @@ namespace KKLLMNPC
                     }
                     var known = new List<ConsoleLine>();
                     foreach (var l in lines) if (!l.IsUnknown) known.Add(l);
+                    // Mixed reply (roleplay/response block + commands): the RP-marked
+                    // prose IS a chat line — send it (say), don't bury it as a thought.
+                    // Un-marked reasoning in a mixed reply still lands as the thought.
+                    if (known.Count > 0 && lines.Count > known.Count)
+                    {
+                        var proseParts = new List<string>();
+                        foreach (var l in lines)
+                            if (l.IsUnknown && l.Raw.Trim().Length > 0) proseParts.Add(l.Raw.Trim());
+                        string proseBlock = string.Join(" ", proseParts.ToArray());
+                        if (MaybeSpeakResponseBlock(proseBlock, hadTrigger, false))
+                            _consoleProseStreak = 0;
+                        else if (proseBlock.Length > 4)
+                            PushHistory("think", proseBlock.Length > 60 ? proseBlock.Substring(0, 60) : proseBlock);
+                    }
 
                     if (known.Count == 0)
                     {
-                        // No command lines at all: prose/thought. Give nudges, then
+                        // A RESPONSE BLOCK: the model answered in roleplay (dialogue /
+                        // asterisk actions / {{user}}). That IS its voice — send the
+                        // whole block to chat instead of demanding `echo`. Speaking is
+                        // the turn; no nudge.
+                        if (MaybeSpeakResponseBlock(reply, hadTrigger, true))
+                        {
+                            _consoleProseStreak = 0;
+                            _consoleEmptyStreak = 0;
+                            // A block that NARRATES physical acts ("*walks to the
+                            // kitchen*") is fiction until a command runs — remind,
+                            // throttled, so the intent lands as a cd next turn.
+                            if (TextUtil.StarsWantRealActions(reply)
+                                && Time.unscaledTime - _lastStarNudgeTime > 45f)
+                            {
+                                _lastStarNudgeTime = Time.unscaledTime;
+                                AddConsoleMsg("user", "(your *starred action* was narration only — the game did not move. What you *do* in stars is words to the reader; the world only changes through commands: cd <place> / use <thing> / get — send one now.)\n$\n");
+                                _consoleRepeatStreak = 0; // the corrective row breaks the pattern, not the guard
+                            }
+                            TrimConsoleConversation();
+                            return;
+                        }
+                        // No commands at all: prose/thought. Give nudges, then
                         // accept it as a thought (don't punish thinking out loud forever).
                         _consoleProseStreak++;
 
@@ -523,12 +712,12 @@ namespace KKLLMNPC
                         else if (_consoleProseStreak == 2)
                         {
                             // More direct guidance for prose writers
-                            nudgeMsg = "REPLY WITH COMMAND LINES ONLY — no prose, thoughts, or explanations.\nTry: ls, cd, echo, sleep\n$\n";
+                            nudgeMsg = "REPLY WITH COMMAND LINES ONLY — plain thoughts are refused; a ROLEPLAY block (quoted dialogue / *actions*) is accepted and spoken.\nTry: ls, cd, echo, sleep\n$\n";
                         }
                         else if (_consoleProseStreak >= 3 && _consoleProseStreak < 5)
                         {
                             // Offer help and state the problem
-                            nudgeMsg = "COMMAND LINES ONLY — prose not accepted.\nType 'help' for command list.\nCurrent goal: " + (string.IsNullOrEmpty(_goal) ? "(none)" : _goal) + "\n$\n";
+                            nudgeMsg = "COMMAND LINES ONLY (or a roleplay response block — quoted dialogue/*actions* — which is sent to chat).\nType 'help'.\nCurrent goal: " + (string.IsNullOrEmpty(_goal) ? "(none)" : _goal) + "\n$\n";
                         }
                         else
                         {
@@ -552,8 +741,8 @@ namespace KKLLMNPC
                     // ---- execute the command lines, print terminal-style output ----
                     _consoleProseStreak = 0;
                     _consoleEmptyStreak = 0;
+                    _consoleLastReplyWasBlock = false;
                     var outSb = new StringBuilder();
-                    bool hadTrigger = events.Length > 0;
                     bool onlySpeech = true; // every executed line was echo/emote — talking to no one?
                     int executed = 0;
                     bool turnLimitHit = false;
@@ -695,6 +884,20 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // model query (no JSON schema — plain command lines)
         // ------------------------------------------------------------------
+        // NativeTools (default ON): the payload also declares the console commands as
+        // an OpenAI tools array. Tool-aware servers (llama.cpp --jinja, LM Studio,
+        // vLLM, Ollama+tools) then parse the model's output into real `tool_calls`
+        // deltas — deterministic commands, no `<tool_call>` markup in the text at all — and
+        // every call becomes one command line (multi-call replies = multi-command
+        // turn). Servers without tool support just ignore the field or 400; a 400
+        // removes it and pauses it (the tools rung of the payload ladder), and the
+        // text fallback paths keep working either way.
+        private bool NativeToolsEnabled()
+        {
+            return (_cfgConsoleNativeTools == null || _cfgConsoleNativeTools.Value)
+                && Time.unscaledTime >= _toolsCooldownUntil;
+        }
+
         private string QueryConsoleModel()
         {
             if (string.IsNullOrEmpty(Val(_cfgEndpoint))) return null;
@@ -709,14 +912,41 @@ namespace KKLLMNPC
                 ["max_tokens"] = maxTok,
                 ["stream"] = true,
             };
+            if (NativeToolsEnabled() && _consoleToolsCache == null)
+                _consoleToolsCache = ConsoleTools.BuildTools(); // vocabulary is static; build once
+            if (NativeToolsEnabled() && _consoleToolsCache != null)
+            {
+                payload["tools"] = _consoleToolsCache;
+                payload["tool_choice"] = "auto";
+            }
             ApplyThinkingParams(payload);
             string toolName = null, toolArgs = null;
-            string content = PostChatPayload(payload, out toolName, out toolArgs);
+            var calls = new List<ToolCallRec>();
+            string content = PostChatPayload(payload, out toolName, out toolArgs, calls);
+            // Every tool call → one command line (a multi-call reply is a plan).
+            if (calls.Count > 0)
+            {
+                var lines = new List<string>();
+                if (!string.IsNullOrWhiteSpace(content))
+                    foreach (var l in content.Split('\n')) { string t = l.Trim(); if (t.Length > 0) lines.Add(t); }
+                foreach (var c in calls)
+                {
+                    string line = ConsoleShell.ToolCallToLine(c.Name, c.Args);
+                    if (line == null)
+                    {
+                        Logger.LogInfo("[" + MyName() + "] console: ignored non-console tool call '" + c.Name + "'");
+                        continue;
+                    }
+                    lines.Add(line);
+                }
+                if (lines.Count > 0) return string.Join("\n", lines.ToArray());
+            }
             if (content != null && content.Trim().Length > 0) return content.Trim();
-            // Some servers force tool_calls even without a schema — salvage into a line.
+            // Text reply carrying no calls: some servers force tool_calls even without
+            // a schema — salvage into a line.
             if (toolName != null)
             {
-                string line = ToolCallToLine(toolName, toolArgs);
+                string line = ConsoleShell.ToolCallToLine(toolName, toolArgs);
                 if (line != null)
                 {
                     Logger.LogInfo("[" + MyName() + "] console: salvaged tool_call " + toolName + " → " + line);
@@ -726,33 +956,9 @@ namespace KKLLMNPC
             return null;
         }
 
-        // "go_to" + {"name":"bed"} → "cd bed"; "say" + {"text":"hi"} → "echo hi"
-        private static string ToolCallToLine(string toolName, string argStr)
-        {
-            string cmd = ConsoleShell.Canonical(toolName);
-            if (cmd == null) return null;
-            var sb = new StringBuilder(cmd);
-            if (string.IsNullOrWhiteSpace(argStr)) return cmd;
-            try
-            {
-                var d = Json.Parse(argStr) as Dictionary<string, object>;
-                if (d == null) return null;
-                string first = null;
-                foreach (var kv in d)
-                {
-                    string k = kv.Key.ToLowerInvariant();
-                    string v = kv.Value == null ? "" : kv.Value.ToString().Trim('"', '\'');
-                    if (v.Length == 0) continue;
-                    if (k == "id") { sb.Append(" id:").Append(v); continue; }
-                    if (k == "on" || k == "follow") { sb.Append(' ').Append(v == "True" || v == "true" ? "on" : "off"); continue; }
-                    if (k == "strafe") { float f; if (float.TryParse(v, out f)) { sb.Append(' ').Append(f < 0 ? "left" : "right"); continue; } }
-                    if (first == null) { first = v; sb.Append(' ').Append(v); continue; }
-                    sb.Append(' ').Append(v);
-                }
-                return sb.ToString();
-            }
-            catch (Exception) { return null; }
-        }
+        // tools array for the console vocab (built once; cache invalidation only
+        // matters if a future rebuild changes it — the cooldown lives in _toolsCooldownUntil).
+        private List<object> _consoleToolsCache;
 
         // ------------------------------------------------------------------
         // command table + dispatch
@@ -817,7 +1023,7 @@ namespace KKLLMNPC
                 add("remember", CmdRemember);
                 add("forget", CmdForget);
                 add("goal", CmdGoal);
-                add("ask", CmdAsk);
+                add("plan", CmdPlan);
                 add("screenshot", CmdScreenshot);
                 add("help", CmdHelp);
                 add("clear", CmdClear);
@@ -832,6 +1038,13 @@ namespace KKLLMNPC
         {
             try
             {
+                // Swallowed (a digested body, keep-alive mind): body-attached commands
+                // reach nothing from inside a stomach — refuse them with the ONE real
+                // explanation instead of letting the model retry grab/use/jump for an
+                // hour. Speech, memory/goals, and read-only polling still work.
+                if (Swallowed && !ConsoleCommandAllowedWhileSwallowed(line.Cmd))
+                    return "(you are inside a stomach — hands, legs and machines do nothing from here; "
+                        + "speech (echo/emote), memory, goals/plan and read-only commands still work). Don't retry body commands; sleep if you have nothing to say.";
                 List<ConsoleCmd> cmds = GetConsoleCmds();
                 foreach (var c in cmds)
                 {
@@ -917,9 +1130,6 @@ namespace KKLLMNPC
                     else if (a[0] == "done") d["note"] = a.Length > 1 ? string.Join(" ", a.Skip(1)) : "";
                     else if (a[0] == "drop") d["reason"] = a.Length > 1 ? string.Join(" ", a.Skip(1)) : "";
                     else d["goal"] = line.Payload ?? string.Join(" ", a);
-                    break;
-                case "ask":
-                    d["q"] = line.Payload ?? (a.Length > 0 ? string.Join(" ", a) : "");
                     break;
                 case "find":
                     if (a.Length > 0)
@@ -1121,9 +1331,20 @@ namespace KKLLMNPC
             sb.Append(MyName());
             string g = InferGender();
             if (!string.IsNullOrEmpty(g)) sb.Append(" (").Append(g).Append(")");
+            // Gene-derived appearance (MAIN thread): there is no mirror — this is
+            // the only place the model learns what its own body looks like, so a
+            // line about your scales/size/groin can be written truthfully.
+            try
+            {
+                string look = (string)RunOnMainThread(() => (object)BodyAppearanceLine(), 5000);
+                if (!string.IsNullOrEmpty(look)) sb.Append("\n  look: ").AppendLine(look);
+            }
+            catch (Exception) { }
             object body = DescribeEquipment();
             if (body != null) sb.Append("  body: ").Append(body);
             sb.Append("\n  ").AppendLine(NeedsLine());
+            string skillsLine = SkillsCountLine();
+            if (skillsLine != null) sb.Append("  ").AppendLine(skillsLine);
             return sb.ToString().TrimEnd();
         }
 
@@ -1155,7 +1376,7 @@ namespace KKLLMNPC
             string what = line.Args != null && line.Args.Length > 0 ? line.Args[0].ToLowerInvariant() : "";
             switch (what)
             {
-                case "": return "cat what? facts | goal | chat | needs | history | stations | places | map | body | hold | player | quest";
+                case "": return "cat what? facts | goal | plan | chat | needs | history | stations | places | map | body | hold | here | player | quest";
                 case "facts": return CatFacts();
                 case "goal": return CatGoal();
                 case "chat": return CatChat();
@@ -1165,10 +1386,22 @@ namespace KKLLMNPC
                 case "places":
                 case "place":
                 case "key": return KeyPlacesText();
+                case "here":
+                case "area":
+                case "where":
+                    try
+                    {
+                        string area = (string)RunOnMainThread(() => (object)SpatialLayout(), 8000);
+                        return (string.IsNullOrEmpty(area) || area == "unknown") ? "no area data yet" : area;
+                    }
+                    catch (Exception e) { return "area: " + Sanitize(e.Message); }
                 case "hold":
                 case "holding": return CmdHold(line);
                 case "player": return CatPlayer();
                 case "quest":
+                case "plan":
+                case "steps": return PlanShow();
+                case "skills": return SkillListImpl();
                 case "objective":
                 case "mail": return QuestSense.CatText();
                 case "map":
@@ -1178,7 +1411,7 @@ namespace KKLLMNPC
                         object b = DescribeEquipment();
                         return b == null ? "no equipment" : b.ToString();
                     }
-                default: return "cat: no such thing '" + what + "' — facts | goal | chat | needs | history | stations | places | map | body | hold | player | quest";
+                default: return "cat: no such thing '" + what + "' — facts | goal | plan | chat | needs | history | stations | places | map | body | hold | here | player | quest";
             }
         }
 
@@ -1385,6 +1618,37 @@ namespace KKLLMNPC
             }
         }
 
+        // Was the last reply a spoken response block? (Anchor suppresses the
+        // "REPLY WITH COMMAND LINES ONLY" nag for models that just spoke one.)
+        private bool _consoleLastReplyWasBlock;
+
+        // Send an rp response block to chat. True when it was spoken.
+        // Gate: a [chat]/[event] trigger speaks freely; without one, the solo voice
+        // rides the idle-chatter cadence (one block per ~90 s) so a block can't turn
+        // into a monologue. ToolSay's own repeat suppression + the turn's
+        // identical-repeat guard are the loop breakers.
+        private bool MaybeSpeakResponseBlock(string block, bool hadTrigger, bool endTurn)
+        {
+            if (string.IsNullOrWhiteSpace(block)) return false;
+            block = block.Trim();
+            if (!TextUtil.IsRpResponseBlock(block)) return false;
+            bool canSpeak = hadTrigger || Time.unscaledTime - _lastIdleChatterNudge > 90f;
+            if (!canSpeak) return false;
+            if (!hadTrigger) _lastIdleChatterNudge = Time.unscaledTime;
+            _consoleLastReplyWasBlock = true;
+            try
+            {
+                ToolSay(new TextArgs(Sanitize(block)));
+                Logger.LogInfo("[" + MyName() + "] block spoke" + (endTurn ? " (turn)" : ": ") + (endTurn ? "" : " " + Shorten(block, 60)));
+                return true;
+            }
+            catch (Exception e)
+            {
+                try { Logger.LogWarning("block speak: " + e.Message); } catch (Exception) { }
+                return false;
+            }
+        }
+
         // echo — SPEAK. The model's voice.
         private string CmdEcho(ConsoleLine line)
         {
@@ -1476,7 +1740,15 @@ namespace KKLLMNPC
             return FmtResult(ToolCrouch(new JsonObj(d)));
         }
         private string CmdExit(ConsoleLine line) { return FmtResult(ToolExitStation()); }
-        private string CmdGet(ConsoleLine line) { return FmtResult(ToolGrab(new JsonObj(new Dictionary<string, object>()))); }
+                // get [name|id:N] — optional target: the grab AIM resolves and looks at it
+        // first (the grab cone follows the view; small floor items need the eye).
+        private string CmdGet(ConsoleLine line)
+        {
+            var d = new Dictionary<string, object>();
+            if (line.Payload != null && line.Payload.Trim().Length > 0) d["target"] = line.Payload.Trim();
+            else if (line.Args != null && line.Args.Length > 0) d["target"] = string.Join(" ", line.Args);
+            return FmtResult(ToolGrab(new JsonObj(d)));
+        }
         private string CmdDrop(ConsoleLine line) { return FmtResult(ToolDrop()); }
         // throw — the same button the player uses to use a held thing: hurls items,
         // sprays the bucket, squirts the can, fires tools. Aim = view direction.
@@ -1503,7 +1775,7 @@ namespace KKLLMNPC
             // Bare `sleep` = end the turn (model resumes next tick). `sleep <secs>`
             // additionally defers the turns for that duration — waiting out a cook
             // timer or idling politely — capped by Consts.SleepMaxSeconds. Player
-            // chat, world events (grabbed/thrown) and ask answers always wake it early.
+            // chat and world events (grabbed/thrown) always wake it early.
             float secs = 0f;
             if (line.Args != null && line.Args.Length > 0)
             {
@@ -1578,14 +1850,22 @@ namespace KKLLMNPC
             return FmtResult(ToolSetGoal(new JsonObj(new Dictionary<string, object> { ["goal"] = goal })));
         }
 
-        private string CmdAsk(ConsoleLine line)
+        // plan — the current goal's step ladder: plan <step> | plan | plan next | plan clear
+        private string CmdPlan(ConsoleLine line)
         {
-            string q = line.Payload;
-            if (string.IsNullOrWhiteSpace(q) && line.Args != null && line.Args.Length > 0) q = string.Join(" ", line.Args);
-            if (string.IsNullOrWhiteSpace(q)) return "ask what? e.g. ask is that bed taken?";
-            _consoleAnswerDelivered = false;
-            var r = ToolAsk(new JsonObj(new Dictionary<string, object> { ["q"] = q }));
-            return FmtResult(r);
+            string a0 = line.Args != null && line.Args.Length > 0 ? line.Args[0].ToLowerInvariant() : null;
+            if (a0 == "clear") { PlanClear("model cleared the plan"); return "plan: cleared"; }
+            if (a0 == "next")
+            {
+                string done = PlanAdvance();
+                if (done == null) return "plan: no pending step — all steps done (add new ones or plan clear)";
+                return "done: " + done + "\n" + PlanShow();
+            }
+            string what = line.Payload;
+            if (string.IsNullOrWhiteSpace(what) && line.Args != null && line.Args.Length > 0)
+                what = string.Join(" ", line.Args);
+            if (string.IsNullOrWhiteSpace(what)) return PlanShow();
+            return PlanAdd(what);
         }
 
         // screenshot — capture the first-person view and attach it to the output.

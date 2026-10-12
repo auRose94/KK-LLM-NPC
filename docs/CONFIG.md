@@ -110,6 +110,18 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `ScanRadius` | `3.0` | 1–20m | Radius (m) to scan for seeds, plants, watering cans, blenders, grinders, and egg spawners |
 | `ScanMax` | `8` | 1–20 | Max number of farm/cooking entries in perception (cap to keep payload small) |
 
+## [Console] — Bash-like REPL mode (default)
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `Enabled` | `true` | bool | Bash-like console mode: the model polls the game with commands (`ls`, `cd`, `use`, `echo`…) instead of receiving a big perception payload each tick — smaller payloads, no overload, and it asks for exactly the data it needs. `echo` = speak. `false` = legacy push-perception act-JSON loop. |
+| `MaxRounds` | `3` | 1–8 | Command rounds per think cycle (each round = one LLM call after reading the output). |
+| `MaxTokens` | `256` | — | Max tokens per console reply (command lines are short — low is fast). |
+| `HistoryMessages` | `30` | 6–120 | Rolling conversation window (system prompt always kept). When the window trims, the dropped span is replaced by one compact `[session memory]` digest (first/last highlights) instead of vanishing — the story survives context trims. |
+| `NativeTools` | `true` | bool | Declare the console commands as an OpenAI tools array in every console request. Tool-aware servers (llama.cpp --jinja, LM Studio, vLLM, Ollama, KoboldCpp) then return real `tool_calls` — deterministic commands with real arguments, one call per command, a multi-call reply executed as a multi-command turn — instead of garbled `<tool_call>` markup in free text. Servers without tool support ignore the field or are fenced off automatically on the first 400 (300 s pause), with the text parsers + markup salvage as the fallback. Disable if your server errors on unknown payload fields. |
+| `AutoScreenshotTicks` | `6` | 0– | Attach the NPC's first-person view automatically every N turns (vision-capable models, when it actually moved/turned; also right after a stuck streak). |
+| `SystemPromptFile` | `system_prompt_console.txt` | — | Console-mode persona/world-rules file (relative to game dir). The command list + console protocol are appended automatically. Blank = built-in persona. |
+
 ## [Multiplayer] — NPC Room Identity
 
 | Key | Default | Purpose |

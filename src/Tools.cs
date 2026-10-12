@@ -821,11 +821,13 @@ namespace KKLLMNPC
             // If locked in an animation station, jumping is how players get out —
             // do that first so "jump" behaves the way the model/player expects.
             if (IsInAnimationStation()) return ToolExitStation();
+            // A jump PUSHES into the facing: a hop in place was useless for ledge
+            // hops and fence clears. speed 0.7 keeps a forward burst for the arc.
             return ToolWalk(new JsonObj(new Dictionary<string, object>
             {
                 ["jump"] = true,
-                ["speed"] = 0f,
-                ["duration"] = 0.4f,
+                ["speed"] = 0.7f,
+                ["duration"] = 0.5f,
             }));
         }
 
@@ -839,6 +841,75 @@ namespace KKLLMNPC
         private object ToolInteract(JsonObj p)
         {
             if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
+            // WATER-TOOL ROUTE (agents kept "using" the bucket/can — the drink path
+            // empties the water and leaves nothing to spray). A water weapon is never
+            // used: HELD → route to `water` (spray the nearest plant); ON THE GROUND →
+            // route to grab (pick it up first). Contextual, with the teach attached.
+            try
+            {
+                string whint = "";
+                try { whint = (p.S("name", p.S("target", "")) ?? "").Trim().ToLowerInvariant(); } catch (Exception) { }
+                bool heldWater = false; double wid = -1;
+                try { foreach (var h in HeldScan()) if (h != null && (h.Kind == "water bucket" || h.Kind == "watering can")) { heldWater = true; break; } } catch (Exception) { }
+                Transform waterTf = null;
+                bool idGiven = p.Has("id");
+                if (idGiven)
+                {
+                    try { wid = p.DB("id", -1); } catch (Exception) { }
+                    var tf = wid >= 0 ? FindTargetById((int)wid) : null;
+                    if (tf != null)
+                    {
+                        try
+                        {
+                            var bucketC = tf.GetComponentInParent<BucketWeapon>();
+                            if (bucketC != null) waterTf = bucketC.transform;
+                            if (waterTf == null)
+                            {
+                                var canC = tf.GetComponentInParent<WateringCanWeapon>();
+                                if (canC != null) waterTf = canC.transform;
+                            }
+                        }
+                        catch (Exception) { }
+                    }
+                }
+                bool hintWater = whint.Contains("bucket") || whint.Contains("watering can") || whint.Contains("water can");
+                if (heldWater || waterTf != null || (hintWater && !heldWater && !idGiven))
+                {
+                    if (heldWater) return ToolWater(p);
+                    // On the ground: grab it first (the tool fires only when in reach).
+                    return new { ok = false, reason = "water_tool",
+                        note = "that is the WATER TOOL, not a drink — using it would drink the water away; `get` it into your hands, face the planted tile, then `water` (or aim-and-throw for a long spray)" };
+                }
+            }
+            catch (Exception) { }
+            // PLANTABLE-IN-HAND SOIL ROUTE: `use` with a seed/egg held and a soil
+            // intent (target named soil/dirt/plot/farm — or no usable target at all)
+            // goes through the plant macro: it walks ONTO the plot, looks DOWN at it
+            // (the plant happens where the item floats), and VERIFIES the tile took.
+            try
+            {
+                var heldSeed = FindHeldPlantableSeed();
+                if (heldSeed != null)
+                {
+                    string hint = (p.S("name", p.S("target", "")) ?? "").Trim().ToLowerInvariant();
+                    // NOTE: an EMPTY hint does NOT route — `use` with a bare seed in
+                    // hand still means "interact what's in front" (a station); planting
+                    // asks for the explicit words (or the item's own name / an id of
+                    // the plot) so station uses are never hijacked.
+                    bool soilIntent = hint.Length > 0
+                        && (hint.IndexOf("soil", StringComparison.Ordinal) >= 0
+                        || hint.IndexOf("dirt", StringComparison.Ordinal) >= 0
+                        || hint.IndexOf("plot", StringComparison.Ordinal) >= 0
+                        || hint.IndexOf("farm", StringComparison.Ordinal) >= 0)
+                        || (heldSeed.name ?? "").IndexOf(hint, StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (soilIntent)
+                    {
+                        try { return PlantWithPositioning(heldSeed.transform, () => heldSeed, HeldItemWord(heldSeed.name)); }
+                        catch (Exception e) { Logger.LogWarning("use plant route: " + e.Message); }
+                    }
+                }
+            }
+            catch (Exception) { }
             return RunOnMainThread(() =>
             {
                 GenericUsable target;
@@ -999,6 +1070,82 @@ namespace KKLLMNPC
         {
             if (_grabber == null) return new { ok = false, reason = "no_grabber" };
             bool multi = p.B("multi", false);
+            // AIM FIRST (the grab cone follows the camera view; small items on the
+            // floor were never in it because the eye stayed level). Optional hint:
+            // name or id targets a specific thing; with no hint the nearest
+            // grabbable gets the aim. Main thread (scene reads).
+            string hint = p.S("name", p.S("target", "")).Trim();
+            string aimed = null;
+            try
+            {
+                RunOnMainThread(() =>
+                {
+                    try
+                    {
+                        Vector3 eye = _head != null ? _head.position : _kobold.transform.position + Vector3.up * 0.6f;
+                        Vector3 best = Vector3.zero; string bestName = null;
+                        float bestD = 3.2f * 3.2f;
+                        var hits = new Collider[32];
+                        int n = Physics.OverlapSphereNonAlloc(_kobold.transform.position + Vector3.up * 0.5f, 3.2f, hits, ~0, QueryTriggerInteraction.Ignore);
+                        // "id:N" / "N" hints resolve through the target registry —
+                        // the model read the id from nearby, honor it exactly.
+                        Transform hintedTf = null;
+                        string idHint = hint;
+                        if (idHint.StartsWith("id:", StringComparison.OrdinalIgnoreCase)) idHint = idHint.Substring(3).Trim();
+                        int hidNum;
+                        if (int.TryParse(idHint, out hidNum) && hidNum >= 0)
+                        {
+                            var tf = FindTargetById(hidNum);
+                            if (tf != null) { hintedTf = tf; hint = CleanName(tf.name); }
+                        }
+                        for (int i = 0; i < n; i++)
+                        {
+                            var c = hits[i];
+                            if (c == null || IsOwnCollider(c)) continue;
+                            var kb = c.GetComponentInParent<Kobold>();
+                            if (kb != null && kb == _kobold) continue;
+                            Transform tf = c.transform;
+                            string nm = CleanName(tf.name);
+                            if (kb != null || c.GetComponentInParent<IGrabbable>() != null)
+                            {
+                                if (!string.IsNullOrEmpty(hint)
+                                    && nm.IndexOf(hint, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                                float d = (tf.position - eye).sqrMagnitude;
+                                if (bestName == null || d < bestD)
+                                {
+                                    bestD = d; best = tf.position; bestName = nm;
+                                }
+                            }
+                        }
+                        if (hintedTf != null && bestName == null)
+                        {
+                            best = hintedTf.position; bestName = CleanName(hintedTf.name);
+                        }
+                        // Nothing matched: keep the old grab (aim unchanged) when a
+                        // HINT was given (aiming away would be wrong); else sweep:
+                        // aim ahead-and-down, the classic floor-item miss.
+                        if (bestName == null && string.IsNullOrEmpty(hint))
+                        {
+                            best = eye + Quaternion.Euler(0, _yawDeg, 0) * (Vector3.forward * 0.8f) + Vector3.down * 0.7f;
+                            bestName = "(floor ahead)";
+                        }
+                        if (bestName != null)
+                        {
+                            Vector3 to = best - eye;
+                            Vector3 flat = to; flat.y = 0;
+                            float yaw = Mathf.Atan2(flat.x, flat.z) * Consts.Rad2Deg;
+                            float pitch = Mathf.Clamp(Mathf.Atan2(-to.y, Mathf.Max(0.25f, flat.magnitude)) * Consts.Rad2Deg, -70f, 70f);
+                            lock (_stateLock) { _yawDeg = Mathf.Repeat(yaw, 360f); _pitchDeg = pitch; }
+                            _lastBigTurnTime = Time.unscaledTime;
+                            aimed = bestName;
+                        }
+                    }
+                    catch (Exception e) { Logger.LogWarning("grab aim: " + e.Message); }
+                    return true;
+                });
+                if (aimed != null) { try { Thread.Sleep(260); } catch (Exception) { } } // let the eye swing
+            }
+            catch (Exception) { }
             bool done = (bool)RunOnMainThread(() =>
             {
                 try { _grabber.TryGrab(multi); return true; } catch (Exception e) { Logger.LogWarning("grab: " + e.Message); return false; }
@@ -1026,6 +1173,7 @@ namespace KKLLMNPC
             {
                 ["ok"] = true,
                 ["grabbed"] = string.Join(", ", names.ToArray()),
+                ["aimed_at"] = aimed ?? "",
                 ["note"] = "everything held by you now floats ~1m in front of your face on a physics spring — it lags your turns, bumps/pushes what you walk into, and rides your momentum",
             };
             if (warning != null) res["warning"] = warning;

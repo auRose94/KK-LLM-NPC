@@ -134,7 +134,50 @@ internal static class TestTextUtil
         Assert(TextUtil.JunkFactNote("self_state_fact").Contains("LIVE"), "self-state note points at live queries");
         Assert(TextUtil.JunkFactNote("stale_state_fact").Contains("LIVE"), "state note points at live queries");
 
-        Console.WriteLine(_failed == 0 ? "textutil: all passed" : "textutil: " + _failed + " FAILURES");
+        RpPlaceholders();
+        RpResponseBlockDetector();
         Environment.Exit(_failed);
+    }
+
+    // ---- {{user}}/{{char}} RP placeholder substitution ----
+
+    static void RpPlaceholders()
+    {
+        Assert(TextUtil.SubstituteRpPlaceholders("hello", "Ember", "Moss") == "hello", "no placeholders → unchanged");
+        Assert(TextUtil.SubstituteRpPlaceholders("presses against {{user}}'s entrance", "Ember", "Moss")
+            == "presses against Ember's entrance", "{{user}} resolved");
+        Assert(TextUtil.SubstituteRpPlaceholders("{{char}} looks at {{user}}", "Ember", "Moss")
+            == "Moss looks at Ember", "{{char}} and {{user}} both resolved");
+        Assert(TextUtil.SubstituteRpPlaceholders("{{ USER }}!!", "Ember", "Moss") == "Ember!!", "case+whitespace tolerant");
+        Assert(TextUtil.SubstituteRpPlaceholders("{{user}} says to {{user}}", "Ember", "Moss") == "Ember says to Ember", "repeated slot");
+        // no partner resolved → the placeholder stays literal (caller falls back)
+        Assert(TextUtil.SubstituteRpPlaceholders("hi {{user}}", "", "Moss") == "hi {{user}}", "empty user replacement → literal");
+        Assert(TextUtil.SubstituteRpPlaceholders("{{char}} yawns", "Ember", "") == "{{char}} yawns", "empty char replacement → literal");
+        // other template placeholders pass through untouched
+        Assert(TextUtil.SubstituteRpPlaceholders("{{random:a,b}} and {{user}}", "Ember", "Moss")
+            == "{{random:a,b}} and Ember", "foreign placeholder passes through");
+        // unmatched open/close
+        Assert(TextUtil.SubstituteRpPlaceholders("ooc {user} nope", "Ember", "Moss") == "ooc {user} nope", "single-brace passthrough");
+
+        Console.WriteLine("textutil: RpPlaceholders passed");
+    }
+
+    // ---- IsRpResponseBlock: roleplay block vs terse thought ----
+
+    static void RpResponseBlockDetector()
+    {
+        Assert(TextUtil.IsRpResponseBlock("*tail sways*"), "asterisk action");
+        Assert(TextUtil.IsRpResponseBlock("*Ember blinks open heavy eyelids, groaning softly as they stretch* \"Ugh... What time is this racket?\""), "rp wake-up block");
+        Assert(TextUtil.IsRpResponseBlock("\"Nooo...stop!\" *she screams*"), "quoted dialogue");
+        Assert(TextUtil.IsRpResponseBlock("\u201Cget in, I'll wait\u201D *pats the seat*"), "curly-quoted dialogue");
+        Assert(TextUtil.IsRpResponseBlock("hey {{user}}, over here!"), "placeholder");
+        Assert(!TextUtil.IsRpResponseBlock("check the farm, then bed"), "terse thought");
+        Assert(!TextUtil.IsRpResponseBlock("explore"), "single word");
+        Assert(!TextUtil.IsRpResponseBlock("**bold header** not dialogue"), "markdown bold is not dialogue");
+        Assert(!TextUtil.IsRpResponseBlock("5 * 3 + 7 = 22"), "multiplication is not an action");
+        Assert(!TextUtil.IsRpResponseBlock(""), "empty");
+        Assert(!TextUtil.IsRpResponseBlock(null), "null");
+        Assert(!TextUtil.IsRpResponseBlock("lone asterisk* no pair"), "lone asterisk not a marker");
+        Console.WriteLine("textutil: RpResponseBlockDetector passed");
     }
 }

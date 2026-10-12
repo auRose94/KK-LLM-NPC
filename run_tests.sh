@@ -79,10 +79,11 @@ run_headless_suites() {
   run_suite json        tests/test_json.cs tests/test_json_standalone.cs -- src/Json.cs
   run_suite textutil    tests/test_textutil.cs -- src/TextUtil.cs
   run_suite pathcore    tests/test_pathcore.cs -- src/PathCore.cs
+  run_suite voxelqt     tests/test_voxelquadtree.cs -- src/VoxelQuadtree.cs
   run_suite goalresolver tests/test_goalresolver.cs -- src/PathCore.cs
   run_suite contextcore tests/test_contextcore.cs -- src/ContextCore.cs src/Json.cs src/Constants.cs
   run_suite chat        tests/test_chat_similarity.cs -- src/ChatSimilarity.cs
-  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ChatSimilarity.cs
+  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ChatSimilarity.cs src/Json.cs
   run_suite compass     tests/test_compass.cs -- src/Compass.cs
   run_suite swallow     tests/test_swallow.cs -- src/SwallowLogic.cs
   run_suite spectate    tests/test_spectate.cs -- src/SpectateLogic.cs

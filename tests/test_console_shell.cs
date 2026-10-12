@@ -368,7 +368,214 @@ static class ConsoleShellTests
         ParseReplyBullets();
         HelpText();
         ExtraNames();
+        ToolCallToLineTests();
+        ToolCallMarkupTests();
+        SalvageMarkupTests();
+        SalvageRpProseGuardTests();
+        SkillParseTests();
+        PlanParseTests();
+        CompactDigestTests();
+        BuildToolsTests();
+        AskRemovedTests();
         Console.WriteLine(_passed + " passed, " + _failed + " failed");
         Environment.Exit(_failed);
+    }
+
+    // ---- ConsoleShell.ToolCallToLine: structured call → console line ----
+
+    static void ToolCallToLineTests()
+    {
+        Assert(ConsoleShell.ToolCallToLine("cd", "{\"target\":\"bed\"}") == "cd bed", "cd target=bed");
+        Assert(ConsoleShell.ToolCallToLine("echo", "{\"text\":\"hi there\"}") == "echo hi there", "echo text");
+        Assert(ConsoleShell.ToolCallToLine("go_to", "{\"name\":\"bed\"}") == "cd bed", "legacy go_to+name");
+        Assert(ConsoleShell.ToolCallToLine("say", "{\"say\":\"Hello!\"}") == "echo Hello!", "say via say key");
+        Assert(ConsoleShell.ToolCallToLine("follow", "{\"state\":false}") == "follow off", "bool state false");
+        Assert(ConsoleShell.ToolCallToLine("follow", "{\"state\":true}") == "follow on", "bool state true");
+        Assert(ConsoleShell.ToolCallToLine("run", "{\"duration\":2,\"direction\":\"left\"}") == "run 2 left", "run + direction");
+        Assert(ConsoleShell.ToolCallToLine("cd", "{\"arguments\":\"{\\\"target\\\":\\\"bed\\\"}\"}") == "cd bed", "double-encoded args");
+        Assert(ConsoleShell.ToolCallToLine("cd", "") == "cd", "blank args → bare command");
+        Assert(ConsoleShell.ToolCallToLine("nope", "{}") == null, "unknown tool name → null");
+        // tool-name "id" vs args id:
+        Assert(ConsoleShell.ToolCallToLine("use", "{\"id\":3}") == "use id:3", "id arg → id:3");
+    }
+
+    // ---- ConsoleTools.ToolCallMarkupLines: inline tool-call JSON recovery ----
+
+    static void ToolCallMarkupTests()
+    {
+        string oc = ConsoleTools.ToolCallOpen;
+        string cc = ConsoleTools.ToolCallClose;
+        // single call, narration before
+        var r = ConsoleTools.ToolCallMarkupLines("Let me look.\n" + oc + "{\"name\":\"cd\",\"arguments\":{\"target\":\"bed\"}}" + cc);
+        Assert(r.Count >= 1 && r[0] == "Let me look." || (r.Count >= 2 && r[0] == "Let me look." && r[1] == "cd bed"),
+            "narration kept + call extracted");
+        bool hasCd = false;
+        foreach (var l in r) if (l == "cd bed") hasCd = true;
+        Assert(hasCd, "cd bed recovered from markup");
+
+        // bare call
+        var r2 = ConsoleTools.ToolCallMarkupLines(oc + "{\"name\":\"ls\",\"arguments\":{}}" + cc);
+        Assert(r2.Count == 1 && r2[0] == "ls", "bare ls call");
+
+        // two calls in sequence
+        var r3 = ConsoleTools.ToolCallMarkupLines(
+            oc + "{\"name\":\"echo\",\"arguments\":{\"text\":\"going\"}}" + cc
+            + oc + "{\"name\":\"cd\",\"arguments\":{\"id\":3}}" + cc);
+        Assert(r3.Count == 2 && r3[0] == "echo going" && r3[1] == "cd id:3", "two calls → two lines");
+
+        // fenced json (act-schema shape)
+        var r4 = ConsoleTools.ToolCallMarkupLines("```json\n{\"action\":\"say\",\"say\":\"checking\"}\n```");
+        Assert(r4.Count == 1 && r4[0] == "echo checking", "fenced act-shape call");
+
+        // no markup at all → empty (falls back to regular parsing)
+        Assert(ConsoleTools.ToolCallMarkupLines("echo hi\ncd bed").Count == 0, "plain reply → no markup lines");
+        Assert(ConsoleTools.ToolCallMarkupLines("{\"reasoning\": \"just thinking\"}").Count == 0, "nameless json → no markup lines");
+        // degenerate marker shapes must never loop or throw
+        Assert(ConsoleTools.ToolCallMarkupLines("```\ncd bed\n```").Count == 0, "fenced prose → no markup lines");
+        Assert(ConsoleTools.ToolCallMarkupLines("echo hi" + oc).Count == 0, "marker without json");
+        Assert(ConsoleTools.ToolCallMarkupLines(oc + "{\"name\":\"ls\"").Count == 0, "unclosed json → no markup lines");
+    }
+
+    static void SalvageMarkupTests()
+    {
+        string oc = ConsoleTools.ToolCallOpen;
+        string cc = ConsoleTools.ToolCallClose;
+        string in1 = oc + "{\"name\":\"cd\",\"arguments\":{\"target\":\"farm\"}}" + cc;
+        string clean = ConsoleSalvage.Clean(in1);
+        Assert(clean == "cd farm", "Clean converts markup call, got: " + clean);
+        var lines = ConsoleShell.ParseReply(clean);
+        Assert(lines.Count == 1 && lines[0].Cmd == "cd" && lines[0].Args[0] == "farm", "end-to-end cd farm");
+    }
+
+    // ---- plan command parsing ----
+
+    static void PlanParseTests()
+    {
+        var l1 = ConsoleShell.ParseReply("plan check the farm first");
+        Assert(l1.Count == 1 && l1[0].Cmd == "plan", "plan is a known command");
+        Assert(l1[0].Payload == "check the farm first", "plan payload preserved");
+        var l2 = ConsoleShell.ParseReply("plan next");
+        Assert(l2.Count == 1 && l2[0].Cmd == "plan" && l2[0].Args[0] == "next", "plan next args");
+        var l3 = ConsoleShell.ParseReply("plan clear");
+        Assert(l3.Count == 1 && l3[0].Cmd == "plan" && l3[0].Args[0] == "clear", "plan clear args");
+    }
+
+    // ---- ConsoleCompact.Digest ----
+
+    static void CompactDigestTests()
+    {
+        var none = ConsoleShell.ConsoleCompact.Digest(new List<string>());
+        Assert(none == "(nothing)", "empty digest");
+        var d1 = ConsoleShell.ConsoleCompact.Digest(new List<string> { "a|I will go check the farm first", "u|cd farm -> near farm id:3" });
+        Assert(d1.StartsWith("[trimmed 2 earlier messages]", StringComparison.Ordinal), "digest header: " + d1);
+        Assert(d1.Contains("a: I will go check the farm first"), "assistant first item");
+        Assert(d1.Contains("u: cd farm"), "user last item");
+        // spread: first three + last two of many
+        var many = new List<string>();
+        for (int i = 0; i < 10; i++) many.Add("a|step number " + i + " happened here");
+        var d2 = ConsoleShell.ConsoleCompact.Digest(many);
+        Assert(d2.Contains("[trimmed 10 earlier messages]"), "count in digest");
+        Assert(d2.Contains("step number 0") && d2.Contains("step number 9"), "first+last spread");
+        Assert(!d2.Contains("step number 5"), "middle dropped from digest");
+    }
+
+    // ---- BuildTools: the console vocabulary as an OpenAI tools array ----
+
+    static void BuildToolsTests()
+    {
+        var tools = ConsoleTools.BuildTools();
+        Assert(tools != null && tools.Count >= 25, "tools array size " + (tools == null ? -1 : tools.Count));
+        bool sawCd = false, sawEcho = false, sawClear = false;
+        foreach (var t in tools)
+        {
+            var td = t as Dictionary<string, object>;
+            var fn = td == null ? null : td["function"] as Dictionary<string, object>;
+            var name = fn == null ? null : (string)fn["name"];
+            if (name == "cd") sawCd = true;
+            if (name == "echo") sawEcho = true;
+            if (name == "clear") sawClear = true;
+        }
+        Assert(sawCd && sawEcho, "console commands present");
+        Assert(!sawClear, "clear not offered as a tool");
+    }
+
+    // ---- salvage must NOT butcher roleplay prose (real playtest samples) ----
+
+    static void SalvageRpProseGuardTests()
+    {
+        // RP prose scatters command words one at a time; the density rule keeps the
+        // whole paragraph as speech/thought instead of carving junk commands out of it.
+        string rp = "*Moss mewls softly as he presses closer* \"please, just let me use you~\" *they grind shamelessly* \"stop it, you're insufferable\" *and yet the warmth spreads* get lost in the feeling, the tension building until nothing exists but the two of them and the slow burn between them and the bed that waits";
+        var rpLines = ConsoleShell.ParseReply(ConsoleSalvage.Clean(rp));
+        Assert(rpLines.Count >= 1, "rp prose parses as " + rpLines.Count + " line(s)");
+        var bad = new List<string>();
+        foreach (var l in rpLines)
+        {
+            string c = l.Cmd ?? "?";
+            if (!(l.IsUnknown || c == "echo") || c == "use" || c == "get" || c == "cd")
+                bad.Add(c);
+        }
+        Assert(bad.Count == 0, "rp prose NOT carved into actions (saw: " + string.Join(",", bad.ToArray()) + ")");
+
+        // real glued command queue (the shape GlueSplit exists for) still splits
+        string glue = "ohh and my tummy! ps whoami status go find bed echo Zzzzzz~ 15m";
+        var glueLines = ConsoleShell.ParseReply(ConsoleSalvage.Clean(glue));
+        bool sawPs = false, sawCd = false, sawEcho = false;
+        foreach (var l in glueLines)
+        {
+            if (l.Cmd == "ps") sawPs = true;
+            if (l.Cmd == "cd") sawCd = true;
+            if (l.Cmd == "echo") sawEcho = true;
+        }
+        Assert(sawPs && sawCd && sawEcho, "dense glue queue still recovered");
+
+        // bare DANGEROUS commands are never manufactured from prose debris
+        var risky = ConsoleShell.ParseReply(ConsoleSalvage.Clean("echo oops! " + ConsoleTools.ToolCallOpen + "<|stop|>prose use stop get drop garbage"));
+        foreach (var l in risky)
+        {
+            bool bareAction = !l.IsUnknown && (l.Cmd == "use" || l.Cmd == "get" || l.Cmd == "drop" || l.Cmd == "throw")
+                && (l.Args == null || l.Args.Length == 0);
+            Assert(!bareAction, "no bare dangerous command (saw: " + (l.Cmd ?? "prose") + ")");
+        }
+    }
+    // ---- skill add parsing (pure) ----
+
+    static void SkillParseTests()
+    {
+        var r = ConsoleShell.SkillParseAdd("garden | plant; cd id:3; ls", 24, 10, 90);
+        Assert(r.Error == null, "basic add parses");
+        Assert(r.Name == "garden", "name split at |");
+        Assert(r.Steps != null && r.Steps.Count == 3, "3 steps (got " + (r.Steps == null ? -1 : r.Steps.Count) + ")");
+        Assert(r.Steps != null && r.Steps.Count == 3 && r.Steps[0] == "plant" && r.Steps[2] == "ls", "steps trimmed");
+
+        // leading 'add ' keyword tolerated; junk steps dropped
+        var r2 = ConsoleShell.SkillParseAdd("add carry | get egg; and then the magic happens; drop", 24, 10, 90);
+        Assert(r2.Error == null && r2.Steps.Count == 2, "junk step dropped (kept " + (r2.Steps == null ? -1 : r2.Steps.Count) + ")");
+        Assert(r2.Steps[0] == "get egg", "first step kept");
+
+        // errors
+        Assert(ConsoleShell.SkillParseAdd("no bar here", 24, 10, 90).Error != null, "missing | refused");
+        Assert(ConsoleShell.SkillParseAdd("x | ; ; ;", 24, 10, 90).Error != null, "no valid steps refused");
+        // long name trimmed; cap on steps
+        var r3 = ConsoleShell.SkillParseAdd("a-very-long-skill-name-beyond-the-cap | ls", 8, 10, 90);
+        Assert(r3.Name.Length <= 8, "name capped");
+    }
+
+    // ---- the `ask` tool is gone everywhere ----
+
+    static void AskRemovedTests()
+    {
+        Assert(ConsoleShell.Canonical("ask") == null, "no ask command");
+        Assert(ConsoleShell.Canonical("query") == null, "no query alias");
+        var lines = ConsoleShell.ParseReply("ask what is this place");
+        Assert(lines[0].IsUnknown, "ask parses as prose now");
+        var tools = ConsoleTools.BuildTools();
+        foreach (var t in tools)
+        {
+            var td = t as Dictionary<string, object>;
+            var fn = td == null ? null : td["function"] as Dictionary<string, object>;
+            var fnName = fn == null ? null : (string)fn["name"];
+            Assert(fnName != "ask", "no ask function");
+        }
     }
 }

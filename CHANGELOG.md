@@ -8,6 +8,363 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Model list: HauhauCS Gemma4-12B-QAT Uncensored (Balanced) enters the compatibility
+  list as a user-recommended 🟢 pick** (`HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced`);
+  auto-classifies as the gemma family (no code change). Card-backed: uncensored (0/465
+  refusals), native tool-calling template, vision mmproj, 256K context, Q4_K_M sweet
+  spot, MTP speculative decoding for ~60% faster generation; noted: single-GPU only
+  (LM Studio tensor-split crashes it), card sampling values recorded. Field notes to
+  follow a real playtest per the doc's convention.
+- **The watering crash is fixed and the mod is hardened against its own reflection.**
+  The crash-on-watering: the can-free watering assist ran its Photon RPC (and the
+  plant-resolution scene scans) on the LLM thread — Photon RPCs must stay on the main
+  thread. Everything inside `WaterPlantDirect` is marshalled now (the tool's assist
+  resolution included), so the whole watering path is main-thread-correct.
+- **A skill system: agents author their own reusable procedures, and skills travel.**
+  `skill add <name> | <step> ; <step>` saves a named procedure OVER REAL COMMANDS —
+  each step is validated against the shell vocabulary at save time (junk steps are
+  dropped silently; an add with none is refused with the teaching line). `skill <name>`
+  executes the steps as one batch (one history entry, budget-exempt — a skill IS
+  budget), `cat skills` lists them with step counts and use counts, re-adding
+  redefines, `skill forget` drops. Where they live:
+  * saved per agent — the body's MemoryStore record carries the skills (restored when
+    the same body wakes),
+  * transferred on ABSORB — when a body is digested in Grow mode, the eater inherits
+    the victim's skills (name collisions suffix "(absorbed)" instead of silently
+    losing either), with a fact + world event so the eater knows it has them,
+  * transferred through a CHILD EGG — the rebirth copy moves the skills list onto the
+    hatched body's record: the hatched child wakes with its parent's skills.
+  Parser (ConsoleShell.SkillParseAdd) is pure + unit-tested (the console suite again
+  caught the edge cases: leading-keyword tolerance, junk-step drops, cap trims).
+  The state anchor and whoami surface "skills: N" when the agent has any, so skills
+  are discoverable without reading docs.
+- **Fresh bodies wake up in a bed — never at spawn.** A brand-new possession (wild
+  spawn, dispenser delivery, a rebirth hatched from a soil-planted egg — anything that
+  is not a bodyswap's identity-reuse) now places the body beside the nearest bed in the
+  scene (same map-wide list `cat places` reads; skipped when the body already lies
+  within 1.5 m of one or no bed exists). Beside, not inside: the sleeper engine would
+  grab a body placed into the bed into `in_station`, and nobody should wake up already
+  locked in a machine. The console boot line opens "you just woke up in the bed 'Name'"
+  so the model's first scene is waking up, not standing in a field.
+- **Star-text is words, and the model is told so at the moment it matters.** RP models
+  narrate "*walks to the kitchen*" and wait — nothing moves, because only command lines
+  act. When a spoken response block narrates a physically-actable starred action
+  (`TextUtil.StarsWantRealActions`, pure + unit-tested: walk/step/climb/enter/grab/sit/
+  mount/…), the mod speaks the block AND adds one throttle-gated reminder row: "the game
+  did not move — send the real command". Prompts (built-ins + shipped console file)
+  state the rule outright: star text is narration for the reader; the world changes
+  through commands; back a starred act with its command the same turn.
+- **Response blocks: roleplay prose is the voice now, not noise.** The playtest loop
+  that motivated the identical-repeat guard is solved the other way around — an RP
+  model answering in a roleplay **block** (dialogue in quotes, `*action*` asterisks,
+  or an {{user}}-style address) is no longer thrown away as a "thought" and nudged to
+  wrap itself in `echo`; the whole block is DETECTED (`TextUtil.IsRpResponseBlock`,
+  markers are objective: paired asterisks with words between, paired quotes, or an RP
+  placeholder) and sent to the chat window verbatim, exactly as written — mixed replies
+  speak the block AND run the commands, all-prose replies speak and end the turn. So
+  the models that were "barely speaking" because their voice landed in the thought
+  bucket just talk. Cadence guards stay: with a [chat]/[event] trigger the block speaks
+  freely; without one it rides the idle-chatter throttle (one block per ~90 s) so a
+  block never becomes a monologue, ToolSay's repeat suppression plus the identical-repeat
+  guard remain the loop breakers, and the "REPLY WITH COMMAND LINES ONLY" nag stands
+  down for a turn that spoke a block. Taught in all prompt surfaces (built-ins + the
+  shipped `system_prompt_console.txt`); `echo` is still there for a quick plain line.
+- **{{user}}/{{char}} resolve to real people at speak time.** RP-template models
+  (SillyTavern trained) write their placeholders straight into speech — observed live:
+  "nudges against {{user}}'s entrance" went to the chat window verbatim. Say and emote
+  now expand them against the actual world at the moment of speaking: the live
+  engagement partner first (who's inside this body / whose is inside it — the same
+  sources the partners perception reads), else the nearest person in radius (14 m,
+  player avatar before sibling NPCs), else the host player's chat name. {{char}} is the
+  NPC's own name; unknown placeholders pass through; with nobody known at all the
+  placeholder stays literal rather than inventing a name. Pure + unit-tested
+  (`TextUtil.SubstituteRpPlaceholders` in the textutil suite).
+- **The "garbled tool-call" mystery is solved and fixed: it wasn't tool calls at all.**
+  The raw-reply samples (every 10th salvage fire, added last round) show the fires were
+  LONG ROLEPLAY PROSE paragraphs, and the old glue-splitter was the butcher: its
+  "2 command words anywhere in the line" rule hit prose command words scattered one at
+  a time — "let me **use** you~" manufactured a bare `use`, "who am I"-style fragments
+  ("`me`" → `whoami` alias, "**burn**" → `turn` via fuzzy) turned paragraphs into junk
+  command lines that then executed. The glue scanner now splits only on a DENSE
+  command cluster (two command words in a three-token window, matched tight — exact
+  table + aliases, no Levenshtein, and function-word aliases `me`/`id`/`self` never
+  count), while the loose matcher still recovers mangled commands from real junk
+  segments (`goall` → `goal`; that path only runs inside already-cut markup). Salvage
+  also never manufactures bare dangerous commands (`use`/`get`/`drop`/`throw` with no
+  target) out of prose debris, and the markdown fence was dropped from the junk-marker
+  list (fenced JSON is the tool-call salvage's job; as a junk marker the fence cut RP
+  paragraphs).
+  Regression-tested with the actual playtest shapes: RP prose stays prose, glued
+  queues still split.- **Tool-call formats the model actually speaks: native tools + full-decode salvage.** The
+  console request now declares the whole command vocabulary as an OpenAI tools array
+  (`[Console] NativeTools`, default on): servers with function-calling (llama.cpp --jinja,
+  LM Studio, vLLM, Ollama, KoboldCpp) parse the model's output into real `tool_calls`
+  deltas — deterministic command + arguments, and ALL calls in a reply execute in order as
+  a multi-command turn (ParseChatResponse now surfaces every call, not just the first).
+  Servers without tool support get the field ignored or are fenced off by a new `tools`
+  rung of the 400 ladder (`ApplyRequestFix`, 300 s pause), and two text fallbacks cover the
+  rest: the reply parser, and a new bracketing salvage (`ConsoleTools.ToolCallMarkupLines`)
+  that brace-matches the tool-call JSON models stream as content (`<tool_call>`-wrapped,
+  `<|tool_call|>`, plain fenced) — narration preserved, arguments honored — instead of the
+  old word-scavenger that mangled them. Legacy act mode grew the same muscle: extra `tool_calls`
+  beyond the first execute as plan steps, and console replies from native calls land as the
+  model's own command lines.
+- **The `plan` ladder — persistent HOW under the stored WHAT.** `goal` keeps holding the
+  goal; `plan <step>` now lays out the ordered steps once (max 12, `plan`/`cat plan` list
+  them, `plan next` marks the front step done, `plan clear` wipes). The state anchor carries
+  the current step every turn, so the how-to survives trims; the ladder clears automatically
+  when the goal completes or drops. Prompts (built-ins + `system_prompt_console.txt`) teach:
+  goal once → plan the steps → one step per turn.
+- **Conversation memory that no longer cliff-edges.** `TrimConsoleConversation` replaces the
+  dropped span with one compact `[session memory]` digest (first-three/last-two highlights,
+  `ConsoleShell.ConsoleCompact.Digest`, pure + unit-tested) instead of deleting it, and the
+  state anchor opens with an identity heartbeat line ("you: Name — persona") so the persona
+  survives long consoles for template-heavy models. Legacy act-mode caps rose across the
+  board (history 5/10/15 → 10/18/40, thoughts 3/6/8 → 6/10/14, facts 10/20/30 →
+  12/24/40, chat 5/15/30 → 8/20/40) — the old floors started small models from amnesia
+  while big models kept 15 lines for the same reasoning.
+
+- **Roleplay data the NPCs can query — including their own body.** The game gives a
+  possessed kobold no mirror and no spawn description, so the model couldn't truthfully
+  describe itself or where it woke. New/extended surfaces: `whoami` gains a gene-derived
+  appearance line (scale color named from the game's hue/saturation/brightness body
+  paint — "pale green", "dark grey" — size/build from the inflate/fat genes, curves and
+  groin from breast/dick genes, main-thread built); `cat here` (alias `area`) is a full
+  look-around in words (the 360° spatial prose + what's near) — the console previously
+  had no way to read any of it, it only lived in the legacy perception payload; and the
+  wake line + a durable `spawn:` fact now describe WHERE the body woke on every map —
+  in the bed when one exists (the wake-in-bed feature), otherwise "lying near <named
+  places> — around you: <prose>", so maps without SleepyHeadStations still wake with a
+  scene instead of "Scene: unknown". The fact carries named anchors only (the fact store
+  refuses viewer-relative prose and the area text is full of it); the full surroundings
+  live in the transcript. Taught in the prompts: "you have no mirror — `whoami` is your
+  look; `cat here` is your eyes."
+- **`cat` help/tools now list `plan` and `here`** (the command table and the NativeTools
+  function description were two revisions behind the vocabulary).
+
+- **Finer pathfinding: the body fits through what the path says it can.** Three linked
+  fixes for the the door-frame/fence playtest report. (1) Path smoothing
+  and local A* string-pulling cleared a single CENTER ray — which slides through door
+  gaps the half-meter capsule can't, leaving the body humping the frame post forever.
+  Every cleared segment now also checks two lateral lanes at ±0.35 m (body half-width),
+  in the shared clear-check both the world-map and local paths use; fan-steering does
+  the same three-lane check, so steering only picks headings the BODY fits through.
+  (2) Fences, sills and low walls are HOPPED, not braked at: when the forward ray's
+  obstacle top is within ~1 m of the feet, the body is grounded, the collider isn't a
+  kobold or a usable machine, and landable ground exists beyond (not a cliff), the
+  movement drives a one-shot jump over it (1.4 s cooldown) instead of reporting
+  "no clear way". (3) A stuck-breaker for everything else: a first bump reports
+  "turn"; a second rapid bump throws a sidestep shove toward the last fan-steer lean;
+  a third drops the whole plan and re-plans around the spot from the stored goal
+  (world-map first, local grid fallback) — the A* then routes around whatever kept
+  getting ground into. (4) The world-map cell default went 1.0 m → 0.5 m for door-
+  width granularity (big maps still auto-inflate to the hard cell cap), and a cached
+  map that is COARSER than the configured cell is now discarded instead of silently
+  winning.
+
+### Fixed
+- **The LateUpdate stutter is gone — the grab patches no longer reflect per frame.**
+  The body-scoped grab patches ran String-keyed `GetField` reflection for every
+  grabber on every LateUpdate frame (AI-owned and player alike) — `type.GetField`
+  scans metadata each call, and a scene with a few grabbers hitched every frame.
+  Grabber handles (`view`/`player`/`offset`/list) and AI-ownership now come from a
+  per-grabber cache: FieldInfo resolved once per grabber instance, ownership checked
+  ~once per second, per-frame work reduced to dictionary reads and cached
+  `FieldInfo.GetValue`. The claim scan's rebirth check also gained a hot-path guard —
+  gene fingerprinting only runs while an egg is actually pending (registry
+  non-empty); the common case costs one dictionary read, not a photon genes read
+  per candidate per tick.
+- **The egg-plant freeze is contained and the next one will name itself.** The plant
+  flow gained full phase instrumentation: every main-thread marshal in the planting
+  path (soil resolve → teleport item → LocalUse → verify → water assist) sets the
+  live `MainPhase` label the hang watchdog already reads — a frozen game now leaves
+  "main thread appears HUNG ... last phase: plant: LocalUse" in the log instead of a
+  blank stare. The watering assist stopped nesting marshals too: `WaterPlantDirect`
+  split into a main-only worker (no marshals inside; the auto-water inside the plant
+  macro calls it directly) and a public marshalled wrapper (the tool path).
+- **A jump pushes into the facing now — no more hop in place.** Two layers: `jump`
+  (and `walk(jump)`) now carries a real forward burst into the arc (the game's
+  controller ignores move input mid-air, so a plain inputJump hopped vertically and
+  landed exactly where it started), and at jump-start the movement applies a
+  horizontal impulse along the current facing — auto-hops over fences/sills push
+  harder (3 m/s, they aim at a landing) while command jumps scale with their walk
+  speed (≥0.9 m/s minimum). Exiting a station is untouched (the game's cancel path).
+- **A hatched rebirth can't be stolen by a claim race.** The player was swallowed,
+  the egg planted, cycles done — and instead of the player spawning, ANOTHER agent
+  possessed the fresh body first. The claim scan now skips any body currently in the
+  rebirth registry (`SwallowManager.IsAwaitingRebirth` — a fingerprint match against
+  pending hatches): those bodies belong to the hatch flow, which revives the person
+  (player or NPC) in the fresh body and despawns the duplicate; claims are unlocked
+  only once the registry releases the fingerprint.
+- **A bucket pickup could crash the game — the grab patches are now fail-safe.** The
+  mod's body-scoped TryGrab/LateUpdate prefixes returned "handled" even when their own
+  reflection work threw, so the original code got skipped after partial failure; a
+  bucket pickup (its GrabInfo shape) hit that path. Now ANY reflection or shape
+  problem falls back to the ORIGINAL game code (the patch only claims the takeover
+  when its full job completed), the grabbed-objects list is read as a non-generic
+  IList (no generic-cast trap), bookkeeping is ordered add-before-RPC, and failures
+  log instead of crashing. Human grabbers were never patched.
+- **The growth ladder is explicit: plant → water → stage 2 → water → stage 3 → fruits
+  or spawning.** The player clarified the mechanic after the first round: ONE watering
+  advances exactly ONE stage — two waters total, no more, no less. So the direct-
+  injection dose went back to a fixed moderate amount (capacity-filling was a wrong
+  guess and buys nothing), the `water` result spells the ladder verbatim ("watered →
+  next stage … water N more time(s)"), and the fully-grown branch now says what
+  actually happens next: for normal plants FRUITS (harvest), for an egg it spawns a
+  fresh empty body. Prompts on all surfaces carry the ladder.
+- **Growth is visible stage by stage, and the plot is named.** "Couldn't get it to the
+  third stage" was invisible: `water`/`plant` results now carry the plot's name, id
+  and addr (the model learns the egg/seed IS on a valid soil tile instead of hunting
+  another plot), plus `stages_left` / `mature` — "each watering matures it one stage;
+  water again until stages_left: 0, then harvest". And the direct-injection dose
+  FILLS THE PLANT'S CAPACITY (the old 60 ml fixed dose only advanced a stage part
+  way — growth drinks the whole container) for a guaranteed one-stage bump per
+  watering. Prompts teach the cycle: planted on a valid tile → water until mature →
+  harvest.
+- **Watering needs no can anymore: `water` falls through to direct injection.** The
+  can-free path the user asked for: when no watering can/bucket is within reach, the
+  water tool (and the post-plant auto-water) injects the `Water` reagent straight into
+  the plant's own `GenericReagentContainer` via its photon RPC (`AddMixRPC`, `Inject`) —
+  the exact effect the can's spray produces, with no equipment and no carrying. The
+  resolve covers plants and soil tiles (a tile's `planted` plant is fetched directly);
+  the result says `how: "direct (no can — the mod applied the water)"` so the model
+  knows. Config-gated: `[Farming] WateringAssist` (default ON) — off restores
+  "watering requires real equipment". The bucket/can keep working as the physical way;
+  prompts now say "WATERING NEEDS NO CAN".
+- **The water bucket can't be drunk dry anymore, and watering reaches seeds AND planted eggs.** Agents were `use`-ing the bucket/can — the drink path empties the water — and then had nothing to spray with. Now a water tool NEVER routes to use: held, `use bucket` fires the spray at the nearest plant (contextual use), on the ground it teaches "get it first"; in hand, `water` fires the can→target spray `water id:N`-style at a PLANT or at a SOIL TILE's photon view (a planted seed/egg may have no Plant entity yet — the spray reaches them in the dirt). Misses are honest: "nothing in reach" now names the nearest plot's distance instead of a bare no_plant, and a map-wide can hint was already pointed at. Prompts on all surfaces: "THE WATER BUCKET/CAN IS A TOOL, NOT A DRINK — `use` on it is refused".
+- **A newly-gained penis can't be misread as penetration.** When `SwallowEffect=Grow`
+  granted a body a dick (`SetGenes` live-spawns the penetrator at the crotch), the first
+  frames registered it against the OWNER'S OWN penetrables: the agent read "someone is
+  inside me", believed a phantom or their own body was fucking them, and begged not to
+  stop about an organ attached to themselves. Three gates: the penetration handler
+  refuses any penetrator whose owner is the body itself; the dick-in watchers ignore
+  targets on the body's own hierarchy (with a silent purge of any listener that fired);
+  and the grow step purges the self-side state immediately after `SetGenes`. The
+  gained-dick body event now also says it outright: "It is attached to YOU and can
+  never penetrate you — if you feel 'someone inside you' it is a misread of your own
+  body (`feel` reports holes truthfully)".
+- **A digested body is no longer narrated as sex.** The swallowed person's body parts
+  are live penetration machinery: their dick is a penetrator prop that "entered" the
+  eater's mouth on the way down, so the eater received a `[sex] BEING PENETRATED` event,
+  computed a thrust rhythm for it, and focused the whole meal on that rhythm ("let us
+  enjoy this rhythm") — while the victim's own side reported penetrating. Three gates,
+  per side: the eater's penetration table skips any entry whose owner is a currently
+  digesting victim (`SwallowManager.IsDigestingVictim`); a swallowed body's own
+  dick-in watcher is suspended while `Swallowed`; and a mid-play swallow purges both
+  sides' stale entries at begin (the victim was penetrating the eater when swallowed —
+  that entry never sees a "pull out"). The eater's anchors already carry the STOMACH
+  GUEST (meal, not sex) line; with the false events gone, the two can no longer
+  contradict. Real parallel sex with an unrelated partner still registers normally.
+- **Planting teleports the item onto the soil and waters the plant.** Farming was too
+  painful to do the player way — the walk-aim-drop loop burned retries and the flow
+  still depended on being on the dirt. The plant macro now: releases the held item
+  (guarded `ToolDrop`, no force-feed risk looking down), takes ownership of its photon
+  view, TELEPORTS it onto the plot tile (velocity zeroed), plants through the seed
+  component, verifies the tile took, and then AUTO-WATERS the fresh plant by firing
+  the nearest watering can's spray directly at it (any can within 5 m of the plot; the
+  result says `watered: no` with a distance hint when none is close — `water` still
+  handles the far case). The eye follows the item onto the plot so the model SEES where
+  it landed. Walk-and-approach remains only as the fallback for a plantable without a
+  photon view. Results now carry `planted` / `teleported` / `watered`; every refusal
+  is the honest one. Prompt surfaces updated: "say plant — it teleports, plants and
+  waters; you don't have to stand on the dirt or aim anything".
+- **Carrying is anchored to the agent's own eyes — the grab works, and nothing circles.**
+  The game's carry system reads the LOCAL PLAYER'S CAMERA twice a frame: held items
+  spring to `viewPos + player-camera-rotation * offset` in `Grabber.LateUpdate`, and
+  `TryGrab`'s sphere + sort ray sit wherever the player looks — so an AI body's carried
+  items swung around it when the human player turned (the "flys around the thing it's
+  targeting" report) and floor items/water buckets were outside any agent's real cone.
+  Body-scoped Harmony prefixes (`src/ModGrab.cs`) now REPLACE `LateUpdate` and `TryGrab`
+  for grabbers whose owner is this mod's AI body: anchors use the agent's own
+  `_yawDeg/_pitchDeg`, candidate search uses the agent's eye cone (radius/count sorted
+  like the original, CanGrab + grab-count respected, GrabInfo + OnGrabRPC replicated),
+  and the human player's grabber runs the original code untouched. The plant macro's
+  earlier "planted after many retries" flakiness traces to this too — the aiming was
+  right while the game's own grab geometry ignored it.
+- **"Stuck on a fence" and orbiting both trip breakers.** A THIRD stuck breaker:
+  the anti-circling watch samples the goal bearing + distance every ~1.2 s; when the
+  bearing has rotated ~110°+ while the distance stopped shrinking (`NavCircleWatch`),
+  the body is orbiting an obstacle steering can't open — the route hard-re-plans and
+  the turn reports "circling the target — re-planning". Progress decays the watch, and
+  a route change resets it.
+- **`deliver <place|id>` — carry it THERE and put it down.** The walk-it-to-the-location
+  macro the user asked for: empty hands are refused ("get <item> first"), the target
+  resolves from the nearby id registry / soil words (nearest plot) / place names,
+  the route re-uses the go_to A* machinery, arrival is polled (40 s cap), then the eye
+  aims down at the spot and the item is dropped ON it. Registered as a module tool in
+  both modes, taught in every TOOLS/carry prompt surface (built-ins + shipped files).
+- **Planting looks at the dirt, stands on the dirt, and tells the truth.** The game plants
+  a seed where THE SEED is within its soil-overlap radius — and a held item floats ~1 m
+  in front of the face, so a body 3 m off the plot "used" it, nothing grew, and the tool
+  reported ok. The new plant macro (`PlantWithPositioning`): finds the target soil from
+  the item's own footprint (the game's exact rule) or the nearest farm plot (map-wide
+  cache, addr + bearing in the refusal), AUTO-APPROACHES when out of reach (bounded walk
+  bursts, re-resolving the nearest plantable plot between attempts), aims the eye DOWN
+  at the dirt before the use, and VERIFIES the tile stopped being plantable — `planted:
+  true` only when it took, with an honest too_far/`used-but-nothing-grew` otherwise.
+  Held-first: a seed OR AN EGG in hand goes through the macro (the laid egg item carries
+  a `Seed` component — eggs plant through the same chain), free seeds still work; and
+  `use soil`/`use egg`/`use dirt` with a plantable in hand routes to the macro while a
+  bare `use` never hijacks station uses. Prompts teach it: planting is positional — be
+  on the plot; the mod walks, looks and verifies for you.
+- **The bee-in-a-window movement is tamed and the paths are planned, straightened through a quadtree.** Three movement-quality fixes for the the bumble-stutter playtest report: fan-steering gained HYSTERESIS (a heading that cleared stays preferred for 1.2 s instead of the ±20° flip-flop), corner approach switched to PURE PURSUIT (near a waypoint, the aim blends forward toward the next post — no more stop-turn-go-stop), and steering keeps a trickle of forward drive instead of full-stop braking cycles. The planner's string-pull now also runs against a QUADTREE over the walkability bitmap (`src/VoxelQuadtree.cs`, pure, with its own 57-assert test suite): uniform-open blocks collapse upward so a straight run across open field is proven against a handful of coarse nodes (zigzag legs fuse into one planned straightaway), mixed regions drill to the exact 0.5 m sampled truth, and every skip is verified at its landing cell — the first revision skipped phantom shifted blocks (slab-exit treated a block index as a corner) and clipped wall pixels through the gaps; both are fixed and regression-tested.
+- **Small items are grabbed on purpose now: the grab AIMS.** The grab cone follows the camera view, so floor items (seeds, eggs) were simply never in it — the eye stayed level while the model "grabbed at" them. `grab`/`get` now resolves an optional target (`get seed`, `get id:3` via the nearby registry) or falls back to the nearest grabbable, turns the eye toward it including the downward pitch floor items need, waits a beat for the swing, then grabs; the result names what it aimed at. `use` already aimed — the asymmetry that made people grabbable but seeds not, is gone.
+- **Item uses are taught contextually — an egg is either a body or a meal.** The prompts (built-ins + shipped console/act files, same lesson) say it plainly: the same item can have several uses, pick by what you want — a seed plants in bare soil; an EGG either plants in soil (`use` facing dirt / `plant_egg`) and grows a fresh empty kobold body, or is EATEN for the protein/strength buff by holding it and USING it (the game eats held edibles through use — GenericEdible is a GenericUsable). `get <name>` aims for itself; no manual head choreography.
+- **The ability to cum is OFF while being digested.** The orgasm tool returns an honest
+  refusal for a swallowed body — "no climax exists in a stomach; the walls churn, that's
+  all" — checked inside `ToolOrgasm` itself (module pass-through dispatch included), on
+  top of the round's general swallowed-gate; and `feel`, when swallowed, reports the
+  digestion instead of the holes and drops the "orgasm when the peak lands" teaching line.
+- **A stomach guest is no longer readable as penetration.** The belly anchor used to
+  open "you have someone INSIDE YOU" — which RP-template models, with their priors,
+  parse as sex, sitting one line away from the penetration anchor whose fallback said
+  "someone is inside you". All guest phrasing is now stomach-and-meal: the anchor leads
+  "STOMACH GUEST (you swallowed them whole — a MEAL, not sex: nothing entered your
+  holes, and [sex]/feel lines never mean the guest)"; the penetration anchors name their
+  holes explicitly ("being PENETRATED sexually — a dick is inside one of your holes…
+  a stomach guest is NOT this"); swallow-begin events tell the eater "in your STOMACH
+  (a meal, not sex)" and the victim "a MEAL — no sex is happening"; `feel` appends the
+  guest as its own line marked separate from the holes; and the EATING prompt section
+  (built-in + shipped console + act prompt, same sentence) states the rule once, plainly.
+- **A swallowed mind can no longer act on the world.** Its LLM session keeps running (by
+  design — it talks from inside), but every body-attached command it tried (`grab`/`get`,
+  `drop`, `throw`, `use`, `cd`, `run`, `turn`, `jump`, `crouch`, `exit`, `follow`, and the
+  module tools) now returns an honest refusal — "you are inside a stomach — hands, legs
+  and machines do nothing from here" — on both the console path and the legacy act path.
+  Speech, memory, goals/plan and read-only polling still work, and the state anchor says
+  the same thing every turn so the model stops attempting instead of learning from
+  failures alone.
+- **Memory files are deleted once absorbed.** In `SwallowEffect=Grow`, the digested
+  person's facts pour into the eater (unchanged) — but their own MemoryStore file was
+  left behind, so a later body with the same serialized object name would wake up as a
+  ghost of someone the world had eaten. Absorb now reads the records first and deletes
+  the victim's file after the pour (same end state as Destroy), and the egg-rebirth copy
+  deletes the old body's key once the life is restored onto the hatched body's key (it
+  was a duplicate of someone already reborn). Egg/BellyEgg keep their records until the
+  actual rebirth, as before.
+- **Roleplay-locked repetition loops break themselves.** The debug terminal kept
+  re-adding a roleplay model's identical prose ("*Ember blinks open heavy eyelids…")
+  every single round — the transcript became a wall of the same paragraph. Consecutive
+  identical replies are now counted: the first executes (a legitimate retry), the second
+  gets one corrective row, the third ends the turn instead of re-executing and
+  re-storing. Also, when a reply mixes unmarked reasoning prose with real command lines,
+  the prose line is preserved in history as the thought behind the commands instead of
+  vanishing.
+- **The "recovered command lines from garbled tool-markup" log line finally shows WHAT
+  the model wrote** — sampled raw (≤300 chars, every 10th fire) into the log, so the
+  remaining garbled shapes name themselves in the next playtest instead of the log only
+  counting them.
+
+### Removed
+- **The `ask` tool.** It re-asked the model about its own perception through a SECOND LLM
+  call: answers were long self-narrating meta-prose ("I'm Wispette — a small kobold woman
+  living in this world as my own inner model and monologue…"), landed as near-duplicate
+  facts/history four turns running, and crowded the real event history out of the small
+  window. The model already answers any question it cares about by polling (`ls`,
+  `find`, `cat`, `sonar`, `status`); the tool's worker thread, console command, alias,
+  perception keys (`asked`/`answered`), `[ask]` event drain, prompt mentions and schema
+  entry all went with it, everywhere (act tools, fuzzy lists, salvage targets, ConsoleShell
+  table + aliases, `help` text, docs).
 - **The nest lay gate now names the REAL blocker — the swallowed-egg birth loop closes.**
   The game's lay rule is `egg > 5ml AND energy > 1` (OvipositionSpot.CanUse), but every
   refusal channel used to phrase the whole thing as "belly not full": a nest rejected an

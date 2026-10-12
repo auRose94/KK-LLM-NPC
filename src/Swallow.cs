@@ -170,7 +170,12 @@ namespace KKLLMNPC
                         + "s to conversion — " + fate + ")");
                 }
             if (parts.Count == 0) return null;
-            return "you have someone INSIDE YOU: " + string.Join(", ", parts.ToArray());
+            // "INSIDE YOU" used to make RP models read the guest as PENETRATION
+            // ("you have someone inside you" = sex, in their priors). The guest is a
+            // meal sitting in the stomach — say so, explicitly and every time.
+            return "STOMACH GUEST (you swallowed " + (parts.Count == 1 ? "them" : "them all")
+                + " whole — a MEAL, not sex: nothing entered your holes, and [sex]/feel lines never mean the guest): "
+                + string.Join(", ", parts.ToArray());
         }
 
         internal static SwallowEffect Effect()
@@ -315,6 +320,45 @@ namespace KKLLMNPC
         }
 
         // internal for the spectate manager (its Tick parks the player at the belly).
+        // Is this kobold currently being digested (an active swallow session's
+        // victim)? The victim's body parts ARE penetrator props — their dick
+        // "enters" the eater's mouth on the way down — and the penetration tech
+        // registered all of it as sex: the eater read the victim's penis as a
+        // penetration, applied a rhythm, and both minds narrated "let us enjoy
+        // this rhythm" about a digestion. Digestion is never sex.
+        // Does this body belong to a pending REBIRTH (an egg that will hatch into a
+        // person — a swallowed player or NPC)? Claim scans must SKIP these: the
+        // hatch flow revives the person in the fresh body, and a second agent
+        // possessing it mid-flow stole the rebirth (observed: "player didn't spawn
+        // after the egg went all cycles — another agent took over the body").
+        internal static bool IsAwaitingRebirth(Kobold k)
+        {
+            if (k == null || Plugin == null) return false;
+            // HOT-PATH GUARD: the claim scan calls this per candidate per tick —
+            // a fingerprint pass is work we must only pay while an egg is actually
+            // pending (registry empty in every session without a swallowed body).
+            lock (_lock)
+            {
+                if (_awaitingRebirth.Count == 0) return false;
+            }
+            try
+            {
+                string fp = NPCInstance.GenesFingerprint(k.GetGenes());
+                if (string.IsNullOrEmpty(fp)) return false;
+                lock (_lock) return _awaitingRebirth.ContainsKey(fp);
+            }
+            catch (Exception) { return false; }
+        }
+
+        internal static bool IsDigestingVictim(Kobold k)
+        {
+            if (k == null) return false;
+            lock (_lock)
+                foreach (var st in _active)
+                    if (st != null && st.Victim == k) return true;
+            return false;
+        }
+
         internal static bool EaterBusy(Kobold k)
         {
             try
@@ -557,6 +601,11 @@ namespace KKLLMNPC
             };
             lock (_lock) _active.Add(st);
             try { st.EaterNpc = Plugin.InstanceForBody(eater); } catch (Exception) { st.EaterNpc = null; }
+            // Mid-play swallow belt: if the victim was penetrating the eater when
+            // swallowed, the eater's _pen entry never sees a "pull out" — purge
+            // both sides of the false penetration so no rhythm survives the meal.
+            try { if (npc != null) npc.PurgePenForVictim(victim); } catch (Exception) { }
+            try { if (st.EaterNpc != null) st.EaterNpc.PurgePenForVictim(victim); } catch (Exception) { }
 
             // Player victims: if the eater was HOLDING them, let go first — the
             // grabber's per-frame anchor would otherwise fight the pull-in pin.
@@ -584,7 +633,7 @@ namespace KKLLMNPC
                 {
                     try
                     {
-                        st.EaterNpc.PushWorldEvent("you just swallowed the PLAYER WHOLE — the player is inside you now: their camera is gone, they WATCH everything through your body's eyes and CANNOT act (about "
+                        st.EaterNpc.PushWorldEvent("you just swallowed the PLAYER WHOLE — they are in your STOMACH now (a meal, NOT sex): their camera is gone, they WATCH everything through your body's eyes and CANNOT act (about "
                             + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
                             + "s to conversion). " + PlayerFateHint() + " Keep living your ordinary life — go to work, play, talk — and speak to them whenever; they hear you. They are a person in your care: never sell, abandon or hurt them.");
                     }
@@ -604,14 +653,14 @@ namespace KKLLMNPC
                     try
                     {
                         st.EaterNpc.PushWorldEvent("you just swallowed " + st.Name
-                            + " WHOLE — they are inside you now, digesting (about "
+                             + " WHOLE — they are in your STOMACH now (a meal, not sex), digesting (about "
                             + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
                             + "s to conversion). Their fate follows this stomach's rules; you can speak while they convert.");
                     }
                     catch (Exception) { }
                 }
-                string inside = who == "the player" ? "them" : who + "'s body";
-                try { Plugin.FanoutWorldEventExcept("you watch " + who + " swallow " + st.Name + " WHOLE — they disappeared inside " + inside, st.EaterNpc, npc); }
+                string inside = who == "the player" ? "them" : who + "'s stomach";
+                try { Plugin.FanoutWorldEventExcept("you watch " + who + " swallow " + st.Name + " WHOLE — they vanished into " + inside, st.EaterNpc, npc); }
                 catch (Exception) { }
             }
             else
@@ -661,7 +710,7 @@ namespace KKLLMNPC
             switch (Effect())
             {
                 case SwallowEffect.BellyEgg:
-                    return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. You are slowly being converted into an EGG that will ride in their belly — when they sit on a nest and lay you, you will hatch out of it with new genes.";
+                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening, the walls are just churning); you can still speak but you cannot move. You are slowly being converted into an EGG that will ride in " + who + "'s belly — when they sit on a nest and lay you, you will hatch out of it with new genes.";
                 case SwallowEffect.Grow:
                 {
                     var taken = new List<string>();
@@ -671,12 +720,12 @@ namespace KKLLMNPC
                     string what = taken.Count > 0
                         ? "They are ABSORBING you — " + JoinEnglish(taken) + " " + (taken.Count == 1 ? "is" : "are") + " becoming theirs."
                         : "They are ABSORBING you — your whole body is becoming theirs.";
-                    return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. " + what + " There is no coming back.";
+                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening); you can still speak but you cannot move. " + what + " There is no coming back.";
                 }
                 case SwallowEffect.Destroy:
-                    return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. They are consuming you entirely. There is no coming back.";
+                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening); you can still speak but you cannot move. They are consuming you entirely. There is no coming back.";
                 default:
-                    return who + " swallowed you WHOLE — you are inside their stomach now; you can still speak but you cannot move. You feel the walls churn. You are slowly being converted into an EGG — when it's done, you will be reborn from it with new genes.";
+                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening); you can still speak but you cannot move. You feel the walls churn. You are slowly being converted into an EGG — when it's done, you will be reborn from it with new genes.";
             }
         }
 
@@ -1178,6 +1227,9 @@ namespace KKLLMNPC
                         eatNpc.AbsorbVictimFacts(st.Name, facts);
                     }
                     catch (Exception e) { LLMNPCPlugin.Log.LogWarning("swallow absorb live: " + e.Message); }
+                    // SKILL TRANSFER: the digested person's procedures pour in as
+                    // well — muscle memory goes to whoever absorbed them.
+                    try { if (rec.Skills != null && rec.Skills.Count > 0) eatNpc.SkillsAbsorbFrom(st.Name, rec.Skills); } catch (Exception) { }
                 }
 
                 // And mirror the merged life under the EATER's own body key, so an
@@ -1185,7 +1237,11 @@ namespace KKLLMNPC
                 try
                 {
                     var eaterKey = NPCInstance.BodyKey(st.Eater);
-                    if (string.IsNullOrEmpty(eaterKey)) return;
+                    if (string.IsNullOrEmpty(eaterKey))
+                    {
+                        MemoryStore.Delete(st.OldBodyKey); // absorbed but no eater file to mirror — the person is still consumed
+                        return;
+                    }
                     string eaterName = eatNpc != null ? eatNpc.GetMyName() : NPCInstance.CleanName(st.Eater.name);
                     var eatRec = MemoryStore.Load(eaterKey);
                     var merged = new List<string>();
@@ -1201,6 +1257,18 @@ namespace KKLLMNPC
                         MemoryStore.Save(eaterKey, NPCInstance.CleanName(st.Eater.name), null, merged, null, null);
                 }
                 catch (Exception e) { LLMNPCPlugin.Log.LogWarning("swallow absorb persist: " + e.Message); }
+                // The person is consumed — their knowledge now lives under the eater's
+                // key. The victim's own file must NOT survive the meal (it used to:
+                // Grow absorbed the facts but left the origin file, and a later body
+                // with the same serialized object name would wake up as a ghost of
+                // someone the world saw eaten). Same end state as Destroy; Grow just
+                // reads the records first.
+                try
+                {
+                    MemoryStore.Delete(st.OldBodyKey);
+                    LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' absorbed — their saved life moved into the eater and their record was erased");
+                }
+                catch (Exception e) { LLMNPCPlugin.Log.LogWarning("swallow absorb delete: " + e.Message); }
             }
             catch (Exception e)
             {
@@ -1363,11 +1431,20 @@ namespace KKLLMNPC
                 if (!sizeGained && !strengthGained && !breastsGrew && !dickGrew && !dickGained)
                     LLMNPCPlugin.Log.LogWarning("swallow Grow: all SwallowGrow toggles off — consuming with no gain (use SwallowEffect=Destroy for that intent)");
                 st.Eater.SetGenes(next); // live-applies: resize, belly volume, curves, dick
+                // A freshly-gained penis spawns as a live penetrator at the crotch;
+                // without a purge the first frames registered it against the OWNER'S
+                // own penetrables ("a phantom is fucking me", begging not to stop).
+                try
+                {
+                    var grewNpc = Plugin.InstanceForBody(st.Eater);
+                    if (grewNpc != null) grewNpc.PurgePenForVictim(st.Eater);
+                }
+                catch (Exception) { }
                 var bodyChanged = new List<string>();
                 if (sizeGained) bodyChanged.Add("you are bigger now");
                 if (strengthGained) bodyChanged.Add("you are stronger (one more carry slot, more stamina)");
                 if (breastsGrew) bodyChanged.Add("your breasts grew curvier");
-                if (dickGained) bodyChanged.Add("you GREW a dick — you had none; theirs is yours now");
+                if (dickGained) bodyChanged.Add("you GREW a dick — you had none; theirs is yours now. It is attached to YOU and can never penetrate you — if you feel \"someone inside you\" it is a misread of your own body (feel reports holes truthfully)");
                 else if (dickGrew) bodyChanged.Add("your dick grew bigger");
                 var bubbleBits = new List<string>();
                 if (sizeGained) bubbleBits.Add("size");
@@ -1652,12 +1729,17 @@ namespace KKLLMNPC
                     var facts = new List<string>();
                     if (rec.Facts != null) foreach (var f in rec.Facts) if (!string.IsNullOrEmpty(f)) facts.Add(f);
                     facts.Add("was swallowed whole and digested into an egg; hatched back in a NEW body with MIXED genes (the eater's genes and theirs blended). You are the same person.");
-                    MemoryStore.Save(newKey, rec.Name, rec.Persona, facts, rec.Goal, rec.Pronouns);
+                    MemoryStore.Save(newKey, rec.Name, rec.Persona, facts, rec.Goal, rec.Pronouns, rec.Skills); // the CHILD egg inherits the skills
                     try
                     {
                         LLMNPCPlugin.Log.LogInfo("swallow: rebirth — '" + (rec.Name ?? "?") + "' hatched from an egg; persona restored to body key '" + newKey + "' (genes changed)");
                     }
                     catch (Exception) { }
+                    // The old body's key stays only while the person can still come back
+                    // THROUGH that body. After the life is copied onto the hatched body's
+                    // key it is a duplicate of someone the world already ate — drop it.
+                    if (!string.Equals(newKey, oldKey, StringComparison.Ordinal))
+                        MemoryStore.Delete(oldKey);
                 }
                 lock (_lock)
                 {
@@ -1801,6 +1883,33 @@ namespace KKLLMNPC
         // early-returns steering; the LLM session keeps running (it can speak), and
         // the swallow manager narrates the conversion into its world events.
         internal volatile bool Swallowed;
+
+        // Command gating while swallowed: the mind stays (it can be talked to), but
+        // nothing body-attached can act — hands/legs/machines all reach nothing from
+        // inside a stomach. Allowed: speech (echo/emote/say/emote), memory & goals
+        // (remember/forget/goal/plan), read-only polling (ls/ps/pwd/whoami/cat/status/
+        // hold/sonar/look/find/screenshot), turn-enders (sleep/help/clear — clear is
+        // screen-only) and the dev report. Everything else is refused with an
+        // explanation, so a swallowed model doesn't burn turns retrying grab/drop/use.
+        internal bool ConsoleCommandAllowedWhileSwallowed(string cmd)
+        {
+            if (string.IsNullOrEmpty(cmd)) return false;
+            try
+            {
+                string c = ConsoleShell.Canonical(cmd);
+                if (c == null) return false; // unknown words are prose anyway
+                if (c == "echo" || c == "emote" || c == "sleep" || c == "help" || c == "clear" || c == "report"
+                    || c == "remember" || c == "forget" || c == "goal" || c == "plan") return true;
+                switch (c)
+                {
+                    case "ls": case "ps": case "pwd": case "whoami": case "cat": case "status":
+                    case "hold": case "sonar": case "look": case "find": case "screenshot":
+                        return true;
+                    default: return false; // cd/use/get/drop/throw/run/turn/jump/crouch/exit/follow + module tools
+                }
+            }
+            catch (Exception) { return false; }
+        }
 
         // Persist this body's life NOW (name/persona/facts/pronouns/goal under this
         // body's key). The normal teardown saves too, but it runs AFTER the swallow

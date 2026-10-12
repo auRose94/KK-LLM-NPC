@@ -41,6 +41,85 @@ namespace KKLLMNPC
         private const int RecentlyFinishedWindow = 40;
 
         // ------------------------------------------------------------------
+        // persistent plan — the current goal's step ladder (console `plan` command)
+        // ------------------------------------------------------------------
+        // The goal machine stores WHAT to do; the plan stores the ordered HOW.
+        // Steps persist across turns (state anchor carries the current one), so a
+        // small model never has to re-derive its approach: set goal → plan the
+        // steps once → work through them (`plan next` marks one done).
+        internal class PlanStep { public string Text; }
+
+        private readonly List<PlanStep> _plan = new List<PlanStep>();
+        private readonly object _planLock = new object();
+        private const int PlanMaxSteps = 12;
+
+        // Add a step. Returns the confirmation line for the terminal.
+        internal string PlanAdd(string step)
+        {
+            step = Sanitize((step ?? "").Trim());
+            if (step.Length == 0) return "plan: empty step — try: plan <what to do>";
+            if (step.Length > 160) step = step.Substring(0, 160);
+            lock (_planLock)
+            {
+                if (_plan.Count > 0 && string.Equals(_plan[_plan.Count - 1].Text, step, StringComparison.Ordinal))
+                    return "plan: that step is already the last one";
+                if (_plan.Count >= PlanMaxSteps)
+                    return "plan is full (" + PlanMaxSteps + " steps) — work it down with `plan next` or `plan clear` first";
+                _plan.Add(new PlanStep { Text = step });
+                PushHistory("plan", "add:" + step);
+                return PlanShowLocked();
+            }
+        }
+
+        internal string PlanShow()
+        {
+            lock (_planLock) return PlanShowLocked();
+        }
+
+        private string PlanShowLocked()
+        {
+            if (_plan.Count == 0) return "(no plan steps — lay the approach out with: plan <step>)";
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < _plan.Count; i++)
+                sb.Append("  ").Append(i + 1).Append(i < _plan.Count - 1 ? " [next]" : "").Append(" ").AppendLine(_plan[i].Text);
+            return sb.ToString().TrimEnd();
+        }
+
+        // Mark the first step done (head-first consumption). Returns its text or null.
+        internal string PlanAdvance()
+        {
+            lock (_planLock)
+            {
+                if (_plan.Count == 0) return null;
+                string done = _plan[0].Text;
+                _plan.RemoveAt(0);
+                PushHistory("plan", "done:" + done);
+                return done;
+            }
+        }
+
+        // Wipe the plan (goal finished/abandoned). `why` lands in history only.
+        internal void PlanClear(string why)
+        {
+            lock (_planLock)
+            {
+                if (_plan.Count == 0) return;
+                _plan.Clear();
+                PushHistory("plan", "cleared" + (string.IsNullOrEmpty(why) ? "" : " (" + why + ")"));
+            }
+        }
+
+        // State-anchor fragment: the step being worked when a plan exists.
+        internal string PlanAnchor()
+        {
+            lock (_planLock)
+            {
+                if (_plan.Count == 0) return null;
+                return "plan: " + _plan.Count + " step" + (_plan.Count == 1 ? "" : "s") + " left, now: " + _plan[0].Text;
+            }
+        }
+
+        // ------------------------------------------------------------------
         // goal tools
         // ------------------------------------------------------------------
         // Set or replace the current goal. This is where the "bigger thinking" goes.
@@ -114,6 +193,7 @@ namespace KKLLMNPC
                 _goalRepeats = 0;
                 _goalProgress = "";
                 ShedFactsForGoal(completed);
+                PlanClear("goal done"); // the plan ladder belongs to the goal
             }
             PushHistory("goal", "done:" + completed + (note.Length > 0 ? " (" + note + ")" : ""));
             Logger.LogInfo("goal complete: " + completed);
@@ -138,6 +218,7 @@ namespace KKLLMNPC
                 _goalRepeats = 0;
                 _goalProgress = "";
                 ShedFactsForGoal(dropped);
+                PlanClear("goal dropped"); // the plan ladder belongs to the goal
             }
             PushHistory("goal", "drop:" + dropped + (reason.Length > 0 ? " (" + reason + ")" : ""));
             Logger.LogInfo("goal dropped: " + dropped + (reason.Length > 0 ? " — " + reason : ""));

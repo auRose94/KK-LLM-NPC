@@ -172,6 +172,143 @@ namespace KKLLMNPC
         }
 
         // ------------------------------------------------------------------
+        // RP chat-template placeholders ({{user}}/{{char}}). Models trained on
+        // SillyTavern-style roleplay templates write these into their SPEECH
+        // (observed live: "nudges against {{user}}'s entrance") — a literal
+        // "{{user}}" leaking into the chat window breaks the fiction. The mod
+        // resolves {{user}} to whoever is actually closest to this NPC (the
+        // live engagement partner, else the nearest person in radius, else the
+        // host player) and {{char}} to the NPC itself, at speak time.
+        // Pure + unit-tested (tests/test_textutil.cs); case- and
+        // whitespace-tolerant ({{ User }}) since templates vary.
+        // ------------------------------------------------------------------
+        public static string SubstituteRpPlaceholders(string text, string userReplacement, string charReplacement)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf("{{", StringComparison.Ordinal) < 0) return text;
+            string result = text;
+            if (!string.IsNullOrEmpty(charReplacement))
+                result = ReplacePlaceholder(result, "char", charReplacement);
+            if (!string.IsNullOrEmpty(userReplacement))
+            {
+                result = ReplacePlaceholder(result, "user", userReplacement);
+                // Models also emit {{person}} for the same slot sometimes.
+                result = ReplacePlaceholder(result, "person", userReplacement);
+            }
+            return result;
+        }
+
+        // Is this reply a RESPONSE BLOCK — roleplay the model means as its actual
+        // chat line? Detected the objective way: asterisk-wrapped actions (*tail
+        // sways*), quoted dialogue ("..."), or an RP placeholder ({{user}}).
+        // Plain short thoughts ("check the farm, then bed") have none of those and
+        // stay working memory; a block has at least one marker and says it out loud.
+        // Pure + unit-tested (tests/test_textutil.cs).
+        public static bool IsRpResponseBlock(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            if (text.IndexOf("{{", StringComparison.Ordinal) >= 0) return true;
+            return HasAsteriskAction(text) || HasQuotedDialogue(text);
+        }
+
+        // Do the starred actions in a block narrate things the game could DO
+        // physically (walk over, climb in, grab it) instead of sending commands?
+        // RP-locked models narrate "*walks to the kitchen*" and wait — the world
+        // never moves, because only command lines act. The caller uses this for a
+        // one-line reminder after speaking the block. Pure + unit-tested.
+        public static bool StarsWantRealActions(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf('*') < 0) return false;
+            int i = 0;
+            while (true)
+            {
+                int open = text.IndexOf('*', i);
+                if (open < 0) break;
+                int close = text.IndexOf('*', open + 1);
+                if (close < 0) break;
+                string seg = text.Substring(open + 1, close - open - 1).Trim();
+                if (seg.Length > 0 && ActionVerbRegex().IsMatch(seg)) return true;
+                i = close + 1;
+            }
+            return false;
+        }
+
+        private static System.Text.RegularExpressions.Regex _actionVerb;
+        private static System.Text.RegularExpressions.Regex ActionVerbRegex()
+        {
+            if (_actionVerb == null)
+            {
+                _actionVerb = new System.Text.RegularExpressions.Regex(
+                    @"\b(walks?|wanders?|steps?|heads?|runs? over|runs? to|jumps?|hops?|climbs?|enters?|crouches?|kneels?|lies? (down|back)|sits? (down|up)|stands? (up|by)|grabs?|grabs? up|picks? up|reaches?|touches?|rubs?|mounts?|dismounts?|cuddles? up|curls?)\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            }
+            return _actionVerb;
+        }
+
+        // *action* — an asterisk pair with non-space content between. (char IndexOf —
+        // no string overloads: some mcs/mcorlib surfaces lack the comparison variants.)
+        private static bool HasAsteriskAction(string text)
+        {
+            int open = text.IndexOf('*');
+            while (open >= 0)
+            {
+                int close = text.IndexOf('*', open + 1);
+                if (close < 0) return false; // lone asterisk (censor/footnote) — not a marker
+                if (close - open > 2) return true;
+                open = text.IndexOf('*', close + 1);
+            }
+            return false;
+        }
+
+        // Quote pairs (straight or curly) with words inside — dialogue.
+        private static bool HasQuotedDialogue(string text)
+        {
+            return QuotePair(text, '"', '"') || QuotePair(text, (char)0x201C, (char)0x201D);
+        }
+
+        private static bool QuotePair(string text, char open, char close)
+        {
+            int o = text.IndexOf(open);
+            if (o < 0) return false;
+            int c = text.IndexOf(close, o + 1);
+            while (o >= 0 && c > o)
+            {
+                if (c - o > 2) return true; // words inside, not an empty pair
+                o = text.IndexOf(open, o + 1);
+                c = text.IndexOf(close, o + 1);
+            }
+            return false;
+        }
+
+        // Replace every "{{ <slot> }}" (case/space tolerant) with the value; other
+        // placeholders pass through. Bracketless scan (no regex backtracking per char).
+        private static string ReplacePlaceholder(string text, string slot, string value)
+        {
+            var sb = new System.Text.StringBuilder(text.Length);
+            int i = 0;
+            while (i < text.Length)
+            {
+                int open = text.IndexOf("{{", i, StringComparison.Ordinal);
+                if (open < 0) { sb.Append(text.Substring(i)); break; }
+                int close = text.IndexOf("}}", open + 2, StringComparison.OrdinalIgnoreCase);
+                if (close < 0) { sb.Append(text.Substring(i)); break; }
+                string inner = text.Substring(open + 2, close - open - 2).Trim();
+                if (string.Equals(inner, slot, StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.Append(text.Substring(i, open - i)).Append(value);
+                    i = close + 2;
+                }
+                else
+                {
+                    // A different placeholder — copy up to the open brace and continue
+                    // inside it (so {{char}}" and "{{user}}" in one line both resolve).
+                    sb.Append(text.Substring(i, open + 2 - i));
+                    i = open + 2;
+                }
+            }
+            return sb.ToString();
+        }
+
+        // ------------------------------------------------------------------
         // Fact hygiene (pure + unit-tested): is this "fact" VIEWER-RELATIVE —
         // i.e. useless the moment the speaker or the thing moves? "object to
         // left", "the bed is here", "the wall ahead". Facts are long-term

@@ -44,6 +44,10 @@ namespace KKLLMNPC
                 return "image";
             if (e.Contains("response_format") || e.Contains("json_schema"))
                 return "response_format";
+            // Servers without OpenAI function-calling reject the tools array / tool_choice
+            // explicitly ("tools is not supported", "unknown field tool_choice").
+            if (e.Contains("tool_choice") || e.Contains("tools") || e.Contains("tool call") || e.Contains("function calling"))
+                return "tools";
             if (e.Contains("max_tokens") || e.Contains("n_predict"))
                 return "max_tokens";
             // Every other 400/413/422 ("context length exceeded", "too many tokens",

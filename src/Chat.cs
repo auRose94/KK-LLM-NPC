@@ -371,6 +371,70 @@ namespace KKLLMNPC
             return sb.ToString();
         }
 
+        // {{user}} resolution — runs on the MAIN thread (Unity reads). The closest
+        // partner in the model's sense of the word: (1) whoever is live-engaged with
+        // this body right now (penetration/dick-in, same sources PartnersList reads),
+        // (2) the nearest OTHER person in radius — the player's avatar first, then a
+        // sibling NPC — (3) the host player. Null only when literally nobody is
+        // known, in which case the caller leaves the placeholder literal.
+        internal const float RpUserRadiusM = 14f;
+
+        internal string RpUserTargetName()
+        {
+            float now = Time.unscaledTime;
+            var names = new List<string>();
+            try
+            {
+                lock (_pen)
+                    foreach (var kv in _pen)
+                    {
+                        var st = kv.Value;
+                        if (now - st.lastT >= 3f) continue;
+                        string who = PartnerName(st.src, st.name);
+                        if (!string.IsNullOrEmpty(who)) names.Add(who);
+                    }
+            }
+            catch (Exception) { }
+            if (names.Count == 0)
+            {
+                try
+                {
+                    lock (_dickIn)
+                        foreach (var kv in _dickIn)
+                        {
+                            var st = kv.Value;
+                            if (now - st.lastT >= 3f) continue;
+                            string who = PartnerName(st.src, st.name);
+                            if (!string.IsNullOrEmpty(who)) names.Add(who);
+                        }
+                }
+                catch (Exception) { }
+            }
+            if (names.Count > 0) return names[0];
+            try
+            {
+                if (!IsAlive(_kobold)) return PlayerChatName();
+                float best = RpUserRadiusM * RpUserRadiusM;
+                string bestName = null;
+                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                {
+                    try
+                    {
+                        if (k == null || k == _kobold) continue;
+                        if (!IsAlive(k)) continue;
+                        float d = (k.transform.position - _kobold.transform.position).sqrMagnitude;
+                        if (d >= best) continue;
+                        string who = IsPlayerKobold(k) ? PlayerChatName() : CleanName(k.name);
+                        if (string.IsNullOrEmpty(who)) continue;
+                        best = d; bestName = who;
+                    }
+                    catch (Exception) { }
+                }
+                return bestName ?? PlayerChatName();
+            }
+            catch (Exception) { return null; }
+        }
+
         // Speech to the world, three ways at once: floating Chatter bubble above the
         // body, the game's real chat window (same Photon event the ChatPanel raises),
         // and a local echo so the player sees their own window too.
@@ -383,6 +447,21 @@ namespace KKLLMNPC
             if (text.Length == 0) text = p.S("message", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
             text = Sanitize(text);
+            // RP-template minds speak in {{user}}/{{char}} — resolve against the real
+            // world AT SPEAK TIME (closest partner: live engagement, nearest person in
+            // radius, host player) so the chat never shows a literal "{{user}}". Runs
+            // only for lines that actually contain a placeholder — no marshal cost.
+            if (text.IndexOf("{{", StringComparison.Ordinal) >= 0)
+            {
+                try
+                {
+                    string target = (string)RunOnMainThread(() => (object)RpUserTargetName(), 5000) ?? "";
+                    string expanded = TextUtil.SubstituteRpPlaceholders(text, target, MyName());
+                    if (expanded != text) Logger.LogInfo("[NPC] say placeholders resolved: {{user}} -> " + (target.Length > 0 ? target : "(left literal)"));
+                    text = expanded;
+                }
+                catch (Exception e) { Logger.LogWarning("say placeholder resolve: " + e.Message); }
+            }
             // Degenerate-say guard: some models (Gemma-class quants) fall into
             // sampling loops and one loop shipped a 40KB "you's you's you's…" bubble
             // to chat, the ack comparer and the prompt. Trim runs to two units and

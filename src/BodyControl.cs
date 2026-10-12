@@ -81,14 +81,25 @@ namespace KKLLMNPC
                     lines.Add("belly: " + F(eggVol) + "ml egg" + (eggReady ? " — READY_TO_LAY" : ""));
                 }
                 catch (Exception) { }
+                try
+                {
+                    string guest = SwallowManager.BellyGuestText(_kobold);
+                    if (guest != null) lines.Add("(separate from the holes above) " + guest);
+                }
+                catch (Exception) { }
             }
             catch (Exception e) { lines.Add("feeling trouble: " + Sanitize(e.Message)); }
             string head = lines.Count > 0
-                ? "what your body feels right now:"
-                : "nothing is touching you right now — everything is calm";
-            lines.Add("what moves it: your hips — thrust intensity=0..1 gives SLOW deep strokes (rate follows intensity, ~2/s at the default; duration=secs caps a burst), "
-                + "your partner's pace (ask with say/emote), the machine/mount itself. "
-                + "orgasm when the peak lands; unmount (or exit) leaves the animation.");
+                ? "what your body feels right now (holes only):"
+                : (Swallowed
+                    ? "nothing touches your holes — you are a meal being digested"
+                    : "nothing is touching you right now — everything is calm");
+            if (Swallowed)
+                lines.Add("you are inside a stomach: no thrust, no peak, no machine touch — the walls do everything; echo/emote to speak, sleep to pass the time");
+            else
+                lines.Add("what moves it: your hips — thrust intensity=0..1 gives SLOW deep strokes (rate follows intensity, ~2/s at the default; duration=secs caps a burst), "
+                    + "your partner's pace (ask with say/emote), the machine/mount itself. "
+                    + "orgasm when the peak lands; unmount (or exit) leaves the animation.");
             var d = new Dictionary<string, object>
             {
                 ["ok"] = true,
@@ -345,6 +356,12 @@ namespace KKLLMNPC
         {
             if (_kobold == null)
                 return new { ok = false, reason = "no_body" };
+            // Cumming OFF while digested: a swallowed body peaks at nothing — it is
+            // food in a stomach (the RunTool/console gates already refuse the tool;
+            // this catches module-pass-through dispatch too).
+            if (Swallowed)
+                return new { ok = false, reason = "swallowed",
+                    note = "you are being digested — no climax exists in a stomach; the walls churn, that's all" };
 
             try
             {

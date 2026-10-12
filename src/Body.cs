@@ -24,8 +24,16 @@ namespace KKLLMNPC
     {
 
         // Fires when this kobold's penetrator enters something (and each tick).
+        // While THIS body is being digested, its dick "entering" the eater's mouth
+        // is not sex — the victim gets no [sex] events or rhythm from it either.
         private void NotifyDickIn(KKPenetratorListener listener, string hole, bool entered)
         {
+            if (Swallowed && entered) return;
+            if (entered && listener != null && InvolvesOwnBody(listener.lastTarget))
+            {
+                PurgeSelfDick(listener); // our own dick cannot penetrate our own body
+                return;
+            }
             try
             {
                 lock (_dickIn)
@@ -52,6 +60,12 @@ namespace KKLLMNPC
 
         private void NotifyDickTick(KKPenetratorListener listener, string hole, float dist)
         {
+            if (Swallowed) return;
+            if (listener != null && InvolvesOwnBody(listener.lastTarget))
+            {
+                PurgeSelfDick(listener);
+                return;
+            }
             try
             {
                 lock (_dickIn)
@@ -133,6 +147,9 @@ namespace KKLLMNPC
                     total++;
                     int id = k.GetInstanceID();
                     if (LLMNPCPlugin.IsClaimedByAnyLLM(id)) { claimed++; continue; }
+                    // REBIRTH HOLD: a body that will hatch into a swallowed person
+                    // belongs to the hatch flow, not the claim race.
+                    try { if (SwallowManager.IsAwaitingRebirth(k)) continue; } catch (Exception) { }
                     var desc = k.GetComponent<CharacterDescriptor>();
                     if (desc == null) continue;
                     var ct = desc.GetPlayerControlled();
@@ -232,6 +249,12 @@ namespace KKLLMNPC
                                                // the main thread never blocks on HTTP
                 }
             }
+            // WAKE CONTEXT (no moving!): a body that woke up inside/next to a bed gets
+            // told so; otherwise the boot line describes the actual surroundings. The
+            // mod used to TELEPORT fresh spawns beside a bed — the body then sat stuck
+            // inside the bed's colliders (and the sleeper grabbed it). Possess where
+            // they are; the words are the fix, not the position.
+            try { WakeContextIfAny(target); } catch (Exception e) { try { Logger.LogWarning("wake context: " + e.Message); } catch (Exception) { } }
             RegisterAgentBody(_currentKoboldId, _npcName); // siblings can see/hear this agent
             _yawDeg = target.transform.eulerAngles.y; // start from current facing
             _controller = target.GetComponent<KoboldCharacterController>();
@@ -313,7 +336,7 @@ namespace KKLLMNPC
                 // least wakes up as the same person, not a renamed stranger.
                 var facts = new List<string>();
                 lock (_facts) foreach (var f in _facts) facts.Add(f.Text);
-                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal, _pronounsOverride);
+                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal, _pronounsOverride, SkillsSnapshotLines());
                 try { Logger.LogInfo("KKLLMNPC: saved '" + _npcName + "' — " + facts.Count + " facts keyed to body '" + bodyKey + "'"); } catch (Exception) { }
             }
             catch (Exception) { }
@@ -345,6 +368,7 @@ namespace KKLLMNPC
                     while (_facts.Count > FactCap) _facts.RemoveAt(0);
                 }
                 if (!string.IsNullOrEmpty(rec.Goal)) lock (_goalLock) { _goal = rec.Goal; _goalTick = _tick; }
+                SkillsLoadFrom(rec.Skills); // learned procedures come back with the body
                 _identityFinalized = true; // name already chosen — skip the LLM re-pick
                 // Identity bot may be needed again for chat attribution.
                 RunOnMainThreadAsync(() => { try { EnsureIdentityBot(); } catch (Exception) { } });
@@ -352,6 +376,35 @@ namespace KKLLMNPC
                 return true;
             }
             catch (Exception) { return false; }
+        }
+
+        // Detect (never move) the wake context: when a body's spawn point lies right
+        // at a bed, the boot says "woke up in the bed 'Name'"; otherwise the boot's
+        // context line describes the surroundings (nearest named places + area prose).
+        // Field feeds the console boot line only.
+        private string _wokeInBedName;
+
+        private void WakeContextIfAny(Kobold target)
+        {
+            if (target == null) return;
+            try
+            {
+                foreach (var pl in BuildKeyPlaceList())
+                {
+                    if (pl.Kind != "bed" || !IsAlive(pl.Tf)) continue;
+                    if ((pl.Pos - target.transform.position).sqrMagnitude <= 2.5f * 2.5f)
+                    {
+                        _wokeInBedName = pl.Name;
+                        Logger.LogInfo("KKLLMNPC: wake context — body spawned at the bed '" + pl.Name + "' (no move)");
+                        return;
+                    }
+                }
+                Logger.LogInfo("KKLLMNPC: wake context — spawned away from any bed; the boot line describes the surroundings");
+            }
+            catch (Exception e)
+            {
+                try { Logger.LogWarning("wake context: " + e.Message); } catch (Exception) { }
+            }
         }
 
         // The brain-swap machine swapped our NPC with whoever was on the other pod.
@@ -963,6 +1016,29 @@ namespace KKLLMNPC
                     return;
                 }
 
+                // A SWALLOWED person is penetrator machinery: their body (dick
+                // included) passing down the eater's throat registers as a real
+                // penetration — the eater got a [sex] event, a rhythm, and narrated
+                // the meal as sex ("let us enjoy this rhythm"). The victim's parts
+                // never count as penetration.
+                try
+                {
+                    var srcTf = penetrator.transform;
+                    if (srcTf != null)
+                    {
+                        var ownerKb = srcTf.GetComponentInParent<Kobold>();
+                        // DIGESTING VICTIM: their body is penetrating machinery.
+                        if (ownerKb != null && SwallowManager.IsDigestingVictim(ownerKb)) return;
+                        // SELF-PENETRATION: a body's OWN parts never penetrate it.
+                        // The new-dick bug: a gained penis spawns at the crotch and
+                        // instantly registered in _pen against the owner's own
+                        // penetrables — the agent read it as "someone is inside me"
+                        // ("a phantom is fucking me"), begged not to stop.
+                        if (ownerKb != null && ownerKb == _kobold) return;
+                    }
+                }
+                catch (Exception) { }
+
                 string whoPen = penetrator.gameObject != null ? CleanName(penetrator.gameObject.name) : "something";
 
                 lock (_pen)
@@ -1001,6 +1077,67 @@ namespace KKLLMNPC
                         Logger.LogInfo(whoPen + " pulled out");
                         PushWorldEvent("[sex] " + whoPen + " withdrew — that round is over; your body is yours again (say how it was, if you like)");
                     }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // True when this penetrable target belongs to this body itself.
+        private bool InvolvesOwnBody(Transform target)
+        {
+            try
+            {
+                if (target == null) return false;
+                var kb = target.GetComponentInParent<Kobold>();
+                return kb != null && kb == _kobold;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // Remove a self-dick listener entry (and stay silent about it).
+        private void PurgeSelfDick(KKPenetratorListener listener)
+        {
+            try
+            {
+                lock (_dickIn)
+                {
+                    if (_dickIn.ContainsKey(listener)) _dickIn.Remove(listener);
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // Swallow-belt purge: drop every penetration state owned by / targeting
+        // this victim — the eater's _pen entries (their body "penetrating" ours on
+        // the way down) and our own _dickIn entries (our dick inside their mouth).
+        internal void PurgePenForVictim(Kobold victim)
+        {
+            if (victim == null) return;
+            try
+            {
+                lock (_pen)
+                {
+                    List<object> drop = new List<object>();
+                    foreach (var kv in _pen)
+                    {
+                        var srcTf = kv.Value != null ? kv.Value.src : null;
+                        if (srcTf == null) continue;
+                        var ownerKb = srcTf.GetComponentInParent<Kobold>();
+                        if (ownerKb == victim) drop.Add(kv.Key);
+                    }
+                    foreach (var k in drop) _pen.Remove(k);
+                }
+                lock (_dickIn)
+                {
+                    List<object> drop2 = new List<object>();
+                    foreach (var kv in _dickIn)
+                    {
+                        var tgt = kv.Value != null ? kv.Value.src : null;
+                        if (tgt == null) continue;
+                        var ownerKb = tgt.GetComponentInParent<Kobold>();
+                        if (ownerKb == victim) drop2.Add(kv.Key);
+                    }
+                    foreach (var k in drop2) _dickIn.Remove(k);
                 }
             }
             catch (Exception) { }
@@ -1069,15 +1206,20 @@ namespace KKLLMNPC
         {
             try
             {
+                // Wording matters: a swallowed guest in the stomach used to be read as
+                // penetration because the fallback said "someone is inside you". These
+                // lines are hole-sex ONLY and say so; the stomach guest names itself.
                 if (_pen.Count > 0)
                 {
                     string rhythm = RhythmFrom(_pen);
-                    return "being penetrated (" + (rhythm != null ? rhythm : "someone is inside you") + ") — mid-play: `feel` for details, thrust to ride the rhythm";
+                    return "being PENETRATED sexually — a dick is inside one of your holes" + (rhythm != null ? ": " + rhythm : "")
+                        + " — `feel` for details, thrust to ride the rhythm (a stomach guest is NOT this)";
                 }
                 if (_dickIn.Count > 0)
                 {
                     string rhythm = RhythmFrom(_dickIn);
-                    return "you are penetrating (" + (rhythm != null ? rhythm : "you're inside someone/something") + ") — thrust to raise the rhythm";
+                    return "you are PENETRATING someone sexually — YOUR dick is inside their hole" + (rhythm != null ? ": " + rhythm : "")
+                        + " — thrust to raise the rhythm";
                 }
                 if (_kobold.stimulation > 0.35f)
                     return "stimulation " + F(_kobold.stimulation) + " — you want play";

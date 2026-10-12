@@ -23,6 +23,7 @@ namespace KKLLMNPC
             public List<string> Facts;
             public string Goal;      // may be null/empty
             public string Pronouns;  // the NPC's declared pronouns (set_pronouns); null = body default
+            public List<string> Skills; // "name|step;step" lines
             public string SavedUtc;
         }
 
@@ -63,9 +64,11 @@ namespace KKLLMNPC
             Save(bodyKey, name, persona, facts, goal, null);
         }
 
-        // pronouns: the NPC's own declared pronouns (set_pronouns override) — restored
-        // with the rest of the life so a returned body still is who it declared.
-        internal static void Save(string bodyKey, string name, string persona, List<string> facts, string goal, string pronouns)
+        // skills: the agent's SAVED PROCEDURES ("name|step;step") — part of the
+        // body's record: restored on claim, transferred on swallow-absorb, riding
+        // the rebirth copy (a hatched child egg wakes with the parent's skills).
+        internal static void Save(string bodyKey, string name, string persona, List<string> facts, string goal, string pronouns,
+            List<string> skills = null)
         {
             try
             {
@@ -79,6 +82,12 @@ namespace KKLLMNPC
                 d["facts"] = fs.ToArray();
                 d["goal"] = goal ?? "";
                 if (!string.IsNullOrEmpty(pronouns)) d["pronouns"] = pronouns;
+                if (skills != null && skills.Count > 0)
+                {
+                    var ss = new List<object>();
+                    foreach (var sk in skills) if (!string.IsNullOrEmpty(sk)) ss.Add(sk);
+                    if (ss.Count > 0) d["skills"] = ss.ToArray();
+                }
                 d["saved_utc"] = System.DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
                 lock (_lock)
                 {
@@ -127,6 +136,11 @@ namespace KKLLMNPC
                 rec.Goal = raw.GetValueOrDefault("goal") as string;
                 rec.Pronouns = raw.GetValueOrDefault("pronouns") as string;
                 rec.SavedUtc = raw.GetValueOrDefault("saved_utc") as string;
+                if (raw.TryGetValue("skills", out var skObj) && skObj is List<object> skl)
+                {
+                    rec.Skills = new List<string>();
+                    foreach (var o in skl) { string s = o as string; if (!string.IsNullOrEmpty(s)) rec.Skills.Add(s); }
+                }
                 if (raw.TryGetValue("facts", out var factsObj) && factsObj is List<object> fl)
                 {
                     rec.Facts = new List<string>();

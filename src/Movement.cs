@@ -34,19 +34,192 @@ namespace KKLLMNPC
         // Obstacle fanning: scan progressively wider left/right offsets from the blocked
         // direction (biased along the wall's tangent) until a clear heading is found,
         // so the kobold slides along walls instead of grinding into them.
+        // True when the obstacle the forward ray hit is hop-and-over-able: top within
+        // ~1m of the feet, ground beyond it, body grounded, not a kobold/usable.
+        // Sets _autoHopPending — consumed below as the jump input for this frame.
+        private float _lastAutoHop;
+        private bool AutoHopLowObstacle(RaycastHit hit, Vector3 dir, bool jumpAlready)
+        {
+            if (jumpAlready) return false;
+            if (Time.unscaledTime - _lastAutoHop < 1.4f) return false;
+            try
+            {
+                if (hit.collider == null || IsOwnCollider(hit.collider)) return false;
+                if (hit.collider.GetComponentInParent<Kobold>() != null) return false;
+                if (hit.collider.GetComponentInParent<GenericUsable>() != null
+                    || hit.collider.GetComponentInParent<UsableMachine>() != null) return false; // use it, don't hop it
+                // Grounded check: we can't hop mid-air.
+                if (_controller.body != null && Mathf.Abs(_controller.body.velocity.y) > 0.3f) return false;
+                // Obstacle top: straight down from above the hit point.
+                Vector3 above = hit.point + dir * 0.15f + Vector3.up * 2.5f;
+                RaycastHit topHit;
+                float topY;
+                if (Physics.Raycast(above, Vector3.down, out topHit, 3f, ~0, QueryTriggerInteraction.Ignore))
+                    topY = above.y - topHit.distance;
+                else return false; // no solid top within reach — not a hop target
+                float feetY = _kobold != null ? _kobold.transform.position.y : topY;
+                if (topY - feetY <= 0.05f) return false;            // flush — it's floor
+                if (topY - feetY > 1.0f) return false;              // too tall to hop
+                // Ground beyond: landable surface past the obstacle, not a big drop.
+                RaycastHit groundHit;
+                Vector3 beyond = hit.point + dir * 1.2f + Vector3.up * 1.6f;
+                if (!Physics.Raycast(beyond, Vector3.down, out groundHit, 4f, ~0, QueryTriggerInteraction.Ignore)) return false;
+                float beyondY = groundHit.point.y;
+                if (beyondY < feetY - 3f) return false;             // cliff, not a landing
+                _lastAutoHop = Time.unscaledTime;
+                _autoHopPending = true;
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // Sampled every ~1.2s while steering at a nav target: accumulate the ABSOLUTE
+        // bearing rotation; decay it when the distance is actually shrinking. When
+        // ~110°+ of bearing rotation accumulated WITHOUT distance progress, the body
+        // is circling — drop into TryRepathPastStuck (hard replan) and reset.
+        private void NavCircleWatch(Vector3 toT, float dist)
+        {
+            try
+            {
+                Vector3 flatTarget = toT; flatTarget.y = 0f;
+                // Route changed (or first sight) — reset everything.
+                if (_watchTarget != flatTarget || _watchLastDist < 0f)
+                {
+                    _watchTarget = flatTarget;
+                    _watchLastDist = dist;
+                    _watchLastSample = Time.unscaledTime;
+                    _watchLastBearing = dist > 0.01f ? Mathf.Atan2(toT.x, toT.z) * Consts.Rad2Deg : 0f;
+                    _watchBearingSum = 0f;
+                    return;
+                }
+                if (Time.unscaledTime - _watchLastSample < 1.2f) return;
+                float bearing = dist > 0.01f ? Mathf.Atan2(toT.x, toT.z) * Consts.Rad2Deg : _watchLastBearing;
+                float dB = Mathf.Abs(Mathf.Repeat(bearing - _watchLastBearing, 360f));
+                if (dB > 180f) dB = 360f - dB;
+                _watchBearingSum += dB;
+                bool progress = dist < _watchLastDist - 0.35f;
+                if (progress)
+                    _watchBearingSum = Mathf.Max(0f, _watchBearingSum - 60f);
+                else if (_watchBearingSum > 110f)
+                {
+                    _watchBearingSum = 0f;
+                    _blockedInfo = "circling the target — re-planning the route";
+                    Logger.LogInfo("movement: anti-circle breaker fired (bearing rotated, distance stalled at " + F2(dist) + "m)");
+                    TryRepathPastStuck();
+                }
+                _watchLastDist = dist;
+                _watchLastBearing = bearing;
+                _watchLastSample = Time.unscaledTime;
+            }
+            catch (Exception) { }
+        }
+
+        private static string F2(float f) { return f.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture); }
+
+        // Third-strike unstick: re-plan the route around the fixed spot the body
+        // keeps grinding. Falls back to the local grid when the world map has no
+        // answer. Main thread (FixedUpdate) — planners here are physics-safe.
+        private void TryRepathPastStuck()
+        {
+            try
+            {
+                Vector3 goal;
+                lock (_stateLock)
+                {
+                    if (_pathGoalSet) goal = _pathGoal;
+                    else if (_navTarget.HasValue) goal = SetYFlat(_navTarget.Value);
+                    else return;
+                }
+                List<Vector3> np = null;
+                if (WorldMap.Ready)
+                {
+                    try { np = WorldMap.FindPathSmoothed(_kobold.transform.position, new Vector3(goal.x, _kobold.transform.position.y, goal.z)); }
+                    catch (Exception) { }
+                }
+                if (np == null || np.Count < 2)
+                {
+                    try { np = FindPath(_kobold.transform.position, new Vector3(goal.x, _kobold.transform.position.y, goal.z)); }
+                    catch (Exception) { }
+                }
+                if (np == null || np.Count < 2) return;
+                lock (_stateLock)
+                {
+                    _path = np;
+                    _pathIdx = 0;
+                    _navTarget = np[0];
+                    _trailJumps = null;
+                }
+                Logger.LogInfo("movement: stuck-breaker re-planned the route (" + (np.Count - 1) + " legs)");
+            }
+            catch (Exception e) { try { Logger.LogWarning("repath: " + e.Message); } catch (Exception) { } }
+        }
+
+        private static Vector3 SetYFlat(Vector3 v)
+        {
+            v.y = 0f;
+            return v;
+        }
+
+        // Which way the last fan-steer leaned — the stuck-breaker sidesteps toward it.
+        private float _lastFanSteerSide;
+        private float _activeSteerOff;
+        private float _steerLockedUntil;
+        // Anti-circling watch state (see NavCircleWatch).
+        private Vector3 _watchTarget;
+        private float _watchLastSample;
+        private float _watchLastDist = -1f;
+        private float _watchLastBearing;
+        private float _watchBearingSum;
+        private float _bumpStreak;
+        private float _unstickStrafeSide;
+        private float _unstickUntil;
+        private bool _autoHopPending;
+
         private float FindClearHeading(Vector3 eye, Vector3 hitNormal)
         {
             // Try increasingly wide offsets, preferring the side of the surface normal
-            // so we slide along walls instead of bouncing off them.
+            // so we slide along walls instead of bouncing off them. Each candidate
+            // must clear THREE lanes — center + both body-half-width side rays; a
+            // single center ray "fits" door frames the body then clips (the stuck-on-
+            // door-frames failure).
             float side = Vector3.Cross(hitNormal, Vector3.up).y >= 0f ? 1f : -1f;
-            float[] offsets = { 20f * side, -20f * side, 40f * side, -40f * side, 65f * side, -65f * side, 90f * side, -90f * side };
+            // HYSTERESIS (the bee-in-a-window fix): without it, offset +20 clears this
+            // frame and −20 the next, and the body wobbles at a wall forever. A steer
+            // that actually cleared stays preferred for a stability window.
+            if (_activeSteerOff != 0f && Time.unscaledTime - _steerLockedUntil < 0f)
+            {
+                // still locked in: retest the SAME offset first
+                Vector3 keepDir = Quaternion.Euler(0, _yawDeg + _activeSteerOff, 0) * Vector3.forward;
+                Vector3 keepRight = new Vector3(-keepDir.z, 0f, keepDir.x).normalized;
+                if (LaneClear(eye, keepDir, 0f) && LaneClear(eye, keepDir, WorldMap.BodyHalfWidthM)
+                    && LaneClear(eye, keepDir, -WorldMap.BodyHalfWidthM))
+                    return _activeSteerOff;
+            }
+            float[] offsets = _activeSteerOff != 0f && Time.unscaledTime - _steerLockedUntil < 1.2f
+                ? new float[] { _activeSteerOff, 20f * side, -20f * side, 40f * side, -40f * side, 65f * side, -65f * side, 90f * side, -90f * side }
+                : new float[] { 20f * side, -20f * side, 40f * side, -40f * side, 65f * side, -65f * side, 90f * side, -90f * side };
             foreach (var off in offsets)
             {
                 Vector3 dir = Quaternion.Euler(0, _yawDeg + off, 0) * Vector3.forward;
-                if (!Physics.Raycast(eye, dir, WalkProbeRange * 1.3f, ~0, QueryTriggerInteraction.Ignore))
+                Vector3 right = new Vector3(-dir.z, 0f, dir.x).normalized;
+                if (LaneClear(eye, dir, 0f) && LaneClear(eye, dir, WorldMap.BodyHalfWidthM)
+                    && LaneClear(eye, dir, -WorldMap.BodyHalfWidthM))
+                {
+                    _lastFanSteerSide = off > 0f ? 1f : -1f;
+                    // Lock this heading for a moment so the next blocked frame keeps
+                    // steering the same way instead of flip-flopping.
+                    _activeSteerOff = off;
+                    _steerLockedUntil = Time.unscaledTime + 1.2f;
                     return off;
+                }
             }
             return 0f; // boxed in
+        }
+
+        private bool LaneClear(Vector3 eye, Vector3 dir, float lateral)
+        {
+            Vector3 o = eye + (dir.y == 0 ? new Vector3(-dir.z, 0f, dir.x).normalized * lateral : Vector3.zero);
+            return !Physics.Raycast(o, dir, WalkProbeRange * 1.3f, ~0, QueryTriggerInteraction.Ignore);
         }
 
         // If the object a forward ray hit is a door/gate (a GenericUsable classified as
@@ -433,9 +606,43 @@ namespace KKLLMNPC
                 }
                 if (_navTarget.HasValue)
                 {
-                    // Smooth turning toward nav target instead of snapping.
-                    float yaw = Mathf.Atan2(toT.x, toT.z) * Consts.Rad2Deg;
-                    _yawDeg = MoveAngleTowards(_yawDeg, yaw, turnRate * dt);
+                    // ANTI-CIRCLING watch ("flies around the thing it's targeting"):
+                    // the target BEARING rotating while the DISTANCE stalls means the
+                    // body is orbiting an obstacle that steering will never open.
+                    // Break out: hard re-plan around it. Resets whenever the route
+                    // changes (a different goal position invalidates the watch).
+                    NavCircleWatch(toT, dist);
+
+                    // PURE PURSUIT: near a waypoint, aim at a point blended AHEAD of it
+                    // toward the next post — steering through a corner without the
+                    // stop-turn-go-stop zigzag that looked like a bee at a window.
+                    Vector3 aimPt = _navTarget.Value;
+                    try
+                    {
+                        Vector3 nextPost;
+                        lock (_stateLock)
+                        {
+                            if (_path != null && _pathIdx >= 0 && _pathIdx < _path.Count - 1)
+                                nextPost = _path[Mathf.Min(_path.Count - 1, _pathIdx + 1)];
+                            else if (_path != null && _path.Count > 0)
+                                nextPost = _path[_path.Count - 1];
+                            else nextPost = _navTarget.Value;
+                        }
+                        if (dist < 1.1f)
+                        {
+                            Vector3 lead = nextPost - aimPt;
+                            lead.y = 0f;
+                            if (lead.sqrMagnitude > 0.01f)
+                                aimPt = aimPt + lead.normalized * Mathf.Min(0.9f, lead.magnitude * 0.6f);
+                        }
+                    }
+                    catch (Exception) { }
+                    Vector3 toAim = aimPt - _kobold.transform.position; toAim.y = 0f;
+                    if (toAim.sqrMagnitude > 1e-4f)
+                    {
+                        float yaw = Mathf.Atan2(toAim.x, toAim.z) * Consts.Rad2Deg;
+                        _yawDeg = MoveAngleTowards(_yawDeg, yaw, turnRate * dt);
+                    }
                     // Arrival braking: slow down as we approach.
                     float speedScale = Mathf.Clamp01(dist / brakeDist);
                     lock (_stateLock) { _moveTargetZ = Mathf.Max(_moveTargetZ, speedScale); }
@@ -496,9 +703,28 @@ namespace KKLLMNPC
                 Vector3 hv = _controller.body.velocity; hv.y = 0;
                 if (hv.magnitude < 0.15f && Time.unscaledTime - _lastBumpTime > 0.6f)
                 {
+                    bool rapid = Time.unscaledTime - _lastBumpTime < 6f;
                     _lastBumpTime = Time.unscaledTime;
-                    _blockedInfo = "bumped a wall — turn";
                     _needImageAfterBump = true; // show the model what it hit
+                    // STUCK BREAKER: the first bump just reports ("turn"), but a SECOND
+                    // rapid bump means steering isn't finding the gap; a THIRD means
+                    // the path itself grinds a fixed spot. 2nd → sidestep shove toward
+                    // the last fan-steer lean; 3rd → drop the plan so the goal
+                    // re-plans fresh (A* then routes AROUND the thing we keep hitting).
+                    if (rapid) _bumpStreak++; else _bumpStreak = 1;
+                    if (_bumpStreak == 2)
+                    {
+                        _unstickStrafeSide = _lastFanSteerSide != 0f ? _lastFanSteerSide : 1f;
+                        _unstickUntil = Time.unscaledTime + 0.7f;
+                        _blockedInfo = "stuck — sidestepping " + (_unstickStrafeSide > 0 ? "right" : "left");
+                    }
+                    else if (_bumpStreak >= 3)
+                    {
+                        _bumpStreak = 0;
+                        TryRepathPastStuck();
+                        _blockedInfo = "stuck — repathing around the blocked spot";
+                    }
+                    else _blockedInfo = "bumped a wall — turn";
                 }
             }
             if (fwdOut > 0.01f)
@@ -519,6 +745,14 @@ namespace KKLLMNPC
                     {
                         _blockedInfo = "opening door ahead";
                     }
+                    else if (AutoHopLowObstacle(hit, dir, jump))
+                    {
+                        // FENCES / SILLS / LOW WALLS: an obstacle whose top is within
+                        // ~1m with clear ground beyond is HOPPED, not braked at. This
+                        // was the "stuck ON the fence" failure — chest-height rays
+                        // caught it, and the body stood there steering forever.
+                        _blockedInfo = "hopped the low obstacle";
+                    }
                     else
                     {
                         // WALL BRAKING: quadratic deceleration as we approach.
@@ -532,10 +766,13 @@ namespace KKLLMNPC
                         }
 
                         // Surface in front — try to find a clear heading by fan-steering.
+                        // While steering, keep a trickle of forward drive: full-stop
+                        // turn-go-turn-go cycles read as bumbling even when they converge.
                         float steer = FindClearHeading(eye, hit.normal);
                         if (steer != 0f)
                         {
                             _yawDeg = MoveAngleTowards(_yawDeg, Mathf.Repeat(_yawDeg + steer, 360f), turnRate * dt);
+                            if (hit.distance > 0.45f) fwdOut = Mathf.Max(fwdOut, 0.25f);
                             _blockedInfo = "blocked; steered " + (steer > 0 ? "right" : "left");
                         }
                         else
@@ -569,13 +806,38 @@ namespace KKLLMNPC
                 }
             }
 
+            // Unstick sidestep shove (stacked on whatever the LLM asked for).
+            if (Time.unscaledTime < _unstickUntil)
+                strafe = Mathf.Clamp(strafe + _unstickStrafeSide, -1f, 1f);
+
             // inputDir is consumed as a world-space direction by the controller's
             // Accelerate(); walls stop it via normal rigidbody collision.
             Vector3 worldDir = Quaternion.Euler(0, _yawDeg, 0) * new Vector3(Mathf.Clamp(strafe, -1f, 1f), 0f, fwdOut);
             float mag = worldDir.magnitude;
             if (mag > 1f) worldDir /= mag;
             _controller.inputDir = new Vector3(worldDir.x, 0f, worldDir.z);
-            _controller.inputJump = jump;
+            // The auto-hop is a same-frame jump decision (low obstacle ahead).
+            bool jumpNow = jump;
+            bool jumpWasAutoHop = _autoHopPending;
+            if (_autoHopPending) { jumpNow = true; _autoHopPending = false; }
+            // JUMP PUSH: the game's controller ignores input mid-air, so a plain
+            // inputJump hopped IN PLACE. At jump start apply a horizontal impulse
+            // along the facing — auto-hops push harder (they aim at a landing).
+            if (jumpNow)
+            {
+                try
+                {
+                    var rbNow = _controller.body;
+                    if (rbNow != null && rbNow.velocity.y < 1.5f)
+                    {
+                        float pushMag = jumpWasAutoHop ? 3.0f : Mathf.Max(0.9f, Mathf.Abs(fwdOut) * 2.4f);
+                        Vector3 push = Quaternion.Euler(0, _yawDeg, 0) * Vector3.forward * pushMag;
+                        rbNow.velocity = new Vector3(rbNow.velocity.x + push.x, rbNow.velocity.y, rbNow.velocity.z + push.z);
+                    }
+                }
+                catch (Exception) { }
+            }
+            _controller.inputJump = jumpNow;
             // Walk vs run: inputWalking=true scales effectiveSpeed down by the
             // game's walkSpeedMultiplier; default is walk, run only when asked.
             // inputWalking=false means "run" which ALSO enables the CharacterControllerAnimator's
