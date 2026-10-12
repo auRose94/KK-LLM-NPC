@@ -139,7 +139,7 @@ namespace KKLLMNPC
 
                 // Debug: count kobolds by control type so we can tell "none on map" from
                 // "exists but not AI-controlled" from "all claimed".
-                int total = 0, ai = 0, claimed = 0, playerControlled = 0;
+                int total = 0, ai = 0, claimed = 0, playerControlled = 0, reclaimableBodies = 0;
                 Kobold best = null; float bestD = float.MaxValue;
                 foreach (var k in SceneCache.Find<Kobold>(2f))
                 {
@@ -153,9 +153,29 @@ namespace KKLLMNPC
                     var desc = k.GetComponent<CharacterDescriptor>();
                     if (desc == null) continue;
                     var ct = desc.GetPlayerControlled();
+                    bool reclaimable = false;
                     if (ct == CharacterDescriptor.ControlType.AIPlayer) ai++;
-                    else playerControlled++;
-                    if (ct != CharacterDescriptor.ControlType.AIPlayer) continue;
+                    else
+                    {
+                        playerControlled++;
+                        // FROZEN-PEER RECLAIM (crash mitigation): a body whose last
+                        // mod-driver froze (their handshake beat is stale) is
+                        // reclaimable by a live peer. Human player avatars NEVER
+                        // match — a player's own body viewId is published separately
+                        // from any claimed list.
+                        try
+                        {
+                            var opv = k.photonView;
+                            reclaimable = ct == CharacterDescriptor.ControlType.NetworkedPlayer && opv != null
+                                && MultiplayerPresence.IsHungPeerClaim(opv.ViewID);
+                        }
+                        catch (Exception) { reclaimable = false; }
+                        if (!reclaimable) continue;
+                        reclaimableBodies++;
+                    }
+                    // DUTY SHARE: with mod peers present, this client claims up to its
+                    // own share of the AI kobolds (no doubling of LLM load in a room).
+                    try { if (!reclaimable && MultiplayerPresence.DutyShareReached()) continue; } catch (Exception) { }
                     float d = Vector3.Distance(k.transform.position, playerPos);
                     if (d < bestD) { bestD = d; best = k; }
                 }

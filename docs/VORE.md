@@ -113,6 +113,42 @@ nothing moves.
 | `SwallowAgentEatRange` | 2.5 | eat_player reach (m) |
 | `SwallowAgentEatPOV` | FirstPerson | FirstPerson / ThirdPerson |
 
+"## Multiplayer (both clients run the mod)
+
+The vore flows run over the game's own RPC channel, so they **work across
+clients**: the ownership transfer + pin/hide/restores are PUN RPCs — a remote
+victim's client sees all of it visually.
+
+- **Player eats another player** (`[LittleTreats] SwallowPlayerVictims`, default OFF):
+  the grief guard lifts for player-into-player — the eat gesture and force-feeding
+  both allow player victims and player receivers. A swallowed REMOTE player is
+  **never destroyed**: at digest end their body is released at the eater's feet and
+  their ownership returned — no body loss either way.
+- **Narration travels**: the mod carries swallow events on a photon event channel
+  (begin / digest milestones / end) so the remote victim's mod shows what's
+  happening on THEIR machine, both to their console and to the NPCs their client
+  owns.
+- **Aborts travel both ways**: a swallowed remote player types "swallow abort" in
+  THEIR chat — their mod sends the abort event; the EATER's mod runs the same
+  honest abort locally. Nobody is stuck in someone else's stomach.
+- Unmodded players are unaffected: with `SwallowPlayerVictims` off (default), all
+  player-body guards hold exactly as before.
+
+## Handshake: sharing duty + surviving crashes
+
+`[Multiplayer] Handshake` (default ON): every modded client publishes presence,
+claimed-body viewIds and a beat into their own photon player properties every ~4 s
+— the room's player properties ARE the handshake channel, nothing external:
+
+- **Shared duty**: each client claims up to its *share* of AI kobolds
+  (`ceil(MaxNPCs / moddedClients)`) instead of every client claiming everything —
+  no doubled LLM load in a room.
+- **Crash mitigation**: a peer whose beat is stale but is still in the room (a
+  frozen/hung client) has its claimed bodies marked reclaimable — the survivors'
+  claim scan adopts the orphaned bodies. Human player bodies are never
+  reclaimable (their viewIds live outside the claimed lists), so a human's body
+  can't be possessed by a peer's LLM under any circumstance.
+
 ## Tests
 
 `tests/test_swallow.cs` (57 asserts, pure `src/SwallowLogic.cs`): trigger rules,

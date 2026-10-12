@@ -268,6 +268,7 @@ namespace KKLLMNPC
             ModGrabManager.ResolveNpc = InstanceForBody;
             try { SwallowManager.Ensure(this); } catch (Exception e) { Logger.LogWarning("swallow init: " + e.Message); }
             try { SpectateManager.Ensure(this); } catch (Exception e) { Logger.LogWarning("spectate init: " + e.Message); }
+            try { MultiplayerPresence.Ensure(this); } catch (Exception e) { Logger.LogWarning("handshake init: " + e.Message); }
             // Discover module partials (tools/perception/physics hooks) — reflection
             // scan, so new module files register without touching shared files.
             try { ModuleRegistry.Scan(); } catch (Exception e) { Logger.LogWarning("module scan: " + e.Message); }
@@ -310,6 +311,10 @@ namespace KKLLMNPC
                 "[SwallowEffect=Grow] percent of the consumed person's baseSize/maxEnergy/genes you gain per swallow (0–100). Grab is a flat +1 regardless; a GAINED groin always transfers whole.");
             _cfgSwallowAgentEat = Config.Bind("LittleTreats", "SwallowAgentEat", false,
                 "THE AGENT CAN EAT YOU: your AI NPC gains an eat_player act (`eat_player` in console mode) that swallows the LOCAL PLAYER whole when you're close (see SwallowAgentEatRange). Your camera is immediately taken over and forced to spectate the eater — by default THROUGH THEIR OWN EYES (the same eye placement the AI's vision uses; SwallowAgentEatPOV picks behind-them instead) — your body parks inside them (pinned, hidden, no input) and you cannot act; you can still type in game chat. Until you're hatched or quit: [SwallowEffect=Egg] the eater lays an egg — once it's planted in soil and hatches, you stand up out of it with the egg's mixed genes (your persona/saves never touched); [SwallowEffect=BellyEgg] same but the egg waits for their nest lay; [SwallowEffect=Grow/Destroy] there IS no hatch — you watch until you type 'swallow abort' in chat (released alive and whole, like the normal digest abort) or quit to menu. The escape hatch always works regardless of this feature. Off by default (LittleTreats).");
+            _cfgSwallowPlayerVictims = Config.Bind("LittleTreats", "SwallowPlayerVictims", false,
+                "MULTIPLAYER VORE (player vs player): allow the player's swallow gesture AND force-feeding to target OTHER PLAYERS' bodies when both clients run the mod. The remote victim's mod receives the narration over a mod photon event (begin / digest lines / end) and can abort the eater's digest from their own machine (\"swallow abort\" in THEIR chat). A swallowed REMOTE player is never destroyed: their body is released at the eater's feet at digest end (ownership returned). Off by default — with it off, player bodies are grief-guarded exactly as before.");
+            _cfgHandshake = Config.Bind("Multiplayer", "Handshake", true,
+                "MOD-TO-MOD handshake over the room's per-player properties: every modded client publishes presence + claimed-body list + a beat every 4s. Together with [General] MaxNPCs this SHARES the kobold-LLM duty across modded clients (each claims up to its share of the AI kobolds instead of every client claiming everything), and a FROZEN peer (beat stale, still in room) has its claimed bodies marked reclaimable by the survivors' claim scan — crash mitigation: a hung client leaves reclaimable bodies instead of empty-handed puppets. Unmodded players are invisible to all of this.");
             _cfgSwallowEatRange = Config.Bind("LittleTreats", "SwallowAgentEatRange", 2.5f,
                 "[SwallowAgentEat] how close the eater must be to swallow you (meters, center-to-center, clamped 1–8; 2.5 ≈ a kobold's arm's reach). The pull-in covers the rest — no grab needed.");
             _cfgWebEnabled = Config.Bind("Web", "Enabled", true,
@@ -589,6 +594,9 @@ namespace KKLLMNPC
             // Main-thread heartbeat + phase marker for the hang watchdog (game-time
             // + wall clock together — Beat()).
             Beat();
+            // MOD-TO-MOD handshake: presence heartbeat + peer scan (throttled
+            // internally; no-ops offline).
+            try { MultiplayerPresence.Tick(this); } catch (Exception) { }
             // DLL-change poll: FileSystemWatcher does NOT fire on SMB shares (the
             // game install here is a network drive — hot-reload silently never
             // worked) — poll the plugin file's write time ourselves, cheaply.
@@ -863,6 +871,14 @@ namespace KKLLMNPC
         {
             try
             {
+                // The mod's OWN event channel (multiplayer vore narration + cross-
+                // machine aborts; MultiplayerPresence may add more codes later).
+                if ((byte)ev.Code == SwallowManager.ModSwallowEvent)
+                {
+                    var line = ev.CustomData as string;
+                    SwallowManager.HandleRemoteSwallowEvent(ev.Sender, line);
+                    return;
+                }
                 if (ev.Code != NetworkManager.CustomChatEvent) return;
                 var msg = ev.CustomData as string;
                 if (string.IsNullOrEmpty(msg)) return;

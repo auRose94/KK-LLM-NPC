@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Multiplayer vore + a mod-to-mod handshake.** Both over the game's own PUN channel;
+  no new networking. (1) **Player↔player swallow** (`[LittleTreats] SwallowPlayerVictims`,
+  default OFF — with it off, every player-body guard holds): the swallow gesture and
+  force-feeding may target other players' bodies; the remote victim's mod receives the
+  begin/digest-milestone/end narration on a photon event channel and can **abort the
+  eater's digest from their own machine** ("swallow abort" in their chat reaches the
+  eater's session); and a swallowed REMOTE player is never destroyed — their body is
+  released at the eater's feet with ownership returned at digest end (the destroy paths
+  were player-session-hostile; release is honest and safe). Physics already synced via
+  the existing RPC flows — the event channel adds the missing narration/abort layer.
+  (2) **MultiplayerPresence handshake**: every modded client publishes presence +
+  claimed-body viewIds + a beat into their per-player room properties (~4 s); together
+  with MaxNPCs this SHARES the kobold-LLM duty across modded clients (each claims up to
+  ceil(MaxNPCs / moddedClients) AI kobolds instead of every client claiming everything),
+  and a FROZEN peer (stale beat, still in the room) has its claimed bodies marked
+  reclaimable by the survivors' claim scan — crash mitigation; human player bodies are
+  never reclaimable (their viewIds publish outside the claimed lists). Unmodded players
+  are invisible to the handshake. Docs: [docs/VORE.md] multiplayer + handshake sections,
+  README bullet.
 - **The vore mechanics moved to their own doc.** The two large swallow/spectate
   paragraphs that dominated the README (for a deliberately opt-in, off-by-default
   feature) now live in **[docs/VORE.md](docs/VORE.md)** — full trigger/rules/`SwallowEffect`

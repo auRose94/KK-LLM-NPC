@@ -96,12 +96,13 @@ namespace KKLLMNPC
         private static bool _spawnHooked;
         private static bool _ovipositionHooked;
 
-        private sealed class SwallowState
+        internal sealed class SwallowState
         {
             public Kobold Victim;
             public Kobold Eater;
             public Kobold Actor;           // who initiated: eater (self-eat) or the force-feeding dropper
             public int VictimId;
+            public int VictimOwnerActorNr; // their original client (returned on release)
             public NPCInstance Npc;        // null for unclaimed (vanilla AI) victims
             public NPCInstance EaterNpc;   // the eater's own mind (null: player eater / unclaimed body)
             public string Name;            // narration/display name
@@ -233,9 +234,17 @@ namespace KKLLMNPC
 
                 var held = NPCInstance.HeldScanFor(dropper);
                 var persons = new List<Kobold>();
+                // MULTIPLAYER VORE (SwallowPlayerVictims): a PLAYER dropper may
+                // target OTHER PLAYERS' bodies. NPC droppers never can.
+                bool playerVictimsOK = PlayerVictimsAllowed() && NPCInstance.IsPlayerKobold(dropper);
                 foreach (var h in held)
                 {
-                    if (h == null || h.Victim == null || h.IsPlayerVictim) continue;
+                    if (h == null || h.Victim == null) continue;
+                    if (h.IsPlayerVictim)
+                    {
+                        if (playerVictimsOK) persons.Add(h.Victim);
+                        continue;
+                    }
                     if (h.Victim == dropper) continue;
                     persons.Add(h.Victim);
                 }
@@ -273,10 +282,54 @@ namespace KKLLMNPC
             }
         }
 
+        private static bool PlayerVictimsAllowed()
+        {
+            var cfg = Plugin != null ? Plugin._cfgSwallowPlayerVictims : null;
+            return cfg != null && cfg.Value;
+        }
+
         private static bool ForceFeeding()
         {
             var cfg = Plugin != null ? Plugin._cfgSwallowForceFeeding : null;
             return cfg != null && cfg.Value;
+        }
+
+        // COMPLETION for swallowed REMOTE PLAYERS: the body is NEVER destroyed (it
+        // belongs to their client's session — destroying another player's avatar
+        // can break their whole game). Release them at the eater's feet, return
+        // their ownership, and announce the outcome to their mod.
+        internal static bool ReleaseRemotePlayerVictim(SwallowState st, string outcome)
+        {
+            try
+            {
+                var v = st.Victim;
+                var at = st.Eater != null
+                    ? st.Eater.transform.position + st.Eater.transform.forward * 1.2f
+                    : v.transform.position;
+                RestoreVictimBody(v, at);
+                try
+                {
+                    var pv = v.photonView;
+                    if (pv != null && st.VictimOwnerActorNr > 0 && pv.OwnerActorNr != st.VictimOwnerActorNr)
+                    {
+                        var room = Photon.Pun.PhotonNetwork.CurrentRoom;
+                        var ownerPl = room != null ? room.GetPlayer(st.VictimOwnerActorNr) : null;
+                        if (ownerPl != null) pv.TransferOwnership(ownerPl);
+                    }
+                }
+                catch (Exception) { }
+                try { BroadcastEnd(st, outcome); } catch (Exception) { }
+                try { LLMNPCPlugin.Log.LogInfo("swallow: REMOTE player '" + st.Name + "' released (" + outcome + ") — body returned to their client"); } catch (Exception) { }
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // Completion gate: remote player victims never see the destroy paths.
+        private static bool MaybeFinishRemoteVictim(SwallowState st, string outcome)
+        {
+            if (!IsRemotePlayerVictim(st)) return false;
+            return ReleaseRemotePlayerVictim(st, outcome);
         }
 
         private static float CameraForwardY()
@@ -304,7 +357,9 @@ namespace KKLLMNPC
                 foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
                 {
                     if (k == null || !SafeAlive(k) || k == dropper || k == victim) continue;
-                    if (NPCInstance.IsPlayerKobold(k)) continue;  // grief guard: receivers can't be players
+                    // grief guard: receivers can't be players — unless the player-
+                    // vs-player vore permission is on AND the dropper is a player.
+                    try { if (NPCInstance.IsPlayerKobold(k) && !(PlayerVictimsAllowed() && NPCInstance.IsPlayerKobold(dropper))) continue; } catch (Exception) { }
                     try { if (k.grabbed) continue; } catch (Exception) { } // being held themselves
                     if (EaterBusy(k)) continue;                   // already digesting someone
                     Vector3 headPos = HeadOf(k);
@@ -590,6 +645,7 @@ namespace KKLLMNPC
                 Eater = eater,
                 Actor = actor,
                 VictimId = vid,
+                VictimOwnerActorNr = victim.photonView != null ? victim.photonView.OwnerActorNr : 0,
                 Npc = npc,
                 Name = name ?? "the kobold",
                 OldBodyKey = oldKey,
@@ -600,6 +656,9 @@ namespace KKLLMNPC
                 Milestone = -1,
             };
             lock (_lock) _active.Add(st);
+            // MOD EVENT CHANNEL (multiplayer): a remote victim's mod learns of the
+            // swallow (begin + digest lines + end) and can abort from THEIR machine.
+            try { BroadcastBegin(st); } catch (Exception) { }
             try { st.EaterNpc = Plugin.InstanceForBody(eater); } catch (Exception) { st.EaterNpc = null; }
             // Mid-play swallow belt: if the victim was penetrating the eater when
             // swallowed, the eater's _pen entry never sees a "pull out" — purge
@@ -894,9 +953,12 @@ namespace KKLLMNPC
                         string feeling = mark == SwallowLogic.MarkChurn
                             ? "your stomach churns around " + st.Name + " — they are in there, alive"
                             : "your stomach kneads " + st.Name + " steadily — the conversion is underway";
-                        try { st.EaterNpc.PushWorldEvent(feeling + " (about " + Mathf.CeilToInt(leftS).ToString("0", CultureInfo.InvariantCulture) + "s left; their fate follows this stomach's rules)"); }
+                        try { st.EaterNpc.PushWorldEvent(feeling + " (about " + Mathf.CeilToInt(leftS) + "s left; their fate follows this stomach's rules)"); }
                         catch (Exception) { }
                     }
+                    // MOD EVENT CHANNEL: remote victims (players with the mod elsewhere)
+                    // get the same digest-lines on THEIR machine.
+                    try { MaybeForwardLine(st, "the digestion continues (" + mark + "/3): " + (st.Eater != null ? BodyLabel(st.Eater) : "the eater") + "'s stomach works around you"); } catch (Exception) { }
                 }
             }
 
@@ -1354,6 +1416,7 @@ namespace KKLLMNPC
                 // owns it until the nest lay's egg is planted and hatched).
                 if (SpectateManager.IsSpectating(st.Victim)) return true;
             }
+            if (MaybeFinishRemoteVictim(st, "released after the egg conversion")) return true;
             return DestroyVictim(st);
         }
 
@@ -1517,6 +1580,7 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
             }
+            if (MaybeFinishRemoteVictim(st, "released")) return true;
             if (!DestroyVictim(st)) return false;
             AbsorbVictimLife(st);
             return true;
@@ -1555,6 +1619,7 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
             }
+            if (MaybeFinishRemoteVictim(st, "released")) return true;
             if (!DestroyVictim(st)) return false;
             ForgetVictim(st);
             return true;
@@ -1812,6 +1877,161 @@ namespace KKLLMNPC
         // Drop-tool feedback: names of swallow sessions begun (as dropper) by this
         // body in the last ~2s — called on the main thread right after TryDrop so
         // the tool's result can tell the truth ("force-fed") instead of "dropped".
+        // ------------------------------------------------------------------
+        // The mod event channel: photon event code (byte)'B' (the game's own
+        // chat event is 'A'). Carries the swallow narration + cross-machine
+        // aborts between modded clients in multiplayer: the remote VICTIM's mod
+        // sees begin/milestones/end + can abort the EATER's digest from their
+        // own machine.
+        // ------------------------------------------------------------------
+        internal const byte ModSwallowEvent = (byte)'B';
+        internal const byte ModPresenceEvent = (byte)'C'; // reserved: future presence chatter
+
+        // Broadcast one swallow line to the OTHER clients. One line of text, plain.
+        internal static void BroadcastLine(string line)
+        {
+            try
+            {
+                if (!Photon.Pun.PhotonNetwork.InRoom || string.IsNullOrEmpty(line)) return;
+                var opts = new Photon.Realtime.RaiseEventOptions
+                {
+                    CachingOption = Photon.Realtime.EventCaching.DoNotCache,
+                    Receivers = Photon.Realtime.ReceiverGroup.Others,
+                };
+                Photon.Pun.PhotonNetwork.RaiseEvent(ModSwallowEvent, line, opts, ExitGames.Client.Photon.SendOptions.SendReliable);
+            }
+            catch (Exception) { }
+        }
+
+        // A swallow line worth broadcasting — sent only when the OTHER side has the
+        // reason to care (a remote victim's mod).
+        private static string EventName(SwallowState st)
+        {
+            try
+            {
+                int vid = st.Npc != null || st.VictimIsPlayer ? st.VictimId : -1;
+                var pv = st.Victim.photonView;
+                return pv != null ? "v" + pv.ViewID : "i" + vid;
+            }
+            catch (Exception) { return "?" ; }
+        }
+
+        private static void BroadcastBegin(SwallowState st)
+        {
+            try
+            {
+                var pv = st.Victim.photonView;
+                if (pv == null) return;
+                BroadcastLine("swallow|begin|" + pv.ViewID + "|" + (st.Name ?? "?") + "|"
+                    + Effect().ToString() + "|" + Math.Round(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            catch (Exception) { }
+        }
+
+        private static void BroadcastEnd(SwallowState st, string outcome)
+        {
+            try
+            {
+                var pv = st.Victim.photonView;
+                if (pv == null) return;
+                BroadcastLine("swallow|end|" + pv.ViewID + "|" + (outcome ?? "released"));
+            }
+            catch (Exception) { }
+        }
+
+        // A digest milestone line forwarded to a REMOTE victim's mod (their client
+        // shows it; nothing happens locally — the eater already said it as a world
+        // event). Cheap string send.
+        private static void MaybeForwardLine(SwallowState st, string line)
+        {
+            try
+            {
+                if (st == null || st.Victim == null || st.VictimIsPlayer) return;
+                if (IsRemotePlayerVictim(st)) BroadcastLine("swallow|line|" + st.Name + "|" + line);
+            }
+            catch (Exception) { }
+        }
+
+        // A remote VICTIM = a player body owned by another client. Their machine
+        // learns through the event channel; physics already syncs (ownership moves).
+        internal static bool IsRemotePlayerVictim(SwallowState st)
+        {
+            try
+            {
+                if (st == null || st.Victim == null) return false;
+                var pv = st.Victim.photonView;
+                return pv != null && pv.OwnerActorNr != Photon.Pun.PhotonNetwork.LocalPlayer.ActorNumber
+                    && NPCInstance.IsPlayerKobold(st.Victim);
+            }
+            catch (Exception) { return false; }
+        }
+
+        // Inbound: the remote victim's machine asked to abort (their "swallow abort"
+        // types on a digest WE run). Runs on the main thread (Photon callback).
+        internal static void HandleRemoteSwallowEvent(int senderActorNr, string content)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(content)) return;
+                var parts = content.Split('|');
+                if (parts[0] != "swallow") return;
+                string kind = parts[1];
+                if (kind == "abort-me")
+                {
+                    // Their player is a victim of OUR local digest — run the honest
+                    // abort (same path the eater's own chat uses).
+                    try { LLMNPCPlugin.Log.LogWarning("swallow: received a REMOTE abort from actor " + senderActorNr); } catch (Exception) { }
+                    TryAbortFromChat("swallow abort");
+                }
+                else if (kind == "begin")
+                {
+                    // A REMOTE eater swallowed... whose body? If it's MY local
+                    // player: tell the mind + the NPCs.
+                    if (parts.Length < 5) return;
+                    int victimView = ParseInt(parts[2]);
+                    if (!LocalPlayerViewId(victimView)) return;
+                    string victimName = parts[3], effectName = parts[4];
+                    string secs = parts.Length > 5 ? parts[5] : "?";
+                    string msg = "you are inside " + victimName + "'s stomach — swallowed WHOLE (a meal, not sex); they will digest for ~" + secs + "s (effect: " + effectName + "). Your body is theirs to carry for now; your chat still works and \"swallow abort\" (typed in game chat) releases you.";
+                    try { LLMNPCPlugin.Log.LogWarning("[modswallow] " + msg); } catch (Exception) { }
+                    try { Plugin.FanoutWorldEvent(msg); } catch (Exception) { }
+                }
+                else if (kind == "line")
+                {
+                    if (parts.Length < 3) return;
+                    try { Plugin.FanoutWorldEvent("[modswallow] " + parts[2]); } catch (Exception) { }
+                }
+                else if (kind == "end")
+                {
+                    if (parts.Length < 3) return;
+                    int victimView = ParseInt(parts[2]);
+                    if (!LocalPlayerViewId(victimView)) return;
+                    try { Plugin.FanoutWorldEvent("the swallow ENDED: you were released (outcome: " + parts[3] + "). Your body is yours again."); } catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        private static int ParseInt(string s)
+        {
+            int v; return int.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : -1;
+        }
+
+        private static bool LocalPlayerViewId(int viewId)
+        {
+            try
+            {
+                if (viewId < 0 || !Photon.Pun.PhotonNetwork.InRoom) return false;
+                if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null)
+                {
+                    var pv = pp.kobold.photonView;
+                    return pv != null && pv.ViewID == viewId;
+                }
+            }
+            catch (Exception) { }
+            return false;
+        }
+
         internal static string[] SwallowsBegunBy(Kobold body)
         {
             if (body == null) return new string[0];
@@ -1870,6 +2090,8 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgSwallowGrowPercent;
         // Spectate (agent eats the PLAYER) —see src/Spectate.cs.
         internal ConfigEntry<bool> _cfgSwallowAgentEat;
+        internal ConfigEntry<bool> _cfgSwallowPlayerVictims;
+        internal ConfigEntry<bool> _cfgHandshake;
         internal ConfigEntry<float> _cfgSwallowEatRange;
         internal ConfigEntry<SpectatePov> _cfgSwallowPov;
     }
