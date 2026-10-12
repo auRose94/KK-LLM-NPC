@@ -15,8 +15,8 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 
 - **Possession pool** — every AI kobold the world produces gets an agent (a body that appears later, e.g. from a delivery or breeding, is claimed as it shows up). With `SpawnMissingKobolds` on, it can also spawn extra AI kobolds near the player until `MaxNPCs` is met.
 - **Pickup awareness** — knows when its body is grabbed, tracks a position trail while carried, and reports where it was moved (thrown is flagged as startling); it also auto-recovers if ragdolled next to the mail/sell machine and will never interact with that machine, since climbing in starts the sell timer.
-- **Swallow-vore (you, the player — opt-in)** — grab a kobold, aim steeply up (`SwallowLookUpDot`, default ≈70°+, near max-up so a casual drop can never trigger it), drop: you swallow them whole instead of dropping. They ride into your mouth (~2s) and are **hidden once fully swallowed** (no sticking-out clipping); they still speak via chat, steering gated, and the digestion is narrated to them as events. What happens at the end is `SwallowEffect`: **Egg** (default) pops an egg at your feet mixing their genes with yours — plant it in soil and the hatched body wakes as the SAME person, changed genes, in control again; **BellyEgg** puts the genetics inside YOUR belly instead — sit on a nest and lay them yourself, then plant that egg; **Grow** absorbs them into you (bigger and/or stronger, no egg — and their saved memories pour into you: your identity stays yours, places and things they knew become yours; a vanilla eater wakes up remembering the person it ate); **Destroy** leaves them simply gone (memories erased). Held player bodies can never be swallowed by these gestures (grief guard — the only player-victim path is [SwallowAgentEat](#spectate-the-agent-can-eat-you-opt-in-swallowagenteat) below). **No-cheat escape hatch: type "swallow abort"** (or "spit out", "cough up", "regurgitate", "swallow stop") **in the game chat** and everyone mid-digest is heaved back up alive and whole — scale, colliders, renderers, ragdoll and their LLM session all restored, set down in front of you; the swallowed NPC gets the release as an event and remembers it. **Force-feeding: any kobold — NPC or player — dropping a held person right onto another kobold's head makes the receiver swallow them**: the receiver walks around with the digest running inside (outcome per `SwallowEffect`), the dropped one gets the mode-honest narration naming who fed them, the dropper's `drop` result says `force_fed` instead of "dropped", players can be neither victim nor receiver (grief guard), and an eater already digesting someone refuses another. The whole feature is off by default: it lives in **[LittleTreats]**, opt-in only. **The eater is kept aware throughout, even when the eater is a kobold NPC** — a real mind gets a first-person "you just swallowed X WHOLE…" event at the start, digest-progress lines ("your stomach churns around X…"), a live `you have someone INSIDE YOU: …` state on every turn/console round, a first-person completion per `SwallowEffect` (egg to plant / nest lay / absorbed memories / nothing left), and the mid-swallow abort reported from their side — while other NPCs get the third-person spectator line. Also new: **station departures are events** — a per-second occupancy watcher narrates "[station] the player left the bed station — you are on it alone now" when you (or another kobold) walk away from a station within their perception range, so a partner left behind notices without having to re-diff the slots text.
-- **Spectate: the agent can eat YOU (opt-in, `SwallowAgentEat`)** — the reverse of the swallow above. Your AI NPC gains `eat_player`: when they're within reach (~2.5m, `SwallowAgentEatRange`), they swallow the local player whole — no grab needed — and the player's camera is **forcibly taken over** for the rest of the cycle: you spectate **through the eater's own eyes** (`SwallowAgentEatPOV`, default FirstPerson — the same eye placement the AI's vision uses, so you see literally what the AI sees as it plays; ThirdPerson is a wall-safe follow orbit behind them). Your input is suppressed (game chat, menus and the abort command still work), your body parks inside theirs (pinned, hidden — the mod never destroys the player body), and an always-on HUD line explains where you are and how you get out. You come back when you're **hatched or quit**: Egg mode — the eater lays your egg and planting it in soil puts you back on your feet at the hatch spot with the egg's mixed genes (your persona/saves untouched; the duplicate plant-spawned body is despawned); BellyEgg — same, but the egg waits for the eater's nest lay (they're narrated to go lay you); Grow/Destroy — there is no hatch: you watch until you type **"swallow abort"** in game chat (released alive and whole, exactly like a mid-digest abort) or quit to menu. If the eater's body is destroyed mid-watch you're put back down at their last spot; scene changes and DLL restarts release cleanly; the swallowed-NPC swallow gestures still can't touch player bodies — only this act can.
+- **Swallow-vore & spectate (opt-in, in [LittleTreats], all OFF by default)** — two opt-in flows, each a complete loop: the player can swallow a kobold whole (digestion narrated to a real mind, ending per `SwallowEffect`: egg / belly-egg / absorb / destroy, with a no-cheat chat abort and force-feeding variant), and an agent can `eat_player` — taking over your camera to spectate its whole game session from inside until you hatch or abort. Grief guards keep player bodies safe everywhere except the explicit spectate act; a swallowed person is always kept alive as a mind and restored on their terms. **Full mechanics, config and tests: [docs/VORE.md](docs/VORE.md).**
+- **Station departures are events** — a per-second occupancy watcher narrates "[station] the player left the bed station — you are on it alone now" when a partner walks away from a shared station within perception range, so the one left behind notices without re-diffing slot text.
 
 - **Frustum raycasts** around the head (down/level/up rows) — what's where, with distances.
 - **8-direction clearance** — which way is open, what's a wall/sill/window.
@@ -108,23 +108,10 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
 - **Body control tools** — `thrust` (slow deep hip strokes — the rate follows intensity, ~2.3 strokes/s at the default; the OLD version was a 10 Hz sine the animator's smoothing ate down to a shiver), `erection`, `mount`/`unmount`, `orgasm`
   with consent-aware prompt guidance.
 - **Reagent/egg awareness** — detects drinks, sprays, pumps, and egg readiness; seeks a nest to lay.
-- **Swallow-vore (opt-in)** — release-while-looking-up swallows the held person into the
-  player (their LLM keeps narrating from inside the stomach), digestion timeline, then a
-  configurable ending: egg at your feet / egg in your belly (lay it on a nest yourself) /
-  absorb their size and strength / just destroy. Egg endings reconstitute the same person
-  in a fresh body with changed genes and their persona back in control (plant in soil);
-  a swallowed NPC's events ("the walls churn around you", "you are becoming an EGG") are
-  world events like any other — no special prompt needed — and the narration is honest
-  per mode (Grow/Destroy don't promise a rebirth). The reborn body's claim path is
-  the ordinary one, so persona restoration rides on the existing MemoryStore keys.
-  The reverse exists too (**`SwallowAgentEat`**, opt-in): an agent can `eat_player` —
-  the local player's camera is taken over and they spectate the AI's game session from
-  inside the eater until the planted egg hatches (or they abort/quit).
-- **Swallowed minds can talk but not act** — while their body is inside a stomach (any
-  swallow flow), body-attached commands (`grab`/`get`, `drop`, `throw`, `use`, `cd`,
-  `run`, `jump`, …) are refused with an honest explanation; speech, memory, goals/plan
-  and read-only polling still work. And when a body is absorbed, its saved memory file
-  is erased after its knowledge pours into the eater — no ghost records left behind.
+- **Swallow-vore & spectate (opt-in)** — both directions exist (the player eats an NPC;
+  an agent eats the player) as complete, honest loops — narration, memory/skill transfer,
+  rebirth, the no-cheat abort. Brief summary above; **the full mechanics live in
+  [docs/VORE.md](docs/VORE.md)**.
 - **Farming & cooking** — `plant` → `water` → `harvest` cycle, `plant_egg`, `feed_blender`, `grind`.
   Perception reports nearby plants and cooking equipment.
 - **Identity** — per-NPC orientation, trans status, expressed persona. `rename` tool with
@@ -465,6 +452,7 @@ MIT — see [LICENSE.txt](LICENSE.txt).
 ## Documentation
 
 - [CONFIG.md](docs/CONFIG.md) — Complete configuration reference
+- [VORE.md](docs/VORE.md) — The full swallow-vore / spectate mechanics (opt-in, all OFF by default)
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Architecture overview
 - [MODELS.md](docs/MODELS.md) — Ranked model compatibility list + benchmark plan
 - [CHANGELOG.md](CHANGELOG.md) — Release history

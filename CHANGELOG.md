@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The vore mechanics moved to their own doc.** The two large swallow/spectate
+  paragraphs that dominated the README (for a deliberately opt-in, off-by-default
+  feature) now live in **[docs/VORE.md](docs/VORE.md)** — full trigger/rules/`SwallowEffect`
+  table, the no-cheat abort, force-feeding, grief guards, eater awareness, spectate POV
+  and return paths, the swallowed-mind tool gating (speech/memory only), the config
+  table, and the test note. The README keeps one compact paragraph + link in both
+  places it used to sprawl ("What it does" and Behavior highlights), adds VORE.md to
+  the Documentation index, and the unrelated station-departures note rides in its own
+  bullet again.
 - **Model list: HauhauCS Gemma4-12B-QAT Uncensored (Balanced) enters the compatibility
   list as a user-recommended 🟢 pick** (`HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced`);
   auto-classifies as the gemma family (no code change). Card-backed: uncensored (0/465
