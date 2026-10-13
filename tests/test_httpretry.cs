@@ -102,6 +102,18 @@ internal static class TestHttpRetry
         Assert(trimmed.Length == 4, "stage2: oldest half dropped (sys+3), got " + trimmed.Length);
         Assert(string.Equals(((Dictionary<string, object>)trimmed[1])["content"], "four"), "stage2: kept the newest half in order");
 
+        // "Model is unloaded."-class 400s are WAIT-AND-RETRY, never a payload shrink:
+        // a llama-server that switched models mid-session reloads on the next request.
+        Assert(HttpRetryLadder.Classify("HTTP 400 Bad Request — {\"error\":\"Model unloaded by user or API request.\"}") == "model_unloaded",
+            "unloaded-by-user classifies as model_unloaded");
+        Assert(HttpRetryLadder.Classify("HTTP 400 Bad Request — {\"error\":\"Model is unloaded.\"}") == "model_unloaded",
+            "model is unloaded classifies as model_unloaded");
+        Assert(HttpRetryLadder.Classify("HTTP 400 Bad Request — {\"error\":\"No models loaded.\"}") == "model_unloaded",
+            "no models loaded classifies as model_unloaded");
+        // An ordinary context complaint must NOT be swallowed by the new rung.
+        Assert(HttpRetryLadder.Classify("HTTP 400 Bad Request — context length exceeded") == "context",
+            "context errors still classify as context");
+
         Console.WriteLine(_failed == 0 ? "httpretry: all passed" : "httpretry: " + _failed + " FAILURES");
         Environment.Exit(_failed > 0 ? 1 : 0);
     }

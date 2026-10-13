@@ -30,6 +30,14 @@ namespace KKLLMNPC
             bool payloadStatus = err.Contains("HTTP 400") || err.Contains("HTTP 413") || err.Contains("HTTP 422");
             if (!payloadStatus) return null;
             string e = err.ToLowerInvariant();
+            // "Model unloaded by user or API request." / "Model is unloaded." / "No
+            // models loaded" (llama.cpp-style servers): the payload was ACCEPTED and
+            // would have worked a moment later — the server just has nothing warm to
+            // answer with (model switched away mid-session). Shrinking the payload is
+            // exactly wrong; waiting and retrying unchanged is the fix (the server
+            // reloads the model on the next request).
+            if (e.Contains("unloaded") || e.Contains("no models loaded") || e.Contains("try /lora"))
+                return "model_unloaded";
             // Engine-side grammar/decode hiccups (the server's own complaint is a
             // nested 500) — the payload was ACCEPTED, the output stream wasn't.
             // Retrying the identical payload is the fix. "predict request failed:

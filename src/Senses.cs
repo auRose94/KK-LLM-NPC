@@ -1366,7 +1366,17 @@ namespace KKLLMNPC
                         if (string.IsNullOrEmpty(agentName) || string.Equals(agentName, MyName(), StringComparison.OrdinalIgnoreCase)) continue;
                         nick = agentName;
                         Vector3 da = k.transform.position - _kobold.transform.position;
-                        list.Add(new Dictionary<string, object>
+                        // Who's-who: a sibling's live WHAT — their last action + a
+                        // world bearing, so "Kira is walking toward the farm, 12m SE"
+                        // instead of just a name. Instance read is in-process.
+                        string doing = null;
+                        try
+                        {
+                            var other = Plugin.InstanceForBody(k);
+                            if (other != null && other != this) doing = other._lastAction;
+                        }
+                        catch (Exception) { }
+                        var entryWho = new Dictionary<string, object>
                         {
                             ["name"] = nick,
                             ["body"] = CleanName(k.name),
@@ -1374,7 +1384,9 @@ namespace KKLLMNPC
                             ["dir"] = RelBearing(da),
                             ["dir_deg"] = F(RelBearingDeg(da)),
                             ["who"] = "another agent kobold (an LLM NPC) — a person like you; address them with: their name + a comma",
-                        });
+                        };
+                        if (!string.IsNullOrEmpty(doing) && doing != "none") entryWho["doing"] = doing;
+                        list.Add(entryWho);
                         if (list.Count >= 8) break;
                         continue;
                     }

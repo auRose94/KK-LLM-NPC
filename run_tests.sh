@@ -90,6 +90,7 @@ run_headless_suites() {
   run_suite httpretry   tests/test_httpretry.cs -- src/HttpRetry.cs src/Json.cs
   run_suite safehttp    tests/test_safehttp.cs -- src/SafeHttp.cs
   run_suite modelfamilies tests/test_modelfamilies.cs -- src/ModelFamilies.cs
+  run_suite memory_compaction tests/test_memory_compaction.cs -- src/MemoryCompaction.cs src/TextUtil.cs
 }
 
 # Every *.cs in tests/ must be reachable from a run_suite line above, otherwise a

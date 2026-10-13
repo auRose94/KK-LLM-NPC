@@ -50,6 +50,16 @@ namespace KKLLMNPC.Tests
             TestThinkingOffPayload();
 
             Console.WriteLine("\n=== Results: " + _passed + " passed, " + _failed + " failed ===");
+        // Meta-name replies ("I want time to think about it") — the field failure
+        // that made every fallback name numeric. Must be true for hesitation, and
+        // must NOT fire on a legitimate CoT that already salvaged a name.
+        Assert(ModelFamilies.LooksLikeNameMeta("I want some time to think about it first."), "hesitation detected");
+        Assert(ModelFamilies.LooksLikeNameMeta("Let me think about it..."), "let-me-think detected");
+        Assert(ModelFamilies.LooksLikeNameMeta("Sure, give me a moment."), "give-me-a-moment detected");
+        Assert(ModelFamilies.LooksLikeNameMeta("I'd like a moment to consider."), "i'd-like detected");
+        Assert(!ModelFamilies.LooksLikeNameMeta("Ember"), "a bare name is not meta");
+        Assert(!ModelFamilies.LooksLikeNameMeta(""), "empty is not meta");
+        Assert(!ModelFamilies.LooksLikeNameMeta("Final Answer: Ember — she is a farm kobold; I think Ember fits."), "CoT with a name is not meta");
             Environment.Exit(_failed > 0 ? 1 : 0);
         }
 

@@ -708,7 +708,79 @@ namespace KKLLMNPC
                 if (res != null) return (Vector3)res;
             }
             catch (Exception) { }
+            // `place:` facts with numbers — "place: mailbox at x=12.3 z=45.6" — are
+            // real navigation targets. The coords habit is TAUGHT only where the
+            // world map covers the scene (anchor teach), but resolution works
+            // anywhere: distances beyond local reach still answer too_far honestly.
+            try
+            {
+                Vector3? factHit = PlaceFactPosition(needle);
+                if (factHit.HasValue) return factHit;
+            }
+            catch (Exception) { }
             return null;
+        }
+
+        // The model's remembered Vector3s: facts written as
+        //   place: <name> at x=<x> z=<z>
+        // (also accepts  pos:  and  x=…, z=…  shapes). Name match is substring-either-
+        // way on the fact's name part; the numbers are meters. Null when none matches.
+        private Vector3? PlaceFactPosition(string needle)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(needle)) return null;
+                List<string> facts;
+                lock (_facts)
+                {
+                    facts = new List<string>(_facts.Count);
+                    foreach (var f in _facts) facts.Add(f.Text);
+                }
+                foreach (var f in facts)
+                {
+                    if (f == null) continue;
+                    string low = f.ToLowerInvariant();
+                    if (!(low.StartsWith("place:") || low.StartsWith("pos:") || low.StartsWith("location:")))
+                        continue;
+                    int xi = low.IndexOf("x=");
+                    int zi = low.IndexOf("z=");
+                    if (xi < 0 || zi < 0 || zi < xi) continue;
+                    // The name part between the prefix and the numbers.
+                    int nameEnd = low.IndexOf("at");
+                    string namePart = nameEnd > 0 ? low.Substring(0, nameEnd) : low;
+                    namePart = namePart.Substring(Mathf.Min(namePart.IndexOf(':') + 1, namePart.Length)).Trim();
+                    if (namePart.Length == 0) continue;
+                    bool match = namePart.Contains(needle) || needle.Contains(namePart);
+                    if (!match) continue;
+                    string xs = NumberAfter(low, xi + 2);
+                    string zs = NumberAfter(low, zi + 2);
+                    float x, z;
+                    if (!TryParseFloat(xs, out x) || !TryParseFloat(zs, out z)) continue;
+                    if (Mathf.Abs(x) > 4000f || Mathf.Abs(z) > 4000f) continue; // sane world meters only
+                    return new Vector3(x, 0f, z);
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        private static string NumberAfter(string s, int start)
+        {
+            var sb = new StringBuilder();
+            for (int i = start; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (char.IsDigit(c) || c == '-' || c == '.' || c == ',') sb.Append(c == ',' ? '.' : c);
+                else if (sb.Length > 0) break;
+            }
+            return sb.ToString();
+        }
+
+        private static bool TryParseFloat(string s, out float v)
+        {
+            v = 0f;
+            if (string.IsNullOrEmpty(s)) return false;
+            return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v);
         }
 
         // Store a fact in long-term memory ("bed upstairs", "player is friendly").

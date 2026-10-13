@@ -194,6 +194,28 @@ internal static class TestSwallow
         Eq(null, SwallowLogic.GrowSexGenes(0, 2.5f, 0f, 0f, 0, 5f, 0f, 0f, 0f, -0.5f),
             "negative frac clamps to 0 — no shrinking takes");
 
+        // --- destination picker (F7/WebUI cycle): OFF is the accident-stop, and the
+        // cycle must return OFF → mouth → anal → pussy → nipple → OFF in order. ---
+        Eq("Mouth", SwallowLogic.NextDestination(SwallowDestination.Off), "off cycles to mouth");
+        Eq("Anal", SwallowLogic.NextDestination(SwallowDestination.Mouth), "mouth cycles to anal");
+        Eq("Pussy", SwallowLogic.NextDestination(SwallowDestination.Anal), "anal cycles to pussy");
+        Eq("Dick", SwallowLogic.NextDestination(SwallowDestination.Pussy), "pussy cycles to dick");
+        Eq("Nipple", SwallowLogic.NextDestination(SwallowDestination.Dick), "dick cycles to nipple");
+        Eq("Off", SwallowLogic.NextDestination(SwallowDestination.Nipple), "nipple cycles back to off");
+        Eq("OFF", SwallowLogic.DestinationLabel(SwallowDestination.Off), "off label");
+        Eq("MOUTH", SwallowLogic.DestinationLabel(SwallowDestination.Mouth), "mouth label");
+        Eq("ANAL", SwallowLogic.DestinationLabel(SwallowDestination.Anal), "anal label");
+        Eq("PUSSY", SwallowLogic.DestinationLabel(SwallowDestination.Pussy), "pussy label");
+        Eq("DICK", SwallowLogic.DestinationLabel(SwallowDestination.Dick), "dick label");
+        Eq("NIPPLE", SwallowLogic.DestinationLabel(SwallowDestination.Nipple), "nipple label");
+        // Entry narration names the hole for every non-mouth destination; mouth stays
+        // the classic "swallowed whole".
+        Eq("swallowed whole", SwallowLogic.EntryVerb(SwallowDestination.Mouth), "mouth entry verb");
+        Eq(true, SwallowLogic.EntryVerb(SwallowDestination.Anal).Contains("ass"), "anal entry names the ass");
+        Eq(true, SwallowLogic.EntryVerb(SwallowDestination.Pussy).Contains("pussy"), "pussy entry names the pussy");
+        Eq(true, SwallowLogic.EntryVerb(SwallowDestination.Dick).Contains("cock"), "dick entry names the cock");
+        Eq(true, SwallowLogic.EntryVerb(SwallowDestination.Nipple).Contains("nipple"), "nipple entry names the nipple");
+
         if (_failed == 0) Console.WriteLine("test_swallow: all OK");
         else Console.WriteLine("test_swallow: " + _failed + " failure(s)");
         Environment.Exit(_failed);

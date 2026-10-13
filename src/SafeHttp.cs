@@ -24,6 +24,46 @@ namespace KKLLMNPC
         // Cap on how much of an error body we read back for diagnostics.
         private const int MaxErrorBodyBytes = 2048;
 
+        // ---- global concurrency gate ([LLM] ParallelCalls) ----
+        // Local llama.cpp-style servers answer serially: a burst of four NPC POSTs
+        // starved every caller into 120s timeouts (the dominant log warning, 2026-10).
+        // The gate holds total concurrent LLM HTTP calls to a configured cap; extra
+        // callers QUEUE here (fail-open after two minutes so a wedged call can never
+        // deadlock an NPC permanently). Pure System.Threading — test-suite safe;
+        // default 0 = unlimited, so behavior is unchanged until Main.cs sets it.
+        private static readonly object _gateLock = new object();
+        private static int _gateMax;
+        private static int _gateBusy;
+        internal static void SetMaxParallel(int max) { lock (_gateLock) { _gateMax = max < 0 ? 0 : max; } }
+        private static IDisposable AcquireGate()
+        {
+            lock (_gateLock) { if (_gateMax <= 0) return null; }
+            var h = new GateHandle();
+            int waited = 0;
+            while (true)
+            {
+                bool entered = false;
+                lock (_gateLock)
+                {
+                    if (_gateBusy < _gateMax) { _gateBusy++; entered = true; }
+                    else Monitor.Wait(_gateLock, 250);
+                }
+                if (entered) return h;
+                waited += 250;
+                if (waited >= 120000) return null; // fail open — better late than wedged
+            }
+        }
+        private sealed class GateHandle : IDisposable
+        {
+            private bool _done;
+            public void Dispose()
+            {
+                if (_done) return;
+                _done = true;
+                lock (SafeHttp._gateLock) { SafeHttp._gateBusy--; Monitor.PulseAll(SafeHttp._gateLock); }
+            }
+        }
+
         // POST with retry and proper resource disposal.
         // Returns the response body as string, or null on failure.
         //
@@ -46,54 +86,57 @@ namespace KKLLMNPC
             int? maxResponseBytes = null, Action<string> onRetry = null,
             Action<string> onError = null)
         {
-            byte[] bytes = Encoding.UTF8.GetBytes(body);
-            string lastError = null;
-
-            for (int attempt = 0; attempt < retries; attempt++)
+            using (var gate = AcquireGate())
             {
-                if (attempt > 0)
-                {
-                    int delay = BackoffMs(attempt);
-                    onRetry?.Invoke("attempt " + (attempt + 1) + "/" + retries + " in " + delay + "ms: " + lastError);
-                    Thread.Sleep(delay);
-                }
+                byte[] bytes = Encoding.UTF8.GetBytes(body);
+                string lastError = null;
 
-                // HttpWebRequest is not IDisposable on this profile — Abort() in a
-                // finally is the documented way to release the connection.
-                var req = CreateRequest(url, "POST", apiKey, timeout ?? DefaultTimeout);
-                try
+                for (int attempt = 0; attempt < retries; attempt++)
                 {
-                    req.ContentLength = bytes.Length;
-                    using (var requestStream = req.GetRequestStream())
-                        requestStream.Write(bytes, 0, bytes.Length);
-
-                    using (var resp = (HttpWebResponse)req.GetResponse())
+                    if (attempt > 0)
                     {
-                        int status = (int)resp.StatusCode;
-                        if (status != 200)
-                        {
-                            lastError = "HTTP " + status + " " + Ascii(resp.StatusDescription) + ErrorDetail(resp);
-                            if (!IsRetryableStatus(status)) { onError?.Invoke(lastError); return null; }
-                            continue;
-                        }
-                        using (var stream = resp.GetResponseStream())
-                            return stream == null ? null : ReadStream(stream, maxResponseBytes);
+                        int delay = BackoffMs(attempt);
+                        onRetry?.Invoke("attempt " + (attempt + 1) + "/" + retries + " in " + delay + "ms: " + lastError);
+                        Thread.Sleep(delay);
                     }
-                }
-                catch (WebException ex)
-                {
-                    lastError = DescribeWebException(ex);
-                    if (!IsRetryableWebException(ex)) { onError?.Invoke(lastError); return null; }
-                }
-                catch (Exception ex)
-                {
-                    lastError = ex.GetType().Name + ": " + ex.Message;
-                }
-                finally { try { req.Abort(); } catch (Exception) { } }
-            }
 
-            onError?.Invoke(lastError ?? "request failed");
-            return null;
+                    // HttpWebRequest is not IDisposable on this profile — Abort() in a
+                    // finally is the documented way to release the connection.
+                    var req = CreateRequest(url, "POST", apiKey, timeout ?? DefaultTimeout);
+                    try
+                    {
+                        req.ContentLength = bytes.Length;
+                        using (var requestStream = req.GetRequestStream())
+                            requestStream.Write(bytes, 0, bytes.Length);
+
+                        using (var resp = (HttpWebResponse)req.GetResponse())
+                        {
+                            int status = (int)resp.StatusCode;
+                            if (status != 200)
+                            {
+                                lastError = "HTTP " + status + " " + Ascii(resp.StatusDescription) + ErrorDetail(resp);
+                                if (!IsRetryableStatus(status)) { onError?.Invoke(lastError); return null; }
+                                continue;
+                            }
+                            using (var stream = resp.GetResponseStream())
+                                return stream == null ? null : ReadStream(stream, maxResponseBytes);
+                        }
+                    }
+                    catch (WebException ex)
+                    {
+                        lastError = DescribeWebException(ex);
+                        if (!IsRetryableWebException(ex)) { onError?.Invoke(lastError); return null; }
+                    }
+                    catch (Exception ex)
+                    {
+                        lastError = ex.GetType().Name + ": " + ex.Message;
+                    }
+                    finally { try { req.Abort(); } catch (Exception) { } }
+                }
+
+                onError?.Invoke(lastError ?? "request failed");
+                return null;
+            }
         }
 
         // GET with retry. Same retry policy as Post.

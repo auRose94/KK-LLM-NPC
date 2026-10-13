@@ -96,6 +96,12 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgNameSelection;
         internal ConfigEntry<string> _cfgNamePromptFile;
         internal ConfigEntry<int> _cfgFactDecay;
+        internal ConfigEntry<int> _cfgFactCap;
+        internal ConfigEntry<string> _cfgDefaultFacts;
+        internal ConfigEntry<float> _cfgIdleInitiative;
+        internal ConfigEntry<bool> _cfgAgentOverhear;
+        internal ConfigEntry<float> _cfgAgentOverhearRadius;
+        internal ConfigEntry<int> _cfgAgentChatPerMinute;
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
         internal ConfigEntry<float> _cfgFarmScanRadius;
@@ -227,6 +233,8 @@ namespace KKLLMNPC
         // retries) ---- // consecutive failed chat queries; 0 = healthy. Written on
         // the LLM thread, read by the overlay (main) and the state anchor.
         private volatile int _endpointFails;
+        // Read-only view for the plugin's heartbeat line (crash forensics).
+        internal int EndpointFails() { return _endpointFails; }
         // Don't issue a chat query until this Time.unscaledTime (escalating idle
         // after consecutive failures — a dead server otherwise costs a full
         // 3-attempt SafeHttp run every think tick forever).
@@ -294,7 +302,59 @@ namespace KKLLMNPC
         // asserting naturally outlive scratch notes.
         private sealed class FactRec { public string Text; public int Tick; }
         private readonly List<FactRec> _facts = new List<FactRec>();
-        private const int FactCap = 24;
+        // Seed-fact sentinel tick: seeded facts are disposable boot knowledge —
+        // a restored body swaps them out for its saved life, the restore-refusal
+        // check ignores them, and context decay never expires them.
+        private const int SeedTick = -99;
+        // Configurable ([Memory] FactCap, default 40; the old hard cap was 24).
+        private int FactCap { get { try { return _cfgFactCap != null ? _cfgFactCap.Value : 24; } catch (Exception) { return 24; } } }
+        // True when a fact the NPC actually LIVED this life exists (seeds don't count).
+        private bool HasRealFacts()
+        {
+            lock (_facts)
+            {
+                foreach (var f in _facts) if (f.Tick != SeedTick) return true;
+            }
+            return false;
+        }
+        private void DropSeedFacts()
+        {
+            lock (_facts)
+            {
+                for (int i = _facts.Count - 1; i >= 0; i--)
+                    if (_facts[i].Tick == SeedTick) _facts.RemoveAt(i);
+            }
+        }
+        // Facts written into every FRESH mind ([Memory] DefaultFacts, one per line).
+        // Applied at ResetMindNow so a brand-new possession boots knowing the world.
+        // Written DIRECTLY (not RememberFact): the junk filter exists to stop the
+        // MODEL's momentary ramblings — user-configured seed facts are deliberate.
+        private void SeedDefaultFacts()
+        {
+            try
+            {
+                if (_cfgDefaultFacts == null) return;
+                string all = _cfgDefaultFacts.Value ?? "";
+                if (all.Length == 0) return;
+                lock (_facts)
+                {
+                    foreach (var raw in all.Split('\n'))
+                    {
+                        string line = raw.Trim();
+                        if (line.Length < 3) continue;
+                        if (line.StartsWith("#")) continue;
+                        string prefix = line.Split(':')[0];
+                        bool replaced = false;
+                        for (int i = 0; i < _facts.Count; i++)
+                            if (_facts[i].Text.Split(':')[0] == prefix)
+                            { _facts[i].Text = line; _facts[i].Tick = SeedTick; replaced = true; break; }
+                        if (!replaced) _facts.Add(new FactRec { Text = line, Tick = SeedTick });
+                    }
+                    while (_facts.Count > FactCap) _facts.RemoveAt(0);
+                }
+            }
+            catch (Exception) { }
+        }
 
         // Penetration awareness.
         private class PenState { public string name; public float depth; public float lastT; public float vel; public string hole; public Transform src; public List<float> History = new List<float>(); } // History: (t,d) pairs, last ~5s — the rhythm graph
@@ -592,6 +652,12 @@ namespace KKLLMNPC
             _cfgNameSelection = plugin._cfgNameSelection;
             _cfgNamePromptFile = plugin._cfgNamePromptFile;
             _cfgFactDecay = plugin._cfgFactDecay;
+            _cfgFactCap = plugin._cfgFactCap;
+            _cfgDefaultFacts = plugin._cfgDefaultFacts;
+            _cfgIdleInitiative = plugin._cfgIdleInitiative;
+            _cfgAgentOverhear = plugin._cfgAgentOverhear;
+            _cfgAgentOverhearRadius = plugin._cfgAgentOverhearRadius;
+            _cfgAgentChatPerMinute = plugin._cfgAgentChatPerMinute;
             _cfgIdentityBot = plugin._cfgIdentityBot;
             _cfgIdentityAppId = plugin._cfgIdentityAppId;
             _cfgFarmScanRadius = plugin._cfgFarmScanRadius;
@@ -788,19 +854,51 @@ namespace KKLLMNPC
         }
 
         // Cross-agent speech safety valve: another NPC's line reaches us only when
-        // it addressed us AND at most twice a minute — two chatty NPCs can't duet
-        // forever (each reply would be a stimulus for the next).
+        // it addressed us AND at most N times a minute ([Autonomy] AgentChatPerMinute,
+        // default 4; was hardcoded 2) — two chatty NPCs can't duet forever (each reply
+        // would be a stimulus for the next).
         private readonly List<float> _botChatDeliveries = new List<float>(4);
         internal bool BotChatAllowed()
         {
+            int cap = 2;
+            try { if (_cfgAgentChatPerMinute != null && _cfgAgentChatPerMinute.Value > 0) cap = _cfgAgentChatPerMinute.Value; } catch (Exception) { }
             lock (_botChatDeliveries)
             {
                 float now = Time.unscaledTime;
                 while (_botChatDeliveries.Count > 0 && now - _botChatDeliveries[0] > 60f) _botChatDeliveries.RemoveAt(0);
-                if (_botChatDeliveries.Count >= 2) return false;
+                if (_botChatDeliveries.Count >= cap) return false;
                 _botChatDeliveries.Add(now);
                 return true;
             }
+        }
+
+        // ---- autonomy bookkeeping (self-initiative cues) ----
+        // Last time a turn carried a REAL trigger ([chat]/[event] content), and the
+        // last time the idle-initiative cue fired. ConsoleTurn/DrainConsoleEvents write.
+        internal float _lastTriggerTime = -999f;
+        internal float _lastInitiativeAt = 0f;
+
+        // The possessed body, null-safe (for the plugin's overhear distance checks —
+        // main thread only, like any transform read).
+        internal Kobold KoboldOrNull
+        {
+            get { try { return _kobold; } catch (Exception) { return null; } }
+        }
+
+        // Another agent spoke but did NOT address us — deliver as an overheard event:
+        // the mind may join in or act on it, without a reply being demanded (that's
+        // what keeps two agents from dueting: an overheard line is stimulus, not a
+        // question). Distance-gating happens in OnEvent (main thread, where transforms
+        // are safe); here we just record it.
+        internal void HandleAmbientAgentLine(string agentName, string text)
+        {
+            try
+            {
+                string heard = (agentName ?? "someone") + ": " + (text ?? "");
+                RecordChatEntry(agentName ?? "someone", text ?? "");
+                PushWorldEvent("[overheard] " + heard + " — not addressed to you; join in only if you have something to add (address them by name to be heard)");
+            }
+            catch (Exception) { }
         }
 
         // Direct injection of a player-chat line into THIS instance only (overlay /
@@ -1223,7 +1321,7 @@ namespace KKLLMNPC
                 if (decay > 0)
                 {
                     for (int i = _facts.Count - 1; i >= 0; i--)
-                        if (_tick - _facts[i].Tick > decay) _facts.RemoveAt(i);
+                        if (_facts[i].Tick != SeedTick && _tick - _facts[i].Tick > decay) _facts.RemoveAt(i);
                 }
                 if (_facts.Count == 0) return "[]";
                 int cap = MaxFacts;
@@ -1253,7 +1351,7 @@ namespace KKLLMNPC
             }
         }
 
-        private void RememberFact(string fact)
+        internal void RememberFact(string fact)
         {
             if (string.IsNullOrWhiteSpace(fact)) return;
             string f = Sanitize(fact.Trim());

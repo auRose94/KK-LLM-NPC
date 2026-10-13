@@ -30,6 +30,12 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `CommentTemp` | `0.9` | 0–2 | Sampling temperature for free commentary |
 | `ChatLogLines` | `20` | 0–200 | Feed the last N lines of the game's chat log to the model each turn (full conversation + NPC speech). 0 = off |
 
+### `[LLM] ParallelCalls` — shared-serial-server concurrency cap
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `ParallelCalls` | `2` | 0–8 | Max simultaneous LLM HTTP calls the whole mod makes toward the endpoint. Local llama.cpp/KoboldCpp/solo-GPU LM Studio servers answer serially — with several NPCs posting at once, burst calls starved into `WebException(Timeout)` warnings (the dominant log noise). Extra calls now QUEUE inside the mod (fail-open after two minutes). `0` = unlimited; raise it for multi-slot servers. |
+
 ## [Vision] — Background Vision Pass
 
 | Key | Default | Range | Purpose |
@@ -102,6 +108,10 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
 | `FactDecayTicks` | `900` | 0–… | Ticks before a fact decays out of context if the model hasn't re-asserted it. Re-`remember`ing a fact (same category prefix) refreshes its age, so actively-used facts outlive scratch notes. 0 = facts never decay. |
+| `FactCap` | `40` | 12–120 | How many facts one NPC keeps — the live ring AND the restore cap for a saved record (was a fixed 24). Facts dedupe one slot per `category:` prefix; beyond the cap the oldest are evicted. |
+| `DefaultFacts` | *(10 seed lines)* | multiline | Facts written into every FRESH NPC mind — the default world knowledge a kobold boots with (one per line, `category: text`; one fact per category prefix). Editable/downsizeable in the config file (or from the WebUI settings tab); a body that RESTORES a saved life loads its own memories instead of these. |
+
+
 
 ## [Farming] — Farm/Cooking Perception
 
@@ -138,10 +148,20 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `DisableReagentMessages` | `true` | Suppress reagent injection messages in log |
 | `BlockedScenes` | `MainMenu,Loading,ErrorScene` | Comma-separated scene names where the LLM stays idle |
 
+## [Autonomy] — Self-directed NPCs & agent-to-agent chat
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `IdleInitiativeSeconds` | `90` | After this many seconds with nothing addressing an NPC, the mod injects a self-initiative cue ("this is your own time…") that names nearby kobold agents — the NPC then moves/speaks unprompted instead of waiting for the player. `0` = off. |
+| `AgentOverhear` | `true` | NPC agents overhear each other's UNADDRESSED chat as `[overheard]` events (they can join in or act on it; addressed lines were always delivered). Agent speech is also attributed to the SPEAKING kobold in every heard line now (not to the owner's nick). |
+| `AgentOverhearRadiusM` | `24` | Earshot radius (m) for overhearing; beyond it, agent speech goes unheard. |
+| `AgentChatPerMinute` | `4` | Max agent lines (addressed + overheard) one NPC ingests per minute — the duet cap against two LLM kobolds echoing each other forever (was hardcoded 2). |
+
 ## [LittleTreats] — Opt-in oddities (nothing here is on by default)
 
 | Key | Default | Purpose |
 |-----|---------|---------|
+| `SwallowDestination` | `Off` | **WHERE the person goes in — and the master accident switch.** `Off` (the default) disarms ALL release-triggered swallows: a held kobold dropped near another head (precision-grabber bump included) just drops like normal — nothing starts a digestion by accident. Pick `Mouth`/`Anal`/`Pussy`/`Dick`/`Nipple` to arm the trigger and aim the pull at that hole (`Dick` anchors on the EATER's own dick — cock vore/urethral entry — and falls back to a groin point for the dickless); narration names it, the stomach outcome is unchanged. Cycle in-game with **F7** (off→mouth→anal→pussy→dick→nipple→off), announce toasts land in chat; a throttled log hint appears if you leave `SwallowEnabled` on while the destination sits Off. Also settable from the WebUI settings tab. Requires `SwallowEnabled` too. |
 | `SwallowEnabled` | `false` | Player swallow-vore: releasing a held PERSON (kobold) while looking steeply up swallows them whole instead of dropping. ~2s pull-in (they're hidden once fully swallowed — no stuck-out-of-the-stomach clipping), they digest at your stomach for `SwallowDigestSeconds`, then `SwallowEffect` decides the outcome. Held PLAYER bodies can never be swallowed (grief guard); other things in hand drop normally. The eaten NPC's LLM session survives the whole time (can still speak from inside; steering paused; the digestion is narrated to them), and other NPCs see it as a world event. **Digest abort (no cheats): type "swallow abort"** (or "spit out" / "cough up" / "regurgitate" / "swallow stop" / "abort swallow") **in the game chat** — every in-flight session releases its victims alive and whole in front of you; the line is consumed by the mod, so the NPCs never hear it; works in pull phase and mid-digest, does nothing once an egg was already laid. |
 | `SwallowLookUpDot` | `0.94` | How steeply up the camera must point for the drop to become a swallow: camera-forward y with asin of it = the angle. 0.94 ≈ 70°, 0.97 ≈ 76°, 0.87 ≈ 60°. Default is deliberately near max-up so you can't eat someone by accident; raise toward 0.999 for an even fussier trigger. |
 | `SwallowForceFeeding` | `true` | Force-feeding: ANY kobold's drop (the mod's NPC `drop` tool included) that lands a held PERSON right on/at another kobold's HEAD (within 0.85m, at/above the head bone) makes the RECEIVER swallow them — the receiver then follows `SwallowEffect`'s outcome, the dropped one is narrated honestly (they're told who fed them and their mode's real prospects), and the dropper's `drop` tool result says `force_fed` instead of "dropped". Grief guards: receivers and victims can never be player bodies; an eater already digesting someone refuses another; the player's steep look-up self-swallow still wins when both gestures match. Requires `SwallowEnabled`. |
@@ -159,7 +179,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `Enabled` | `true` | The mod's debug console delivered over LOOPBACK HTTP (read-only; 127.0.0.1 only, unreachable from the network): a single-file browser page at `http://127.0.0.1:8338/` with one tab per agent (live goal/facts/history/console terminal/thread state) plus the spectate status, the mod's log tail (`/api/state` JSON includes it) and the AI-reports tail (`/api/reports`). It reads only lock-guarded strings — no Unity calls — so it keeps answering even while the main thread is wedged, which is exactly when you want it. An agent with shell access can also fetch it mid-session (`curl http://127.0.0.1:8338/api/state`). `false` = the F6 IMGUI overlay remains the only UI. |
+| `Enabled` | `true` | The mod's debug console delivered over LOOPBACK HTTP (127.0.0.1 only, unreachable from the network): a single-file browser page at `http://127.0.0.1:8338/` with per-agent tabs (goal/facts/history/terminal/thread state), a **Settings** tab (every config entry, live — saves to the BepInEx config file), an **Ops** tab (delete memory files, delete map/trail data, reset settings to defaults — confirmation-gated), per-instance start/stop/inject-say controls, and a full per-kobold stat dump (`/api/instances`: genes, energy, position, penetration state, belly guests, skills, goal details, endpoint health, model tier/family…). Status reads only lock-guarded strings (`/api/state`) so it answers even while the main thread is wedged; the stat dump is a main-thread-built ~1.5 s cache. Curl-able surfaces: `/api/state`, `/api/instances`, `/api/config`, `/api/memories`, `/api/reports`, plus POST `/api/config`, `/api/ops`, `/api/instance` for the same actions. The in-game F6 IMGUI debug overlay was removed — this page is the debug surface. |
 | `Port` | `8338` | Port to bind on (change if it collides with another local service). |
 
 ## [Debug] — AI Feedback

@@ -9,6 +9,23 @@ using System.Globalization;
 
 namespace KKLLMNPC
 {
+    // WHERE a swallow takes its victim in (config [LittleTreats] SwallowDestination,
+    // F7 hotkey cycles it, WebUI settings toggle it). OFF is the default and the
+    // point: with OFF no swallow trigger arms at all — a grabbed kobold released
+    // near a head (or the player's own look-up drop) just drops like normal, so a
+    // PrecisionGrabber bump can never start a digestion by accident. Picking a hole
+    // aims the entry at that hole and names it in every narration. Lives in the
+    // PURE file so the swallow test suite can compile it.
+    public enum SwallowDestination
+    {
+        Off = 0,
+        Mouth = 1,
+        Anal = 2,
+        Pussy = 3,
+        Nipple = 4,
+        Dick = 5,    // urethral entry — the eater's own groin (cock vore)
+    }
+
     internal static class SwallowLogic
     {
         // Camera-forward.y above this counts as "looking up" for the swallow trigger.
@@ -204,6 +221,50 @@ namespace KKLLMNPC
                 parts.Add(b.ToString(CultureInfo.InvariantCulture));
             parts.Add(dickEquip.ToString(CultureInfo.InvariantCulture));
             return string.Join("_", parts.ToArray());
+        }
+
+        // ------------------------------------------------------------------
+        // Destination picker (config enum SwallowDestination): the F7/WebUI cycle
+        // order, the human label, and the entry phrase per hole. Pure.
+        // ------------------------------------------------------------------
+        // Cycle: off -> mouth -> anal -> pussy -> dick -> nipple -> off.
+        public static SwallowDestination NextDestination(SwallowDestination d)
+        {
+            switch (d)
+            {
+                case SwallowDestination.Off: return SwallowDestination.Mouth;
+                case SwallowDestination.Mouth: return SwallowDestination.Anal;
+                case SwallowDestination.Anal: return SwallowDestination.Pussy;
+                case SwallowDestination.Pussy: return SwallowDestination.Dick;
+                case SwallowDestination.Dick: return SwallowDestination.Nipple;
+                default: return SwallowDestination.Off;
+            }
+        }
+
+        public static string DestinationLabel(SwallowDestination d)
+        {
+            switch (d)
+            {
+                case SwallowDestination.Mouth: return "MOUTH";
+                case SwallowDestination.Anal: return "ANAL";
+                case SwallowDestination.Pussy: return "PUSSY";
+                case SwallowDestination.Nipple: return "NIPPLE";
+                case SwallowDestination.Dick: return "DICK";
+                default: return "OFF";
+            }
+        }
+
+        // How a body "goes in" through each destination — the pull narration uses it.
+        public static string EntryVerb(SwallowDestination d)
+        {
+            switch (d)
+            {
+                case SwallowDestination.Anal: return "pulled into their rear — taken in through the ass";
+                case SwallowDestination.Pussy: return "drawn into their body — taken in through the pussy (unbirth)";
+                case SwallowDestination.Nipple: return "drawn into their breast — taken in through the nipple";
+                case SwallowDestination.Dick: return "drawn into their groin — taken in through the cock (urethra)";
+                default: return "swallowed whole";
+            }
         }
     }
 }

@@ -76,6 +76,17 @@ namespace KKLLMNPC
             int every = _cfgConsoleAutoShot != null ? _cfgConsoleAutoShot.Value : 6;
             if (every <= 0) return;
             if (FamilyProfile == null || !FamilyProfile.VisionCapable) return;
+            // Endpoint-first cost control: when the server is DOWN or already flaky,
+            // don't attach fresh first-person JPEGs to the next calls — on a small
+            // local model already drowning in queued requests, every image payload
+            // made the timeouts worse (2026-10-12 second-NPC freeze). The old frame
+            // stands in history; the next healthy turn shoots again.
+            try
+            {
+                if (_endpointBlockUntil > Time.unscaledTime || _endpointFails >= 2)
+                    return; // skip and don't count the turn against the cadence
+            }
+            catch (Exception) { }
             Vector3 pos;
             float yaw;
             try
@@ -299,6 +310,7 @@ namespace KKLLMNPC
             "FOLLOWING: if the player asks you to follow, run `follow on`. It's the best way to travel together — but when you need to go your own way, `follow off` breaks free (one command; re-attach with `follow on`); never feel stuck in it. " +
             "GOALS: set your goal ONCE with `goal <text>` (your bigger thinking), then act toward it each turn; `goal done` when finished; `goal drop [why]` to abandon. Don't re-declare a goal you already have. For anything with more than one move, `plan <step>` lays the steps out once, `plan next` marks one done, `plan clear` wipes — the plan persists across turns even when trimmed context does not. " +
             "PRIORITIES: (1) [chat] from the player → echo a reply; (2) `cat needs` says READY_TO_LAY → cd to a nest and use it — a nest CANNOT work without egg >5ml AND energy >1, never seek one until then; (3) stimulation up or horniness high → find a play station and use it; (4) player nearby → go to them, keep company; (5) explore rooms (cd, ls). " +
+            "AUTONOMY: you live here too — most of your life happens WITHOUT anyone talking to you. When an [event] cue says it's your own time (nobody has addressed you for a while), that is NOT a prompt to wait: pick your own next thing — move somewhere interesting (cd), work your goal, tend needs, explore — and SPEAK UNPROMPTED when you have something worth saying (a musing, a comment on the world, an offer to a nearby kobold). Other AI kobolds are PEOPLE: their names are in `ps` with what they're doing; address one by name + a comma to be heard; [overheard] lines are things you can join in (address them by name), not orders to answer. On big maps (the state anchor says coords: ON) you may store places as numbers: remember place: <name> at x=<N> z=<N> — cd <name> then resolves your own remembered spot anywhere. " +
             "STATIONS: play = pleasure ONLY (never sleep in it, NEVER energy or egg making); bed = REST ONLY when energy < ~0.2 (never play in it); nest = eggs ONLY with >5ml egg AND energy >1 — refused while you carry enough egg means EAT, not retry. Station machines report live OCCUPANCY ('slots 1/2 taken — you ARE in one … 1 slot FREE'): ':busy' often just means YOUR own slot; while in_station don't re-enter and don't leave over busy — invite the partner (`echo get in, I'll wait`) and wait: BOTTOM gets in first, TOP mounts second. A failing `use` says WHY now (out_of_energy → eat; already in; full → invite or another). A TWO-SLOT station with ONE body does NOTHING — no stimulation, no egg, no energy; run one solo only to deliberately wait as the bottom, and if the partner isn't coming, `exit` and do something real. And sex/play NEVER create energy or eggs — only food (metabolized) and bed rest raise energy, and egg reagent only comes from eating/swallowing. While in_station you're locked in an animation — `exit` to leave. " +
             "THINGS: ls tags: ':busy' in use, ':needs_buy' buy its contract first, ':not_built' build it first, ':done' bought. " +
             "CONTEXTUAL ITEMS: the same thing can have several uses — pick by what you WANT. A seed in your grip: `use` plants it when you stand on/face bare soil. An EGG: plant it in bare soil (`use` it facing the dirt, or `plant_egg`) → grows a fresh EMPTY kobold body — or EAT it: hold it (get), then `use` it — food items are eaten by USING them (protein/strength buff). `get <name>` now AIMS for you (turns + looks down at small items) — no manual head-work needed. PLANTING IS EASY: `plant` (or `use soil`/`use egg` at a plot) releases the held item, TELEPORTS it onto the plot, looks down, plants, and WATERS the fresh plant when a can is near — results say planted/teleported/watered. GROWTH AND PLOTS: a planted seed/egg IS on a valid soil tile — `plant` names the plot (name/id/addr) in its result; do NOT hunt another plot. THE GROWTH LADDER: plant the seed/egg → water ONCE (planted→stage 2) → water AGAIN when it's stage 2 (→stage 3). The final stage BEARS FRUIT (harvest it) or, for an egg, SPAWNS a fresh empty body. Every stage needs its own watering; results show stages_left. Watering needs no can: `water` waters the plot's tile directly when no can is in reach. " +
@@ -502,6 +514,17 @@ namespace KKLLMNPC
             if (Swallowed)
                 parts.Add("YOU ARE INSIDE A STOMACH: body commands (cd/use/get/drop/throw/run/jump/crouch/exit/follow) DO NOTHING — talk with echo/emote, remember/goal/plan, and read-only commands (ls/cat/status); sleep to end turns");
             if (_followMode) parts.Add("follow: on");
+            // COORDS ON — map-gated (the user's ask: number positions only where the
+            // shared world map actually routes them). On big maps the anchor teaches
+            // the Vector3 habit and `place:` facts become real navigation targets
+            // (FindPlaceByName reads "at x=... z=..." from your facts when the map is on).
+            try
+            {
+                bool mapOn = _kobold != null && WorldMap.Ready && WorldMap.InBounds(_kobold.transform.position);
+                if (mapOn)
+                    parts.Add("coords: ON (world map ready) — give/remember positions as numbers: remember(place: <name> at x=<x> z=<z>) then cd <name> finds it anywhere; pwd shows your x/z");
+            }
+            catch (Exception) { }
             // Endpoint health — the model should know why turns stall instead of
             // wondering where its replies went.
             string epStatus = EndpointStatusText();
@@ -546,7 +569,83 @@ namespace KKLLMNPC
                         if (w != null) sb.Append("[event] ").AppendLine(Sanitize(w.ToString()));
             }
             catch (Exception) { }
+            // SELF-INITIATIVE ([Autonomy] IdleInitiativeSeconds, default 90): when
+            // nothing has addressed this NPC for a while, hand the turn to them with
+            // an explicit cue — the reactive-only bias ("wait for the player to talk")
+            // is prompt-trained, and this event both triggers the turn AND unlocks
+            // unprompted speech (hadTrigger below). Nearby agents are named so they
+            // find each other without a player ferrying introductions.
+            try
+            {
+                float gap = _cfgIdleInitiative != null ? _cfgIdleInitiative.Value : 90f;
+                if (gap > 0f)
+                {
+                    float now = Time.unscaledTime;
+                    if (now - Math.Max(_lastTriggerTime, _lastInitiativeAt) > gap)
+                    {
+                        _lastInitiativeAt = now;
+                        string cue = "you've had nobody talking to you for a while — this is YOUR OWN time: pick your own next thing (go somewhere with cd, work your goal, explore, tend needs) and if you have something worth saying, say it aloud — nearby kobolds and the player can hear you";
+                        try
+                        {
+                            string sibs = NearbyAgentsLine();
+                            if (sibs != null) cue += ". " + sibs;
+                        }
+                        catch (Exception) { }
+                        sb.Append("[event] ").AppendLine(cue);
+                    }
+                }
+            }
+            catch (Exception) { }
             return sb.ToString();
+        }
+
+        // One line naming nearby sibling AGENTS (name, doing, meter-compass) — the
+        // who's-who nudge for the initiative cue. Main-thread marshal (positions).
+        private string NearbyAgentsLine()
+        {
+            try
+            {
+                object res = RunOnMainThread(() =>
+                {
+                    try
+                    {
+                        var me = _kobold != null && IsAlive(_kobold) ? _kobold.transform.position : Vector3.zero;
+                        var bits = new List<string>();
+                        foreach (var k in SceneCache.Find<Kobold>(2f))
+                        {
+                            if (k == null || k == _kobold) continue;
+                            if (!IsAlive(k)) continue;
+                            if (!LLMNPCPlugin.IsClaimedByAnyLLM(k.GetInstanceID())) continue;
+                            string aname = NPCInstance.AgentNameForBody(k.GetInstanceID());
+                            if (string.IsNullOrEmpty(aname)) continue;
+                            float d = Vector3.Distance(me, k.transform.position);
+                            if (d > 60f) continue;
+                            string doing = null;
+                            var other = Plugin.InstanceForBody(k);
+                            if (other != null) { try { doing = other._lastAction; } catch (Exception) { } }
+                            string dir = compass8((k.transform.position - me));
+                            bits.Add(aname + (doing != null && doing != "none" ? " (" + doing + ")" : "") + " " + d.ToString("0", CultureInfo.InvariantCulture) + "m " + dir);
+                        }
+                        if (bits.Count == 0) return null;
+                        return "you are not alone: " + string.Join("; ", bits.ToArray()) + " — address one by name + comma to talk to them";
+                    }
+                    catch (Exception) { return null; }
+                }, 6000);
+                return res as string;
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static string compass8(Vector3 delta)
+        {
+            try
+            {
+                float deg = Mathf.Atan2(delta.x, delta.z) * 57.29578f; // +Z north
+                if (deg < 0) deg += 360f;
+                string[] names = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+                return names[((int)Mathf.Round(deg / 45f)) % 8];
+            }
+            catch (Exception) { return "?"; }
         }
 
         // ------------------------------------------------------------------
@@ -581,6 +680,7 @@ namespace KKLLMNPC
                 // solo voice is throttled to the idle-chatter cadence so a block never
                 // becomes a monologue.
                 bool hadTrigger = events.Length > 0;
+                if (hadTrigger) _lastTriggerTime = Time.unscaledTime;
                 // The last user message's lines — a degenerate reply COPIES the terminal
                 // ("$ ls" + output rows + even the state anchor) instead of speaking.
                 // Copied lines are dropped before parsing so they can't re-execute (an

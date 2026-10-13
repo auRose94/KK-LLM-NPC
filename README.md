@@ -35,7 +35,7 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 
 - **Possession pool** — every AI kobold the world produces gets an agent (a body that appears later, e.g. from a delivery or breeding, is claimed as it shows up). With `SpawnMissingKobolds` on, it can also spawn extra AI kobolds near the player until `MaxNPCs` is met.
 - **Pickup awareness** — knows when its body is grabbed, tracks a position trail while carried, and reports where it was moved (thrown is flagged as startling); it also auto-recovers if ragdolled next to the mail/sell machine and will never interact with that machine, since climbing in starts the sell timer.
-- **Swallow-vore & spectate (opt-in, in [LittleTreats], all OFF by default)** — two opt-in flows, each a complete loop: the player can swallow a kobold whole (digestion narrated to a real mind, ending per `SwallowEffect`: egg / belly-egg / absorb / destroy, with a no-cheat chat abort and force-feeding variant), and an agent can `eat_player` — taking over your camera to spectate its whole game session from inside until you hatch or abort. Grief guards keep player bodies safe everywhere except the explicit spectate act; a swallowed person is always kept alive as a mind and restored on their terms. **Full mechanics, config and tests: [docs/VORE.md](docs/VORE.md).**
+- **Swallow-vore & spectate (opt-in, in [LittleTreats], all OFF by default)** — two opt-in flows, each a complete loop: the player can swallow a kobold whole (digestion narrated to a real mind, ending per `SwallowEffect`: egg / belly-egg / absorb / destroy, with a no-cheat chat abort and force-feeding variant), and an agent can `eat_player` — taking over your camera to spectate its whole game session from inside until you hatch or abort. Grief guards keep player bodies safe everywhere except the explicit spectate act; a swallowed person is always kept alive as a mind and restored on their terms. Swallows are double-gated: **SwallowDestination** (F7 in-game, WebUI settings) picks where a held person goes in — off/mouth/anal/pussy/nipple — and OFF (the default) disarms the release triggers entirely, so a precision-grabber bump mid-walk can never start a digestion by accident. **Full mechanics, config and tests: [docs/VORE.md](docs/VORE.md).**
 - **Multiplayer handshake (mod-to-mod)** — with two modded clients in one room, the room's own player properties carry presence + claimed-body lists + beats: the kobold-LLM duty is SHARED (each client claims its share, no doubling), and a frozen peer's bodies become reclaimable by the survivor — the crash mitigation. See [docs/VORE.md](docs/VORE.md) for the multiplayer vore channel the same infrastructure carries.
 - **Station departures are events** — a per-second occupancy watcher narrates "[station] the player left the bed station — you are on it alone now" when a partner walks away from a shared station within perception range, so the one left behind notices without re-diffing slot text.
 
@@ -137,14 +137,22 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
   Perception reports nearby plants and cooking equipment.
 - **Identity** — per-NPC orientation, trans status, expressed persona. `rename` tool with
   uniqueness validation. Mailbox/ATM awareness (mail = selling/trading kobolds).
-- **Debug console in the browser (`[Web]`)** — the mod serves a read-only debug page on
-  the loopback (default `http://127.0.0.1:8338/`): one tab per agent with live goal /
-  facts / history / console terminal / thread state, plus the spectate status, the mod's
-  log tail and the AI-reports log. `/api/state` + `/api/reports` are JSON/plain
-  endpoints — a dev assistant with shell access can `curl` them mid-session to debug
-  with the agents in front of it. The snapshot thread reads only lock-guarded strings,
-  so the page answers even while the main thread is wedged. The F6 IMGUI overlay stays
-  for the in-game glance; `Enabled: false` returns to overlay-only.
+- **Debug console in the browser (`[Web]`)** — the in-game F6 IMGUI debug overlay was
+  removed; the browser page on the loopback (default `http://127.0.0.1:8338/`) is THE
+  debug surface now, and it grew a working side: **Settings** (every config key, live —
+  saved to the BepInEx config file), **Ops** (delete memory files, delete map/trail
+  data, reset settings to defaults — confirmation-gated), per-instance **start/stop/inject-say**
+  controls, and a **full stat dump** per kobold (`/api/instances`: genes, energy, egg
+  volume, position, penetration state, belly guests, skills, goal details, endpoint
+  health, model tier/family, …). Status tabs keep the live goal/facts/history/terminal,
+  the spectate status, the mod's log tail and the AI-reports log. Updates are
+  reader-friendly: unchanged boxes are never rewritten (scroll never resets), the
+  log and AI-reports boxes FREEZE while you are scrolled up (a hold bar appears;
+  scrolling back to the bottom flushes the held lines), an ⏸ pause button stops
+  polling, and the stats grid refreshes every ~6s. `/api/state` +
+  `/api/reports` remain curl-able for a dev assistant mid-session; the snapshot thread
+  reads only lock-guarded strings so the page answers even while the main thread is
+  wedged (the stat dump is a main-thread-built ~1.5s cache).
 - **Plans and executes (`plan` ladder)** — a goal stores WHAT to do; `plan <step>` stores
   the ordered HOW. Steps persist across turns (the state anchor carries the current one and
   `cat plan` shows them all), so a small model never re-derives its approach: set goal →
@@ -240,8 +248,16 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
 
 ## Install
 
-Drop `KKLLMNPC.dll` into `KoboldKare/BepInEx/plugins/`. First launch writes
-`BepInEx/config/com.kk.llmnpc.cfg`.
+Get a prebuilt zip from the GitHub **Releases** page
+(`KKLLMNPC-<version>_win/_linux/_macos.zip` — the payload is the same IL plugin on
+every OS; the platforms differ only in which BepInEx 5 build your KoboldKare host
+needs, and the zips know it: each carries an `INSTALL-<platform>.md`). BepInEx 5.4.22+
+for your OS is required and not bundled.
+
+Or from source: `./build.sh` compiles against your game install and deploys
+(`KKLLMNPC.dll` + the prompt files) into `BepInEx/plugins/`; `./make_release.sh`
+builds the per-platform release zips + release notes into `dist/`.
+First launch writes `BepInEx/config/com.kk.llmnpc.cfg`.
 
 ## Config (per instance)
 

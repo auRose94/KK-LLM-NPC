@@ -25,6 +25,12 @@ namespace KKLLMNPC
             public string Pronouns;  // the NPC's declared pronouns (set_pronouns); null = body default
             public List<string> Skills; // "name|step;step" lines
             public string SavedUtc;
+            // Body identity: gene fingerprint + species prefab name captured at save
+            // time. Restore refuses a record whose fingerprint doesn't match the body
+            // being bound — two bodies that serialize to the same object name (every
+            // spawned 'Kobold(Clone)' did) can no longer wake up as each other.
+            public string BodyFp;    // short hash of the body's gene fingerprint, may be null (legacy)
+            public string Species;   // the body's prefab/species name, may be null (legacy)
         }
 
         private static readonly object _lock = new object();
@@ -67,8 +73,11 @@ namespace KKLLMNPC
         // skills: the agent's SAVED PROCEDURES ("name|step;step") — part of the
         // body's record: restored on claim, transferred on swallow-absorb, riding
         // the rebirth copy (a hatched child egg wakes with the parent's skills).
+        // bodyFp/species: the body's identity stamp (gene-fingerprint hash + species
+        // name); validated at Load time by the claim path so a body can never wake
+        // up as a stranger who happened to share its serialized object name.
         internal static void Save(string bodyKey, string name, string persona, List<string> facts, string goal, string pronouns,
-            List<string> skills = null)
+            List<string> skills = null, string bodyFp = null, string species = null)
         {
             try
             {
@@ -88,6 +97,8 @@ namespace KKLLMNPC
                     foreach (var sk in skills) if (!string.IsNullOrEmpty(sk)) ss.Add(sk);
                     if (ss.Count > 0) d["skills"] = ss.ToArray();
                 }
+                if (!string.IsNullOrEmpty(bodyFp)) d["body_fp"] = bodyFp;
+                if (!string.IsNullOrEmpty(species)) d["species"] = species;
                 d["saved_utc"] = System.DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
                 lock (_lock)
                 {
@@ -97,6 +108,39 @@ namespace KKLLMNPC
                 }
             }
             catch (Exception) { }
+        }
+
+        // Filenames of every saved life (WebUI ops; "" when the dir is missing).
+        internal static List<string> ListFiles()
+        {
+            var outp = new List<string>();
+            try
+            {
+                if (Dir() == null || !System.IO.Directory.Exists(_dir)) return outp;
+                lock (_lock)
+                    foreach (var f in System.IO.Directory.GetFiles(_dir, "*.json"))
+                        outp.Add(System.IO.Path.GetFileName(f));
+            }
+            catch (Exception) { }
+            outp.Sort(StringComparer.OrdinalIgnoreCase);
+            return outp;
+        }
+
+        // Delete ALL saved lives ("delete memory files" op). Returns count removed.
+        internal static int DeleteAll()
+        {
+            int n = 0;
+            try
+            {
+                if (Dir() == null || !System.IO.Directory.Exists(_dir)) return 0;
+                lock (_lock)
+                    foreach (var f in System.IO.Directory.GetFiles(_dir, "*.json"))
+                    {
+                        try { System.IO.File.Delete(f); n++; } catch (Exception) { }
+                    }
+            }
+            catch (Exception) { }
+            return n;
         }
 
         // Erase a body's saved life entirely. Swallow-vore's no-rebirth modes
@@ -136,6 +180,8 @@ namespace KKLLMNPC
                 rec.Goal = raw.GetValueOrDefault("goal") as string;
                 rec.Pronouns = raw.GetValueOrDefault("pronouns") as string;
                 rec.SavedUtc = raw.GetValueOrDefault("saved_utc") as string;
+                rec.BodyFp = raw.GetValueOrDefault("body_fp") as string;
+                rec.Species = raw.GetValueOrDefault("species") as string;
                 if (raw.TryGetValue("skills", out var skObj) && skObj is List<object> skl)
                 {
                     rec.Skills = new List<string>();

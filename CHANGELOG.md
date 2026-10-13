@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-12
+
+### Fixed
+
+- **The memory-key collision (the big one).** A body's persistent identity was its
+  serialized object name — every spawned kobold of a species is `"Species(Clone)"`
+  under the hood, so EVERY kobold of the same species shared ONE memory file. Two
+  agents overwrote each other's saves ("saved 'Nibble' — 10 facts keyed to body
+  'Maomi'"), a hatched egg child woke up as a stranger whose stale record happened to
+  sit in the species file, and bodies "woke up here before" with other kobolds' facts.
+  Identity keys are now per-body: species + the gene bytes that never mutate on a
+  body (hue/saturation/brightness/clothing hue/species) + the Photon view id (the
+  game's world save restores view ids verbatim, so save-loaded bodies keep their key
+  across sessions). Every record also stamps the full gene fingerprint at save time
+  and restore REFUSES a body whose genes don't match it — a key collision can at
+  worst wake fresh, never as the wrong person. A claim scan also skips bodies whose
+  character is still loading (the game deactivates them and applies SAVED genes only
+  afterwards), and a 6-second late re-check re-runs the restore once real genes land.
+- **Who-ate-who.** Swallow narration used to name the ACTOR (the dropper — usually
+  "the player"), so a victim fed into an NPC remembered the player eating them. The
+  eater is now the star of every line ("Kira has me in their stomach — the player did
+  the feeding"), and BOTH sides write persistent facts (`eaten:` on the victim,
+  `ate:` on the eater) that ride saved lives and rebirth copies.
+- **Absorbed memories flood.** Grow-mode absorb appended the victim's whole raw fact
+  list — flooding the eater's 24-fact ring (evicting the eater's own knowledge) and
+  the disk record. The two lives now COMPACT into one merged record
+  (`MemoryCompaction`, unit-tested): the eater's facts win on category collisions
+  (duplicates die, not the budget), the digested life rides as one bounded
+  `absorbed:<name>: …` summary, and an egg-rebirth child gets its own life plus a
+  short taste of the carrier's — a compaction of the two.
+- **"This dick isn't mine."** A freshly-GAINED penis (Grow absorb) got misread as
+  someone else's: the equipment line was an unowned "penis" and any self-body
+  penetration misregistered named a partner. Equipment perception now says "YOUR OWN
+  penis", self-owned equipment is filtered out of partner lists, self-registering
+  parts are name-labeled as the own body in partner naming, and the eater writes a
+  persistent ownership fact about the gained groin at absorption.
+- **Name fallbacks.** The 3×25s name loop gave up constantly on a busy local server,
+  and reasoning models reply with meta prose ("I want time to think about it") that no
+  salvage rule caught — both collapsed into "fallback Kobold-100". Now five attempts
+  at 40s with deeper token-ladder rungs, a 1.5s breather between attempts, a hard
+  "TIME IS UP — answer NOW" demand prepended on late attempts, and the meta stalls
+  are named in the log instead of silently falling back.
+- **The per-boot HarmonyX warning is gone.** `AccessTools.TypeByName("Grabber")`
+  (mod grab-patch initialization) failed direct name resolution and HarmonyX fell
+  back to scanning every loaded assembly — where `UnityEngine.DirectorModule` blows
+  up enumerating its types (`VTable setup of type UnityEngine.Playables.PlayableDirector
+  failed`), producing the `[Warning: HarmonyX] AccessTools.GetTypesFromAssembly…`
+  noise on every plugin load. The mod compiles against `Assembly-CSharp`, so the
+  two lookups now use `typeof(Grabber)` directly — no fallback scan, no warning,
+  no wasted boot cost (a sweep found no other name-string type lookups in the mod).
+- **Server-side noise.** `HTTP 400 "Model is unloaded."` (a switched/unloaded llama
+  model) is classified as wait-and-retry-unchanged (3×4s) instead of being treated as
+  a payload-size problem and shrinking a perfect request; and `[LLM] ParallelCalls`
+  (default 2) caps process-wide concurrent LLM HTTP calls with queuing — the burst of
+  NPC POSTs against a serial local server was the source of most `WebException(Timeout)`
+  spam.
+
+### Changed
+
+- **Vore has an accident switch.** `[LittleTreats] SwallowDestination` (new,
+  default **Off**; also under the F7 hotkey and the WebUI settings tab) both picks
+  where a held person goes in (off/mouth/anal/pussy/dick/nipple — the pull targets the
+  chosen hole and every narration names it; **Dick is cock vore**, anchored on the
+  eater's actual penetrator with a groin fallback for the dickless) and, at Off,
+  disarms ALL release-triggered swallows: no look-up self-eat, no drop-near-a-head
+  force-feed. Full docs in [docs/VORE.md](docs/VORE.md).
+- **NPCs live on their own clock.** `[Autonomy]` (new category): after
+  `IdleInitiativeSeconds` (default 90s) with nothing addressing an NPC, a
+  self-initiative cue hands the turn to the NPC — which then moves, acts on its goal,
+  and speaks unprompted — and names nearby kobold agents so they find each other
+  without a player ferrying introductions. Unaddressed agent chat is now OVERHEARD by
+  earshot (`AgentOverhear`, default on; `AgentOverhearRadiusM` = 24 m) instead of
+  silenced, agent speech attribution is fixed to the speaking kobold (not the owner's
+  nick), the per-listener duet cap is configurable (`AgentChatPerMinute`, default 4),
+  and the `ps` roster carries what a sibling is actually doing.
+- **More memory, and it's yours to configure.** `[Memory] FactCap` (default 40, was a
+  fixed 24) and `[Memory] DefaultFacts` (a 10-line default world knowledge every fresh
+  NPC boots with — fully editable; seeded facts are disposable: a restored body swaps
+  them for its saved life, and they never decay out of context).
+- **Vector3 coordinates for navigation, where they exist.** On maps whose shared world
+  map is ready, the state anchor teaches the coords habit and `place:` facts with
+  numbers ("place: mailbox at x=12.3 z=45.6") become real `cd` targets
+  (FindPlaceByName resolves them anywhere; `too_far` still answers honestly where a
+  route can't be covered).
+- **The in-game F6 IMGUI debug overlay is GONE** — it had been dead wiring anyway
+  (`SetPlugin` was never called). The browser debug console is the only debug surface
+  now, and it grew the missing half: a **Settings** tab (every config entry, live,
+  saving to the BepInEx config file), an **Ops** tab (delete all/selected memory
+  files, delete map+trail data, reset settings to defaults — confirmation-gated),
+  per-instance start/stop/inject-say controls, and a **full stat dump** per kobold
+  (`/api/instances`, main-thread-built ~1.5s cache: genes, energy, egg volume,
+  position, penetration state, belly guests, skills, goal details, endpoint health,
+  model tier/family…). The spectate HUD (gameplay UX) survived the cleanup.
+
 ### Added
 - **A Requirements section heads the README**: BepInEx + an OpenAI-compatible chat
   server, with the three ways to host that server laid out at the top — a second GPU

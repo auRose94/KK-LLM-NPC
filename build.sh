@@ -61,6 +61,7 @@ if [ "$COMPILER" = "mcs" ]; then
       -r:"$MGMT/UnityEngine.AnimationModule.dll" \
       -r:"$MGMT/UnityEngine.TextRenderingModule.dll" \
       -r:"$MGMT/UnityEngine.UnityWebRequestModule.dll" \
+      -r:"$MGMT/UnityEngine.InputLegacyModule.dll" \
       -r:"$MGMT/UnityEngine.AudioModule.dll" \
       -r:"$MGMT/UnityEngine.VideoModule.dll" \
       -r:"$MGMT/UnityEngine.ImageConversionModule.dll" \

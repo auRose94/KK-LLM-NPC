@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.0.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.1.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -131,6 +131,9 @@ namespace KKLLMNPC
         internal ConfigEntry<int> _cfgFactDecay;
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
+        // Max concurrent LLM HTTP calls process-wide (local servers answer serially;
+        // SafeHttp queues extra callers). 0 = unlimited.
+        internal ConfigEntry<int> _cfgParallelCalls;
         internal ConfigEntry<float> _cfgFarmScanRadius;
         internal ConfigEntry<bool> _cfgWateringAssist;
         internal ConfigEntry<int> _cfgFarmScanMax;
@@ -195,6 +198,11 @@ namespace KKLLMNPC
         private float _lastReconcile;
         // [station] departure watcher heartbeat (per-instance occupancy diff).
         private float _lastStationWatch;
+        // WebUI rich per-kobold stat snapshots: rebuilt on the main thread at this
+        // cadence, served from cache by the HTTP thread.
+        private float _lastWebRichBuild;
+        // Session heartbeat (crash forensics) cadence.
+        private float _lastHeartbeat;
         // Top-up spawn throttle (SpawnMissingKobolds) + one-time gate log.
         private float _lastSpawnTry;
         private bool _spawnGateLogged;
@@ -255,11 +263,13 @@ namespace KKLLMNPC
             Log = Logger;
             Json.ErrorLog = msg => { try { Log?.LogWarning(msg); } catch (Exception) { } };
             
-            // Create a hidden GameObject for the overlay UI to work with OnGUI
+            // Spectate HUD host (the in-game DEBUG overlay was removed — the WebUI
+            // http://127.0.0.1:8338 is the debug surface now; this MonoBehaviour
+            // survives only because the spectate HUD is gameplay UX, not debug).
             var uiGO = new GameObject("KKLLMNPC_UIGameObject");
             UnityEngine.Object.DontDestroyOnLoad(uiGO);
             uiGO.hideFlags = HideFlags.HideAndDontSave;
-            uiGO.AddComponent<OverlayUI>();
+            uiGO.AddComponent<SpectateHudUI>();
             
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
             // Carry correctness: AI-body grabbers anchor held items on the AGENT'S eye
@@ -323,6 +333,32 @@ namespace KKLLMNPC
                 "[Web] port to bind the debug console on (127.0.0.1 only). Change it if it collides with another local service.");
             _cfgSwallowPov = Config.Bind("LittleTreats", "SwallowAgentEatPOV", SpectatePov.FirstPerson,
                 "[SwallowAgentEat] where the taken-over camera watches from: FirstPerson (default) = through the eater's OWN eyes — literally their head, with the same eye offset the AI's vision screenshots use, so you see exactly what the AI sees as it plays; ThirdPerson = a follow orbit behind them (pulls in when walls get between you). Applied when the next eat_player begins.");
+            _cfgSwallowDestination = Config.Bind("LittleTreats", "SwallowDestination", SwallowDestination.Off,
+                "WHERE a swallowed person goes in, and the master accident-switch: OFF (default) disarms ALL release-triggered swallows — grabbing a kobold with the PrecisionGrabber and bumping heads, or dropping them near another head, just drops them like normal. Mouth/Anal/Pussy/Dick/Nipple arm the trigger and aim the pull at that hole — Dick anchors on the EATER's own dick (cock vore, urethral entry; falls back to the groin for the dickless) — narration names it, the stomach outcome is unchanged. Cycle in-game with F7 (off→mouth→anal→pussy→dick→nipple→off) or set it in the WebUI settings tab. Requires SwallowEnabled too.");
+            // ---- autonomy (self-directed movement/speech, agent-to-agent chat) ----
+            _cfgIdleInitiative = Config.Bind("Autonomy", "IdleInitiativeSeconds", 90f,
+                "After this many seconds with no chat/event addressing the NPC, the mod injects a self-initiative cue: 'this is your own time — pick your own action' (with nearby kobold agents named so they find each other). The LLM then moves/speaks unprompted. 0 = off.");
+            _cfgAgentOverhear = Config.Bind("Autonomy", "AgentOverhear", true,
+                "NPC agents overhear each other's UNADDRESSED chat as [overheard] events when within AgentOverhearRadiusM — they can jump into a conversation or act on it without being named. (Addressed lines were always delivered.)");
+            _cfgAgentOverhearRadius = Config.Bind("Autonomy", "AgentOverhearRadiusM", 24f,
+                "Earshot radius (m) for agent-to-agent overhearing. Beyond this another agent's speech is not heard by this NPC at all.");
+            _cfgAgentChatPerMinute = Config.Bind("Autonomy", "AgentChatPerMinute", 4,
+                "Max agent speech lines one NPC ingests per minute (addressed + overheard combined) — the duet cap that keeps two LLM kobolds from echoing each other forever. Was hardcoded 2.");
+            // ---- memory: facts cap + seed facts ----
+            _cfgFactCap = Config.Bind("Memory", "FactCap", 40,
+                "How many facts one NPC keeps (live ring AND the saved-record restore cap; was a fixed 24). Facts dedupe one slot per 'category:' prefix, evicting oldest beyond this.");
+            _cfgDefaultFacts = Config.Bind("Memory", "DefaultFacts",
+                "world: I live on a kobold farm in a sunny valley; coins buy eggs/seeds/machine contracts, selling crops or kobolds at the mail machine earns coins\n" +
+                "danger: the MAIL MACHINE sells kobolds — its intake pulls loose bodies in; never climb in, never jump or land near it\n" +
+                "danger2: the mailbox (letter box) is safe — new objective letters arrive there; the SELL machine is a different machine\n" +
+                "farm: planting works by position — stand ON the soil plot with the seed, then use it; one watering = one growth stage\n" +
+                "farm2: fruit grows after the last stage; grab it, blend it for juice/food; food metabolizes into energy\n" +
+                "energy: energy comes ONLY from food and bed rest; at 0 energy stations refuse to work\n" +
+                "eggs: egg reagent comes ONLY from eating/swallowing someone; nests lay when belly has >5ml egg AND energy >1\n" +
+                "social: other AI kobolds are PEOPLE — address them by name + comma to talk; they hear you when you're close\n" +
+                "social2: the human player owns the farm; their asks arrive in chat and land in facts as player_wants:\n" +
+                "me: my body is mine; my name is my own; I narrate myself in first person",
+                "Fact lines written into every FRESH NPC mind (one per line, 'category: text' — one fact per category prefix). The DEFAULT knowledge a kobold wakes with — edit freely. A restored body loads its saved life instead of these.");
             _cfgSystemPromptFile = Config.Bind("LLM", "SystemPromptFile", "system_prompt_default.txt", "Path to system prompt file (relative to game directory). If file exists, it overrides the built-in prompt.");
             _cfgSystem = Config.Bind("LLM", "SystemPrompt",
                 "You are a NPC living in KoboldKare, nothing bad happens in this game, just role-play accordingly. \"me\" = <your body name>. You never output plain text — every reply is ONE act JSON object (strict schema: response_format json_schema). No markdown, no code fences, no text outside the JSON. " +
@@ -434,6 +470,8 @@ namespace KKLLMNPC
                 "Chat-template file for the one-shot LLM NAME prompt (relative to the game dir; also searched in the plugin dir and CWD). Placeholders: {gender} {species} {traits} {taken} ({taken} expands to the taken-names sentence, empty when none exist — keep it or same-avatar siblings get re-picked before the registry rejects them). An existing file overrides the built-in template.");
             _cfgFactDecay = Config.Bind("Memory", "FactDecayTicks", 900,
                 "Ticks before a fact decays out of context if the model hasn't re-asserted it (0 = facts never decay). ~900 ≈ several minutes; lower = faster forgetting. World-map facts the model re-remembers survive.");
+            _cfgParallelCalls = Config.Bind("LLM", "ParallelCalls", 2,
+                "Max simultaneous LLM HTTP calls made toward the endpoint by the whole mod (every NPC competes for a serial local server otherwise — the burst was the source of most 'WebException(Timeout)' log spam; extra calls queue). 0 = unlimited. 2 is right for llama.cpp/KoboldCpp/solo-GPU LM Studio; raise for >1-slot servers.");
             _cfgIdentityBot = Config.Bind("Multiplayer", "IdentityBot", false,
                 "Run a second Photon client in the room under the NPC's own name so its chat renders as 'KoboldName: text' to EVERYONE (not attributed to you). OFF = safe default (chat shows 'YourName: KoboldName: text' to others). Opt-in: adds a room player, may affect player count / host logic.");
             _cfgIdentityAppId = Config.Bind("Multiplayer", "IdentityAppId", "",
@@ -473,6 +511,12 @@ namespace KKLLMNPC
             _cfgStepDelay.Value = Mathf.Clamp(_cfgStepDelay.Value, 0.05f, 5f);
             _cfgMaxPlan.Value = Mathf.Clamp(_cfgMaxPlan.Value, 1, 8);
             _cfgCommentEvery.Value = Mathf.Max(0, _cfgCommentEvery.Value);
+            _cfgIdleInitiative.Value = Mathf.Clamp(_cfgIdleInitiative.Value, 0f, 3600f);
+            _cfgAgentOverhearRadius.Value = Mathf.Clamp(_cfgAgentOverhearRadius.Value, 3f, 200f);
+            _cfgAgentChatPerMinute.Value = Mathf.Clamp(_cfgAgentChatPerMinute.Value, 1, 30);
+            _cfgFactCap.Value = Mathf.Clamp(_cfgFactCap.Value, 12, 120);
+            _cfgParallelCalls.Value = Mathf.Clamp(_cfgParallelCalls.Value, 0, 8);
+            SafeHttp.SetMaxParallel(_cfgParallelCalls.Value);
             _cfgMaxNPCs.Value = Mathf.Clamp(_cfgMaxNPCs.Value, Consts.MinNPCs, Consts.MaxNPCs);
             _cfgChatLogLines.Value = Mathf.Clamp(_cfgChatLogLines.Value, 0, 200);
             _cfgVisionEvery.Value = Mathf.Max(1, _cfgVisionEvery.Value);
@@ -544,7 +588,6 @@ namespace KKLLMNPC
             // No instances are pre-created: the pool reconciles itself in Update() —
             // an instance starts when an AI kobold target exists and is removed when
             // its body is destroyed/sold/lost (see ReconcileInstances).
-            InitOverlay();
             Logger.LogInfo("KKLLMNPC: ready — instances start when AI kobold targets exist (MaxNPCs=" + Mathf.Clamp(_cfgMaxNPCs.Value, Consts.MinNPCs, Consts.MaxNPCs) + ", SpawnMissingKobolds=" + _cfgSpawnMissing.Value + ").");
         }
 
@@ -701,6 +744,47 @@ namespace KKLLMNPC
                 EnsureHangWatcher(this);
             }
 
+            // Delayed main-thread one-shots (delayed body-memory rechecks, op queues).
+            DrainDelayedMainActions();
+
+            // Vore destination hotkey: F7 cycles  OFF -> mouth -> anal -> pussy ->
+            // nipple -> OFF  (the "not an accident" control: with OFF nothing swallows
+            // — no release-look-up self-eat, no drop-near-a-head force-feed). Announce
+            // in chat so it's visible without opening any menu.
+            HandleVoreDestinationHotkey();
+
+            // WebUI rich per-kobold stat snapshots are built HERE (main thread — gene/
+            // transform reads) and served from cache by the HTTP thread.
+            if (Time.unscaledTime - _lastWebRichBuild > 1.5f)
+            {
+                _lastWebRichBuild = Time.unscaledTime;
+                HangGuard("WebRichSnapshot", () => { try { WebUI.BuildRichSnapshot(this); } catch (Exception) { } });
+            }
+
+            // SESSION HEARTBEAT (crash forensics): a one-line session state stamp
+            // every 60s. The 2026-10-12 session died with no exception, no dump and
+            // no signal anywhere — the heartbeat gives the next such event a
+            // last-known-state line right before the end of every log.
+            if (Time.unscaledTime - _lastHeartbeat > 60f)
+            {
+                _lastHeartbeat = Time.unscaledTime;
+                try
+                {
+                    int alive = 0, fails = 0;
+                    lock (_instancesLock)
+                        foreach (var npc in _instances)
+                        {
+                            try { if (npc.IsThreadAlive) alive++; } catch (Exception) { }
+                            try { fails = Math.Max(fails, npc.EndpointFails()); } catch (Exception) { }
+                        }
+                    string mapStatus = "?";
+                    try { mapStatus = WorldMap.StatusText(); } catch (Exception) { }
+                    Logger.LogInfo("KKLLMNPC: heartbeat — instances=" + _instances.Count + " threadsAlive=" + alive + " phase='" + (MainPhase ?? "?")
+                        + "' worstEndpointFails=" + fails + " map=" + mapStatus + " scene='" + (_lastSceneName ?? "?") + "'");
+                }
+                catch (Exception) { }
+            }
+
             // Config hot-reload.
             if (_cfgReloadQueued && _mainReady)
             {
@@ -709,11 +793,9 @@ namespace KKLLMNPC
                 {
                     Config.Reload();
                     Logger.LogInfo("KKLLMNPC: config reloaded.");
-                    // Rebuild cameras if capture settings changed.
-                    lock (_instancesLock)
-                    {
-                        foreach (var npc in _instances) npc.MaybeRebuildCamera();
-                    }
+                    lock (_instancesLock) { foreach (var npc in _instances) npc.MaybeRebuildCamera(); }
+                    // Re-apply the process-wide HTTP gate — a live edit of ParallelCalls.
+                    try { SafeHttp.SetMaxParallel(_cfgParallelCalls != null ? _cfgParallelCalls.Value : 0); } catch (Exception) { }
                 }
                 catch (Exception e) { Logger.LogWarning("cfg reload: " + e.Message); }
             }
@@ -847,6 +929,32 @@ namespace KKLLMNPC
             }
         }
 
+        // F7 cycles the swallow destination (off → mouth → anal → pussy → nipple →
+        // off) — the "never eat someone by accident" control the user asked for.
+        // Announces in the game's chat panel so it's visible without any menu, and
+        // persists to config (ConfigFile.Save) so it survives the session.
+        private void HandleVoreDestinationHotkey()
+        {
+            try
+            {
+                if (!Input.GetKeyDown(KeyCode.F7)) return;
+                var cfg = _cfgSwallowDestination;
+                if (cfg == null) return;
+                var next = SwallowLogic.NextDestination(cfg.Value);
+                cfg.Value = next;
+                try { Config.Save(); } catch (Exception) { }
+                string line;
+                if (next == SwallowDestination.Off)
+                    line = "[KKLLMNPC] vore OFF — nothing swallows (F7 to arm a destination)";
+                else
+                    line = "[KKLLMNPC] vore destination: " + SwallowLogic.DestinationLabel(next)
+                        + " — held-person releases can swallow into that hole (F7 cycles)";
+                try { CheatsProcessor.AppendText(line + "\n"); } catch (Exception) { }
+                try { Logger.LogInfo("vore destination set to '" + SwallowLogic.DestinationLabel(next) + "' (F7)"); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
         private void OnDestroy()
         {
             _running = false;
@@ -938,13 +1046,61 @@ namespace KKLLMNPC
 
                         bool isAgentSpeech = agentOrigin && !senderIsSelf;
                         if (isAgentSpeech && !npc.BotChatAllowed()) continue; // duet cap
-                        try { npc.HandleChat(rest, senderName, isLocal && !agentOrigin); addressedAny = true; }
+                        // Attribution fix: agent speech used to be heard as
+                        // "OwnerNick: rest" (the photon sender nick) — when the line
+                        // is one of OUR agents speaking, name THAT agent as the sender
+                        // so siblings hear "Kira: ..." instead of "Rosemary: ...".
+                        try { npc.HandleChat(rest, isAgentSpeech && agentName != null ? agentName : senderName, isLocal && !agentOrigin); addressedAny = true; }
                         catch (Exception) { }
                     }
                     if (addressedAny) return;
 
-                    // Unaddressed lines broadcast — but only from REAL players; agent
-                    // chatter that nobody addressed stays silent (no room-wide duets).
+                    // UNADDRESSED agent chatter used to be silent to other agents ("no
+                    // room-wide duets") — but that also meant kobolds could never hear
+                    // each other unless formally addressed, which made the world feel
+                    // dead between player visits. Deliver it now as OVERHEARD events
+                    // ([Autonomy] AgentOverhear): recorded, distance-gated, duet-capped,
+                    // explicitly "not addressed to you" so a reply is never demanded.
+                    if (agentOrigin && agentName != null)
+                    {
+                        try
+                        {
+                            var cfgOverhear = _cfgAgentOverhear;
+                            float earshot = _cfgAgentOverhearRadius != null ? _cfgAgentOverhearRadius.Value : 24f;
+                            foreach (var npc in _instances)
+                            {
+                                string myName = null;
+                                try { myName = npc.GetMyName(); } catch (Exception) { }
+                                if (myName != null && string.Equals(agentName, myName, StringComparison.OrdinalIgnoreCase)) continue;
+                                try { if (npc.IsMySpeech(msg)) continue; } catch (Exception) { }
+                                if (cfgOverhear == null || !cfgOverhear.Value) break;
+                                if (!npc.BotChatAllowed()) continue; // same duet cap as addressed
+                                if (earshot > 0f)
+                                {
+                                    try
+                                    {
+                                        var listenerKb = npc.KoboldOrNull;
+                                        Kobold speakerKb = null;
+                                        foreach (var other in _instances)
+                                        {
+                                            string nm = null;
+                                            try { nm = other.GetMyName(); } catch (Exception) { }
+                                            if (nm != null && string.Equals(agentName, nm, StringComparison.OrdinalIgnoreCase)) { speakerKb = other.KoboldOrNull; break; }
+                                        }
+                                        if (listenerKb != null && speakerKb != null
+                                            && Vector3.Distance(listenerKb.transform.position, speakerKb.transform.position) > earshot)
+                                            continue; // out of earshot
+                                    }
+                                    catch (Exception) { } // positions unavailable — deliver anyway
+                                }
+                                try { npc.HandleAmbientAgentLine(agentName, msg); } catch (Exception) { }
+                            }
+                        }
+                        catch (Exception) { }
+                    }
+                    if (agentOrigin) return; // agent speech never falls through to the player broadcast path
+
+                    // Unaddressed lines broadcast — from REAL players.
                     if (!agentOrigin)
                         foreach (var npc in _instances)
                             try { npc.HandleChat(msg, senderName, isLocal); } catch (Exception) { }
@@ -1230,6 +1386,35 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("RunOnMainThreadAsync: " + e.Message); }
         }
 
+        // Delayed main-thread action (wall-clock delay; drained by Update). Used for
+        // one-shot later bindings — e.g. the body-memory re-check that waits for the
+        // game's deferred character load to settle genes.
+        private sealed class DelayedMainAction { public float Due; public Action Fn; }
+        private static readonly object _delayedLock = new object();
+        private static readonly List<DelayedMainAction> _delayed = new List<DelayedMainAction>();
+        internal void RunOnMainThreadLater(float delaySeconds, Action fn)
+        {
+            if (fn == null) return;
+            lock (_delayedLock)
+                _delayed.Add(new DelayedMainAction { Due = Time.unscaledTime + Mathf.Max(0.05f, delaySeconds), Fn = fn });
+        }
+
+        private void DrainDelayedMainActions()
+        {
+            lock (_delayedLock)
+            {
+                if (_delayed.Count == 0) return;
+                float now = Time.unscaledTime;
+                for (int i = _delayed.Count - 1; i >= 0; i--)
+                {
+                    var d = _delayed[i];
+                    if (now < d.Due) continue;
+                    _delayed.RemoveAt(i);
+                    SafeRun(d.Fn);
+                }
+            }
+        }
+
         private static void SafeRun(Action fn)
         {
             try { fn(); } catch (Exception e) { Debug.LogError(e); }
@@ -1284,105 +1469,21 @@ namespace KKLLMNPC
             _lastSceneName = key;
             Logger.LogInfo("KKLLMNPC: idle (" + key + ").");
         }
-
-        // ------------------------------------------------------------------
-        // IMGUI overlay rendering - called from OverlayUI.OnGUI()
-        // ------------------------------------------------------------------
-        internal void OnGUICallback()
-        {
-            if (!_overlayVisible) return;
-            
-            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.F6)
-            {
-                _overlayVisible = !_overlayVisible;
-                Event.current.Use();
-            }
-            if (!_overlayVisible) return;
-
-            // Draw the overlay content directly without GUI.Window
-            float x = 10, y = 25, w = _overlayRect.width - 20;
-            
-            // --- Tab bar ---
-            y += DrawTabBar(x, y, w);
-
-            // --- Content (scrollable) ---
-            // Tab indices: 0=State 1=Mind 2=Config 3=Instances (matches DrawTabBar).
-            // Config height is dynamic-ish (reflection list ~50 entries × 18px).
-            float contentHeight = _activeTab == 2 ? 1000 : (_activeTab == 3 ? 200 : (_activeTab == 1 ? 340 : 150));
-            float scrollH = _overlayRect.height - y - 10;
-            _configScrollY = Mathf.Clamp(_configScrollY, 0, Mathf.Max(0, contentHeight - scrollH));
-
-            GUI.BeginGroup(new Rect(x, y, w, scrollH), null, null);
-            float cy = -_configScrollY;
-
-            switch (_activeTab)
-            {
-                case 0: cy += DrawStateSection(x, cy, w); break;
-                case 1: cy += DrawMindSection(x, cy, w); break;
-                case 2: cy += DrawConfigSection(x, cy, w); break;
-                case 3: cy += DrawInstancesSection(x, cy, w); break;
-            }
-
-            if (!string.IsNullOrEmpty(_overlayStatus))
-            {
-                GUI.contentColor = new Color(0.8f, 0.9f, 0.4f);
-                GUI.Label(new Rect(6, cy + 4, w, 14), _overlayStatus);
-                GUI.contentColor = Color.white;
-                cy += 16;
-            }
-
-            GUI.EndGroup();
-
-            // Scrollbar
-            if (contentHeight > scrollH)
-            {
-                float sbX = x + w - 14;
-                float sbY = y;
-                float sbW = 12;
-                
-                Rect trackUp = new Rect(sbX, sbY, sbW, _configScrollY);
-                Rect trackDown = new Rect(sbX, sbY + _configScrollY, sbW, scrollH - _configScrollY);
-                if (Event.current.type == EventType.MouseDown && Event.current.button == 0)
-                {
-                    if (trackUp.Contains(Event.current.mousePosition))
-                        _configScrollY -= scrollH * 0.5f;
-                    if (trackDown.Contains(Event.current.mousePosition))
-                        _configScrollY += scrollH * 0.5f;
-                }
-            }
-
-            // Mouse wheel scroll
-            if (Event.current.type == EventType.ScrollWheel && _overlayRect.Contains(Event.current.mousePosition))
-            {
-                _configScrollY -= Event.current.delta.y * 15;
-                _configScrollY = Mathf.Clamp(_configScrollY, 0, Mathf.Max(0, contentHeight - scrollH));
-                Event.current.Use();
-            }
-
-            // Drag handle at bottom
-            GUI.DragWindow(new Rect(0, _overlayRect.height - 12, _overlayRect.width, 12));
-        }
-
     }
 }
 
-// Separate class outside the plugin so it can be used as a MonoBehaviour component
 namespace KKLLMNPC
 {
-    public class OverlayUI : MonoBehaviour 
+    // Spectate HUD only — the in-game debug overlay was REMOVED (the WebUI at
+    // http://127.0.0.1:8338 handles settings/stats/ops now, and did it better:
+    // the old IMGUI config editor's SetPlugin wiring was dead code anyway).
+    // This MonoBehaviour survives because the spectate HUD is gameplay UX: while
+    // a swallow holds the local player they must know why their camera lives
+    // behind another kobold and how to get out.
+    public class SpectateHudUI : MonoBehaviour
     {
-        private LLMNPCPlugin _plugin;
-
-        public void SetPlugin(LLMNPCPlugin plugin)
-        {
-            _plugin = plugin;
-        }
-
         private void OnGUI()
         {
-            // Spectate HUD — drawn every frame while a swallow holds the local
-            // player, independent of the F6 overlay: they must know why their
-            // camera lives behind another kobold and how they get out.
             try
             {
                 string hud = SpectateManager.HudText();
@@ -1395,9 +1496,6 @@ namespace KKLLMNPC
                 }
             }
             catch (Exception) { }
-            // This will be called by Unity because OverlayUI extends MonoBehaviour
-            if (_plugin != null) _plugin.OnGUICallback();
         }
     }
 }
-

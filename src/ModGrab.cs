@@ -35,7 +35,14 @@ namespace KKLLMNPC
             _patched = true;
             try
             {
-                var grabberType = AccessTools.TypeByName("Grabber");
+                // typeof, NOT AccessTools.TypeByName: TypeByName misses the name-only
+                // resolution and falls back to scanning EVERY loaded assembly —
+                // UnityEngine.DirectorModule throws a VTable TypeLoadException during
+                // that scan and HarmonyX emits the "[Warning: HarmonyX]
+                // AccessTools.GetTypesFromAssembly … PlayableDirector" warning on every
+                // plugin boot. The mod compiles against Assembly-CSharp, so the type is
+                // one typeof away.
+                var grabberType = typeof(Grabber);
                 if (grabberType == null)
                 {
                     LLMNPCPlugin.Log?.LogWarning("modgrab: Grabber type not found — carry patches skipped");
@@ -168,7 +175,9 @@ namespace KKLLMNPC
         {
             try
             {
-                foreach (var t in AccessTools.TypeByName("Grabber").GetNestedTypes(BindingFlags.NonPublic | BindingFlags.Public))
+                // typeof — see Apply: TypeByName's all-assembly fallback scan is what
+                // produced the HarmonyX DirectorModule warning per boot.
+                foreach (var t in typeof(Grabber).GetNestedTypes(BindingFlags.NonPublic | BindingFlags.Public))
                     if (t.Name == "GrabInfo") return t;
             }
             catch (Exception) { }

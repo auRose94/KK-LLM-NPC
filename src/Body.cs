@@ -144,6 +144,11 @@ namespace KKLLMNPC
                 foreach (var k in SceneCache.Find<Kobold>(2f))
                 {
                     if (k == null) continue;
+                    // Character still loading? The game DEACTIVATES a body while its
+                    // descriptor loads assets (and only applies SAVED genes after) —
+                    // claiming now would fingerprint seed-default genes and wake the
+                    // person as a stranger. Wait for active; the scan re-runs shortly.
+                    try { if (!k.gameObject.activeInHierarchy) continue; } catch (Exception) { }
                     total++;
                     int id = k.GetInstanceID();
                     if (LLMNPCPlugin.IsClaimedByAnyLLM(id)) { claimed++; continue; }
@@ -259,14 +264,28 @@ namespace KKLLMNPC
                 // life one think tick later.
                 _pendingMindReset = null;
                 ResetMindNow("fresh body");
+                SeedDefaultFacts();
                 _npcName = PickName(target);   // base: prefab name — the LLM finalizes
-                // A body seen before (same scene save, an earlier session) wakes as
-                // the SAME person: load its saved life instead of rebuilding persona
-                // and re-asking the LLM for a name.
-                if (!TryRestoreBodyMemory(target, BodyKey(target)))
+                // Capture the body identity NOW (gene fingerprint + key) so every
+                // save/restore/match keys the same body the same way, and remember
+                // the key we tried (the late re-check compares against it).
+                _boundBodyFp = BodyFullFp(target); // genes may be mid-load; re-stamped below
+                _identityKeyMemo = BodyKey(target);
+                if (!TryRestoreBodyMemory(target, _identityKeyMemo))
                 {
                     _persona = BuildPersona(); // it in FinalizeIdentity (LLM thread) so
                                                // the main thread never blocks on HTTP
+                    // The saved genes may land a few seconds after the body binds
+                    // (deferred character load) — try again once they settle.
+                    try
+                    {
+                        Plugin.RunOnMainThreadLater(6f, () =>
+                        {
+                            try { if (IsAlive(target)) _boundBodyFp = BodyFullFp(target); } catch (Exception) { }
+                            try { LateMemoryRecheck(target, _identityKeyMemo); } catch (Exception) { }
+                        });
+                    }
+                    catch (Exception) { }
                 }
             }
             // WAKE CONTEXT (no moving!): a body that woke up inside/next to a bed gets
@@ -336,14 +355,83 @@ namespace KKLLMNPC
             });
         }
 
-        // Persistent identity key for a body — the kobold's own serialized object
-        // name, which lives in the world save. Two sessions meet the same body here.
-        // internal — SwallowManager copies a swallowed body's record onto the reborn
-        // body's key at hatching time.
-        internal static string BodyKey(Kobold k) => TextUtil.AsciiSafe(CleanName(k.name));
+        // Persistent identity key for a body. The old key was JUST the serialized
+        // object name — every spawned body of one species is named "Species(Clone)",
+        // so every kobold of a species shared ONE memory file: a hatched child
+        // claimed a stranger's stale record, two agents overwrote each other's
+        // saves, and "who woke up here before" was a coin flip.
+        //
+        // The key now blends three stable things:
+        //   species — the prefab name (still survives the world save, and changes
+        //             when a body is a different species);
+        //   identity genes — the gene bytes that NEVER mutate on a body (hue,
+        //             saturation, brightness, clothing hue, species index): sizes
+        //             and groins grow through play/absorption, so they must NOT be
+        //             part of a body's identity, or every grown kobold would wake
+        //             up a stranger;
+        //   photon view id — distinguishes the seeded-identical twins a mod/dispenser
+        //             can spawn (same name → same seeded randomize), and the game's
+        //             world save restores view ids verbatim (SaveManager), so a
+        //             save-loaded body keeps its key across sessions.
+        // All call sites (swallow, rebirth, absorb) key records through this.
+        internal static string BodyKey(Kobold k)
+        {
+            try
+            {
+                string species = CleanName(k.name);
+                if (string.IsNullOrEmpty(species)) species = "Kobold";
+                string idPart = "unknown";
+                int viewId = 0;
+                try { viewId = k.photonView != null ? k.photonView.ViewID : 0; } catch (Exception) { }
+                // Immutable identity bytes: hue/sat/bright/clothingHue/species.
+                byte hue = 0, sat = 128, bright = 128, cloth = 0;
+                try
+                {
+                    var g = k.GetGenes();
+                    if (g != null) { hue = g.hue; sat = g.saturation; bright = g.brightness; cloth = g.clothingHue; }
+                }
+                catch (Exception) { }
+                idPart = Hash16(hue, sat, bright, cloth) + "-" + viewId.ToString(CultureInfo.InvariantCulture);
+                return TextUtil.AsciiSafe(species + "-" + idPart);
+            }
+            catch (Exception)
+            {
+                try { return TextUtil.AsciiSafe(CleanName(k.name)); } catch (Exception) { return null; }
+            }
+        }
+
+        // 64-bit FNV-1a over the identity bytes (two lanes, different seeds) → hex.
+        private static string Hash16(byte a, byte b, byte c, byte d)
+        {
+            ulong h1 = 14695981039346656037UL, h2 = 1099511628211UL;
+            byte[] vals = { a, b, c, d };
+            foreach (byte v in vals)
+            {
+                h1 ^= v; h1 *= 1099511628211UL;
+                h2 ^= (byte)(v + 0x5b); h2 *= 1469598103934665603UL;
+            }
+            return h1.ToString("x8", CultureInfo.InvariantCulture) + h2.ToString("x8", CultureInfo.InvariantCulture);
+        }
+
+        // The body's FULL gene fingerprint — the volatile whole (sizes, groin, grab
+        // slots). Stored INSIDE each record at save time so a key collision between
+        // two bodies can still be told apart at restore (the record refuses a body
+        // whose current genes don't match what was saved under it).
+        internal static string BodyFullFp(Kobold k)
+        {
+            try { return NPCInstance.GenesFingerprint(k.GetGenes()); } catch (Exception) { return null; }
+        }
+
+        // Body identity captured at bind: the full gene fingerprint + species, for
+        // record stamping/validation.
+        private string _boundBodyFp;
+        // The identity key this bind used (the late re-check compares against it —
+        // when the deferred character load settles the saved genes, the key moves).
+        private string _identityKeyMemo;
 
         // Snapshot the current body's life to disk (teardown path: sold, lost,
-        // world change). Facts/goal/persona, keyed by the body.
+        // world change). Facts/goal/persona, keyed by the body's identity key and
+        // stamped with its gene fingerprint (restore validates the stamp).
         private void SaveBodyMemory()
         {
             try
@@ -356,28 +444,60 @@ namespace KKLLMNPC
                 // least wakes up as the same person, not a renamed stranger.
                 var facts = new List<string>();
                 lock (_facts) foreach (var f in _facts) facts.Add(f.Text);
-                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal, _pronounsOverride, SkillsSnapshotLines());
+                string fp = _boundBodyFp;
+                if (string.IsNullOrEmpty(fp)) fp = BodyFullFp(_kobold);
+                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal, _pronounsOverride, SkillsSnapshotLines(),
+                    bodyFp: fp, species: BodySpecies(_kobold));
                 try { Logger.LogInfo("KKLLMNPC: saved '" + _npcName + "' — " + facts.Count + " facts keyed to body '" + bodyKey + "'"); } catch (Exception) { }
             }
             catch (Exception) { }
         }
 
+        // The body's species/prefab label ("Kobold", "Maomi") for record stamping.
+        private static string BodySpecies(Kobold k)
+        {
+            try { string s = CleanName(k.name); return string.IsNullOrEmpty(s) ? "kobold" : s; }
+            catch (Exception) { return "kobold"; }
+        }
+
         // Fresh-bind restore: load the body's saved life. False → no record, wake fresh.
+        // The record's gene-fingerprint stamp must match the body being bound — two
+        // bodies that serialize to the same key (seeded-identical spawns) may still
+        // be told apart by their full genes at restore time.
         private bool TryRestoreBodyMemory(Kobold target, string bodyKey)
         {
             try
             {
                 var rec = MemoryStore.Load(bodyKey);
                 if (rec == null) return false;
+                // Stranger-proofing: the record knows ITS body's full gene fingerprint.
+                // A key collision (genetically identical spawn claiming an old body's
+                // identity) fails here and wakes fresh instead of resurrecting someone
+                // else. Grown bodies match their own last save (the game persists the
+                // grown genes too).
+                string myFp = BodyFullFp(target);
+                string mySpecies = BodySpecies(target);
+                if (!string.IsNullOrEmpty(rec.BodyFp) && !string.IsNullOrEmpty(myFp)
+                    && !string.Equals(rec.BodyFp, myFp, StringComparison.Ordinal))
+                {
+                    try { Logger.LogWarning("KKLLMNPC: body-key restore refused — record under '" + bodyKey + "' was saved for different genes (a different body); waking fresh"); } catch (Exception) { }
+                    return false;
+                }
+                if (!string.IsNullOrEmpty(rec.Species) && !string.Equals(rec.Species, mySpecies, StringComparison.Ordinal))
+                {
+                    try { Logger.LogWarning("KKLLMNPC: body-key restore refused — record under '" + bodyKey + "' belongs to species '" + rec.Species + "'"); } catch (Exception) { }
+                    return false;
+                }
                 // The recorded name IS this body's own past name — the flat names
                 // file never releases reservations, so IsTaken would permanently
                 // block every restore. Reclaim it instead (MarkTaken is the
                 // NameRegistry comment's documented "re-claiming our own" path).
                 // A genuinely stolen name (a LIVE different body wearing it) still
-                // refuses below.
-                lock (_facts) if (_facts.Count > 0 || _tick > 3) return false; // already live as someone else
+                // refuses below. Seed facts don't count as a lived life.
+                if (HasRealFacts() || _tick > 3) return false; // already live as someone else
                 int liveBody = BodyIdForAgentName(rec.Name);
                 if (liveBody >= 0 && liveBody != _currentKoboldId) return false; // another agent owns that name right now
+                DropSeedFacts(); // the saved life replaces the boot seeds
                 _npcName = rec.Name;
                 NameRegistry.MarkTaken(_npcName);
                 _persona = rec.Persona;
@@ -396,6 +516,32 @@ namespace KKLLMNPC
                 return true;
             }
             catch (Exception) { return false; }
+        }
+
+        // Late re-check (main thread, ~6s after bind): a save-loaded body binds
+        // BEFORE the game applied its saved genes (deferred character load) — the
+        // identity key we tried at bind time was computed from seed defaults. Once
+        // the real genes settle the key moves; if we woke as a blank slate, try the
+        // restore again under the real key.
+        private void LateMemoryRecheck(Kobold target, string triedKey)
+        {
+            try
+            {
+                if (target == null || !IsAlive(target) || _kobold != target) return;
+                string keyNow = BodyKey(target);
+                if (string.IsNullOrEmpty(keyNow) || string.Equals(keyNow, triedKey, StringComparison.Ordinal))
+                {
+                    _identityKeyMemo = keyNow; // settled — keep it as the stamp key
+                    return; // unchanged: the first attempt already covered it
+                }
+                if (HasRealFacts()) { _identityKeyMemo = keyNow; return; } // someone's life is live already
+                try { if (_identityFinalized) return; } catch (Exception) { }
+                _identityKeyMemo = keyNow;
+                Logger.LogInfo("KKLLMNPC: body identity settled late ('" + triedKey + "' -> '" + keyNow + "') — rechecking saved memory");
+                if (!TryRestoreBodyMemory(target, keyNow))
+                    _persona = BuildPersona(); // still no record — don't leave the body blank
+            }
+            catch (Exception e) { try { Logger.LogWarning("late memory recheck: " + e.Message); } catch (Exception) { } }
         }
 
         // Detect (never move) the wake context: when a body's spawn point lies right
@@ -752,9 +898,9 @@ namespace KKLLMNPC
                 else hole = "none";
 
                 var parts = new List<string>();
-                if (penis) parts.Add("penis");
-                if (penetrables > 0) parts.Add(hole + " penetrable" + (penetrables > 1 ? "s" : ""));
-                if (g.breastSize > 0.15f) parts.Add("breasts");
+                if (penis) parts.Add("YOUR OWN penis"); // gained or bred — it is never someone else's
+                if (penetrables > 0) parts.Add(hole + " penetrable" + (penetrables > 1 ? "s" : "") + " (yours: vagina/an ass/tits — feel names them)");
+                if (g.breastSize > 0.15f) parts.Add("breasts (yours)");
                 if (parts.Count == 0) parts.Add("none");
                 return new { with = string.Join("+", parts.ToArray()), penis, penetrables };
             }
@@ -1340,6 +1486,14 @@ namespace KKLLMNPC
                     {
                         var st = kv.Value;
                         if (now - st.lastT >= 3f) continue;
+                        // Own equipment registering against own holes is a misread of a
+                        // gained/bred body — it is never a partner.
+                        try
+                        {
+                            var ownKb = st.src != null ? st.src.GetComponentInParent<Kobold>() : null;
+                            if (ownKb != null && _kobold != null && ownKb == _kobold) continue;
+                        }
+                        catch (Exception) { }
                         int pid = PartnerId(st.src);
                         int key = pid > 0 ? pid : (st.src != null ? st.src.GetInstanceID() : 0);
                         if (!seen.Add(key)) continue;
@@ -1353,6 +1507,12 @@ namespace KKLLMNPC
                     {
                         var st = kv.Value;
                         if (now - st.lastT >= 3f) continue;
+                        try
+                        {
+                            var ownKb = st.src != null ? st.src.GetComponentInParent<Kobold>() : null;
+                            if (ownKb != null && _kobold != null && ownKb == _kobold) continue;
+                        }
+                        catch (Exception) { }
                         int pid = PartnerId(st.src);
                         int key = pid > 0 ? pid : (st.src != null ? st.src.GetInstanceID() : 0);
                         if (!seen.Add(key)) continue;
@@ -1376,6 +1536,12 @@ namespace KKLLMNPC
                 if (src == null) return fallback;
                 var kb = src.GetComponentInParent<Kobold>();
                 if (kb == null) return fallback;
+                // THE OWN BODY IS NEVER A PARTNER: a freshly GAINED penis spawns at this
+                // body's own crotch (and a body-load re-applies it) — without this the
+                // partner render read "Kira is inside me" where Kira was ME, and the
+                // mind concluded its new dick belonged to someone else. Name the truth.
+                if (_kobold != null && kb == _kobold)
+                    return "your OWN body (your own equipment — ignore this line, it is not a partner)";
                 if (IsPlayerKobold(kb))
                 {
                     string chat = PlayerChatName();

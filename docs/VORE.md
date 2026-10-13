@@ -13,6 +13,21 @@ outcome, never lost, and no way to cheat their way out silently.
 - **Trigger**: grab a kobold, aim steeply up (`SwallowLookUpDot`, default ≈70°+, near
   max-up so a casual drop can never trigger it), drop — you swallow them whole instead
   of dropping.
+## Where they go in (`SwallowDestination` — off/mouth/anal/pussy/nipple)
+
+- **`Off` is the default and the accident switch**: with it, no release-triggered
+  swallow arms at all — a held kobold dropped near another head (precision-grabber
+  bump while carrying included) just drops like normal.
+- A picked hole arms the gestures and **aims the pull at that hole** (bone-anchored on
+  the eater's body); narration names the entry everywhere ("taken in through the ass",
+  unbirth phrasing for pussy, the breast for nipple) and the stomach outcome/fate is
+  unchanged.
+- **Dick (cock vore / urethral entry)** anchors on the EATER's actual dick (the game's
+  penetrator object), falling back to a groin point for the dickless — a gained-dick
+  eater uses their new equipment from the moment it grows.
+- Cycle in-game with **F7** (off → mouth → anal → pussy → dick → nipple → off) — the
+  toast lands in chat — or set it from the WebUI settings tab.
+
 - **Digestion**: they ride into your mouth (~2 s) and are **hidden once fully swallowed**
   (no sticking-out clipping). Their LLM keeps narrating from inside, steering gated; the
   digestion is narrated to them as events.
@@ -105,6 +120,7 @@ nothing moves.
 | `SwallowDigestSeconds` | 45 | digest duration |
 | `SwallowLookUpDot` | ≈0.94 | how steep the drop-look-up must be to trigger |
 | `SwallowForceFeeding` | true | the head-shove release path |
+| `SwallowDestination` | Off | entry hole + master switch (F7: off/mouth/anal/pussy/dick/nipple); Off disarms all release triggers; Dick anchors on the eater's own groin |
 | `SwallowEffect` | Egg | Egg / BellyEgg / Grow / Destroy |
 | `SwallowGrowLarger` / `SwallowGrowStrength` | on | Grow-mode takes |
 | `SwallowGrowSex` | on | Grow-mode curves/groin take |

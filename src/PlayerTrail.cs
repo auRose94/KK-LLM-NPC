@@ -346,6 +346,17 @@ namespace KKLLMNPC
             return sb.ToString();
         }
 
+        // "Delete path data" op (WebUI): throw away the in-memory trail too, so
+        // nothing learned before the op re-persists over the deleted files. The next
+        // Tick re-loads (empty) and starts sampling fresh.
+        internal static void ClearAll()
+        {
+            lock (_lock) { _pts.Clear(); _dirty = false; }
+            _scene = "";
+            _samplesAtLastSave = 0;
+            Snap = new Snapshot();
+        }
+
         private static void Save(string scene)
         {
             _lastSave = Time.unscaledTime;

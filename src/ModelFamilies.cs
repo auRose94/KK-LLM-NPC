@@ -517,6 +517,27 @@ namespace KKLLMNPC
             return tail.Length == 0 || System.Text.RegularExpressions.Regex.IsMatch(tail, "^[0-9]+$");
         }
 
+        /// <summary>Meta-replies to a "pick a name" prompt: the model TALKED ABOUT
+        /// choosing instead of choosing ("I want some time to think about it",
+        /// "let me consider…" — the field playtest's most common name-selection
+        /// failure). Detected after every other salvage pass failed, so it's pure
+        /// diagnostics + the caller re-rolls with a hard "answer NOW" demand.
+        /// Pure text; unit-testable.</summary>
+        public static bool LooksLikeNameMeta(string reply)
+        {
+            if (string.IsNullOrEmpty(reply)) return false;
+            string low = reply.ToLowerInvariant();
+            // Keep it narrow: hesitation/deferral/permission phrases, not any text
+            // containing "think" (a salvageable CoT legitimately contains it).
+            return low.Contains("time to think") || low.Contains("need time") || low.Contains("want time")
+                || low.Contains("let me think") || low.Contains("give me a moment")
+                || low.Contains("think about it") || low.Contains("come up with a name")
+                || (low.Contains("hmm") && low.Contains("name"))
+                || low.StartsWith("i'd like", System.StringComparison.Ordinal)
+                || low.StartsWith("i would like", System.StringComparison.Ordinal)
+                || low.StartsWith("sure, give me", System.StringComparison.Ordinal);
+        }
+
         private static string ValidSalvageCandidate(string candidate,
             System.Collections.Generic.HashSet<string> taken, string species)
         {

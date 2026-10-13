@@ -134,7 +134,16 @@ namespace KKLLMNPC
             catch (Exception) { }
 
             string finalName = null;
-            if (_cfgNameSelection != null && _cfgNameSelection.Value)
+            // Endpoint-gate BEFORE spending minutes on the name loop: a busy local
+            // server (the 2026-10-12 playtest: 5 attempts × 40s timeouts ≈ minutes of
+            // a second NPC standing frozen while the first ate all the slots) fails
+            // every attempt anyway. When the breaker is open, hand the fallback name
+            // out immediately and let the loop pick up real naming next body.
+            if (EndpointBlocked())
+            {
+                Logger.LogWarning("[" + MyName() + "] name selection skipped — endpoint " + EndpointStatusText() + "; using fallback name");
+            }
+            else if (_cfgNameSelection != null && _cfgNameSelection.Value)
             {
                 string gender = "unknown";
                 string species = baseName;
@@ -147,11 +156,20 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
 
-                for (int attempt = 1; attempt <= 3 && finalName == null; attempt++)
+                // The old 3-attempt loop fell back constantly: local servers are slow
+                // under load (a name call timed out at 25s → "fallback Kobold-100"),
+                // and reasoning models reply to a first-shot name prompt with meta
+                // prose ("I'd like some time to think about it") instead of a name —
+                // that reply is VALID text, so nothing salvageable failed loudly. Now:
+                // five attempts, 40s each, extra token ladder rungs, and attempts 4+
+                // append an unmissable "no more thinking, answer NOW" demand.
+                for (int attempt = 1; attempt <= 5 && finalName == null; attempt++)
                 {
                     string chosen = null;
                     try { chosen = ChooseNameWithLLM(gender, species, traits, attempt); }
                     catch (Exception e) { Logger.LogWarning("name selection attempt " + attempt + " failed: " + e.Message); }
+                    if (string.IsNullOrEmpty(chosen) && attempt < 5)
+                        try { Thread.Sleep(1500); } catch (Exception) { } // let a busy server breathe
                     if (string.IsNullOrEmpty(chosen)) continue;
                     if (NameRegistry.TryReserve(chosen))
                     {
@@ -251,9 +269,22 @@ namespace KKLLMNPC
                     ["{taken}"] = taken.Length > 0 ? "These names are TAKEN, do not use them: " + taken + ". " : "",
                 };
                 string prompt = TextUtil.ExpandTemplate(NamePromptTemplate(), promptVars);
+                // Late attempts: the model burned earlier tries on meta prose ("I
+                // want time to think about it") — demand the answer NOW, with the
+                // exact final-line shape, and forbid any reasoning at all.
+                if (attempt >= 4)
+                    prompt += "\nTIME IS UP — no more thinking, no questions, no waiting. Answer immediately with exactly one final line of the form: Name: <one word>.";
 
                 int baseTokens = FamilyProfile.EmitsThinkBlocks ? 320 : 128;
-                int maxTokens = attempt <= 1 ? baseTokens : baseTokens * (attempt == 2 ? 3 : 6);
+                int maxTokens;
+                switch (attempt)
+                {
+                    case 2: maxTokens = baseTokens * 3; break;
+                    case 3: maxTokens = baseTokens * 6; break;
+                    case 4: maxTokens = baseTokens * 8; break;
+                    default: maxTokens = attempt <= 1 ? baseTokens : baseTokens * 12; break;
+                }
+                if (maxTokens > 16384) maxTokens = 16384;
                 var payload = new Dictionary<string, object>
                 {
                     ["model"] = Val(_cfgModel),
@@ -278,7 +309,7 @@ namespace KKLLMNPC
                 string body = Json.Write(payload);
 
                 string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
-                    retries: 2, timeout: TimeSpan.FromSeconds(25), maxResponseBytes: 64 * 1024,
+                    retries: 2, timeout: TimeSpan.FromSeconds(40), maxResponseBytes: 64 * 1024,
                     onError: ReportEndpointError);
                 if (json == null) return null;
                 {
@@ -401,6 +432,11 @@ namespace KKLLMNPC
                             return salvaged;
                         }
                     }
+                    // Meta-reply visibility: "I want time to think about it" and
+                    // friends used to surface only as a nameless fallback. Name the
+                    // behavior in the log so re-rolls are explainable (attempts 4+
+                    // append the "TIME IS UP" demand to counter exactly this).
+                    try { if (ModelFamilies.LooksLikeNameMeta(content)) Logger.LogInfo("[" + MyName() + "] model stalled on naming ('" + Shorten(content, 80) + "') — re-rolling with a hard 'answer NOW' demand"); } catch (Exception) { }
                     Logger.LogInfo("[" + MyName() + "] LLM name rejected: '" + (content ?? "null") + "' — using fallback");
                     return null;
                 }
@@ -958,17 +994,33 @@ namespace KKLLMNPC
                 // the engine hiccup (peg-native stream format) retries unchanged; a
                 // context/image/format/size rejection shrinks the payload (two
                 // degradations max) before this tick gives up.
-                int engineTries = 0, shrinkStage = 0;
+                int engineTries = 0, shrinkStage = 0, unloadedTries = 0;
                 while (true)
                 {
                     body = Json.Write(payload);
+                    // Two attempts max: a 120s timeout on a busy local server is a
+                    // slot held hostage in the parallel gate — the third attempt
+                    // pinned the gate ~6 minutes while every other NPC starved
+                    // (2026-10-12 second-kobold freeze). The next think-tick retries.
                     rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
-                        retries: 3, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
+                        retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
                         onRetry: r => Logger.LogDebug("LLM retry: " + r),
                         onError: err => lastError = err);
                     if (rawResponse != null) break;
                     if (lastError == null) { NoteEndpointFail(); return null; }
                     string category = HttpRetryLadder.Classify(lastError);
+                    if (category == "model_unloaded")
+                    {
+                        // Nothing warm to answer with (model switched away / unloaded).
+                        // NOT a payload problem — wait for the server to reload and
+                        // retry the identical payload. Bounded so a genuinely dead
+                        // server still fails the tick.
+                        if (++unloadedTries > 3) { NoteEndpointFail(); return null; }
+                        Logger.LogWarning("[" + MyName() + "] " + Shorten(lastError, 120) + " — model reloading?; waiting 4s and retrying unchanged (" + unloadedTries + "/3)");
+                        try { Thread.Sleep(4000); } catch (Exception) { }
+                        lastError = null;
+                        continue;
+                    }
                     if (category == "transient_engine")
                     {
                         if (++engineTries > 2) { NoteEndpointFail(); return null; }
@@ -1013,7 +1065,7 @@ namespace KKLLMNPC
                         {
                             body = Json.Write(payload);
                             rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
-                                retries: 3, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
+                                retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
                                 onRetry: r => Logger.LogDebug("LLM retry: " + r),
                                 onError: err => lastError = err);
                             if (rawResponse == null)
