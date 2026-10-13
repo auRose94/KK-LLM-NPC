@@ -130,6 +130,13 @@ namespace KKLLMNPC
             public float LastStopAnim;
             public bool Hidden;            // renderers off (set once fully swallowed)
             public bool EggSpawned;
+            // VICTIM AS A LARGE PENIS: a REAL game penis prefab spawned under the
+            // victim, scaled off their cached body scale — PenetrationTech sees a
+            // legitimate penetrator, so the pred's orifice WIDENS via the game's own
+            // shape-key machinery and the pred's arousal machinery runs normally
+            // (it can feel sexual, in context). Destroyed with every session end.
+            public GameObject VirtualPen;
+            public float BodyScale = -1f;   // girth source (captured once at Begin)
         }
 
         internal static void Ensure(LLMNPCPlugin plugin)
@@ -204,7 +211,7 @@ namespace KKLLMNPC
             // person is a conversion in progress, not hole-sex — say so explicitly
             // every time, and name the ROUTE so the model knows where they went.
             return "SWALLOWED GUEST"
-                + " (a MEAL-like conversion, not sex: nothing is penetrating your holes, and [sex]/feel lines never mean the guest): "
+                + " (a MEAL-like conversion: the only penetration tied to the guest is their own body acting as a large penis — [sex]/[vore-pen] lines named vore-insert ARE that insert, and CAN feel sexual; nothing else's 'inside' means the guest): "
                 + string.Join(", ", parts.ToArray());
         }
 
@@ -818,6 +825,7 @@ namespace KKLLMNPC
                 Milestone = -1,
             };
             lock (_lock) _active.Add(st);
+            SpawnVirtualPen(st);
             // MOD EVENT CHANNEL (multiplayer): a remote victim's mod learns of the
             // swallow (begin + digest lines + end) and can abort from THEIR machine.
             try { BroadcastBegin(st); } catch (Exception) { }
@@ -1084,14 +1092,67 @@ namespace KKLLMNPC
             }
         }
 
-        // DIGESTION IS NOT SEX, at the body level: a swallowed victim still
-        // intersected the eater's penetration machinery after the pull — the game
-        // pumped their stimulation (PumpUpDick from dick-movement collisions), and
-        // at max it fired the Cum RPC: an accidental cumshot sprayed particles
-        // THROUGH the eater ("escapes the body, clipping particle spray"). Every
-        // tick we zero the victim's stimulation (public field, and we own the view
-        // after Begin's ownership transfer) plus the private arousal float, so the
-        // only cum that happens inside someone is DELIBERATE (`masturbate`).
+        // The VICTIM AS A LARGE PENIS: spawn a real penis prefab (the victim's own
+        // equip when they have one, else the database's default), parented to the
+        // victim so the pull literally drags it into the pred's hole, scaled off the
+        // victim's cached body scale. GirthData comes pre-baked on the prefab; the
+        // WORLD girth scales with the object — that is the "girth built off the
+        // body's scale and cached" the design needs (BodyScale is captured once).
+        // The pred's PenetrationTech treats it exactly like any penetrator: the
+        // mouth/penetrable widens around it, and the pred's own listeners deliver
+        // stimulation — the insert CAN feel sexual; the events are labeled so the
+        // model always knows it is the swallowed meal, not a lover.
+        private const string VorePenPrefix = "vore:";
+        private static void SpawnVirtualPen(SwallowState st)
+        {
+            try
+            {
+                if (st == null || st.Victim == null || st.VirtualPen != null) return;
+                st.BodyScale = 1f;
+                try
+                {
+                    var sc = st.Victim.transform.localScale;
+                    if (sc.x > 0.0001f) st.BodyScale = sc.x;
+                }
+                catch (Exception) { }
+                GameObject prefab = null;
+                try
+                {
+                    var vg = st.Victim.GetGenes();
+                    short equip = vg != null ? vg.dickEquip : (short)0;
+                    var db = GameManager.GetPenisDatabase().GetValidPrefabReferenceInfos();
+                    if (db != null && db.Count > 0)
+                    {
+                        int idx = (equip >= 1 && equip <= db.Count) ? equip - 1 : 0;
+                        prefab = db[idx].GetPrefab();
+                    }
+                }
+                catch (Exception) { prefab = null; }
+                if (prefab == null) { st.BodyScale = -1f; return; }
+                var pen = UnityEngine.Object.Instantiate(prefab, st.Victim.transform, false);
+                pen.name = VorePenPrefix + (st.Name ?? "someone");
+                pen.transform.localPosition = Vector3.zero;
+                pen.transform.localRotation = Quaternion.identity;
+                pen.transform.localScale = Vector3.one; // parent (the victim root) carries the body scale
+                st.VirtualPen = pen;
+                try { LLMNPCPlugin.Log.LogInfo("vore-pen: virtual penetrator spawned for '" + st.Name + "' (cached body scale " + st.BodyScale.ToString("0.###", CultureInfo.InvariantCulture) + ") — the pred's orifice widens via PenetrationTech"); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
+        private static void DestroyVirtualPen(SwallowState st)
+        {
+            try { if (st != null && st.VirtualPen != null) UnityEngine.Object.Destroy(st.VirtualPen); } catch (Exception) { }
+            if (st != null) st.VirtualPen = null;
+        }
+
+        // AROUSAL SPLIT — victim side: a swallowed victim's own machinery used to
+        // run until the Cum RPC fired an accidental cumshot that sprayed particles
+        // THROUGH the eater. Every tick we zero the victim's stimulation + private
+        // arousal so the only cum inside someone is DELIBERATE (`masturbate`).
+        // The PRED side is deliberately NOT clamped (victim-as-penis edit): their
+        // body registers the vore insert like any penetrator, so the stretch can
+        // feel sexual in context — the events say it is a vore insert.
         private static FieldInfo _arousalField;
         private static void SuppressVictimArousal(SwallowState st)
         {
@@ -1240,6 +1301,7 @@ namespace KKLLMNPC
                 LLMNPCPlugin.Log.LogWarning("swallow: victim '" + st.Name + "' vanished mid-swallow — no egg laid");
                 try { if (st.Npc != null) st.Npc.PushWorldEvent("the swallow was interrupted — you were pulled out of the world entirely, not reborn from an egg."); } catch (Exception) { }
                 try { if (st.EaterNpc != null) st.EaterNpc.PushWorldEvent("the swallow was interrupted: " + st.Name + " was pulled out of the world from inside you — nothing of them was converted."); } catch (Exception) { }
+                DestroyVirtualPen(st);
                 _active.RemoveAt(index);
                 return;
             }
@@ -1271,7 +1333,7 @@ namespace KKLLMNPC
                     {
                         if (st.EaterNpc != null)
                             st.EaterNpc.PushWorldEvent("[intake] " + st.Name + " is " + pct.ToString("0", CultureInfo.InvariantCulture)
-                                + "% of the way into your " + holeLabelFor(st.Hole) + " — " + stage + "; the conversion starts when they are FULLY in.");
+                                + "% of the way into your " + holeLabelFor(st.Hole) + " — " + stage + "; the conversion starts when they are FULLY in. Their body acts as a large penis as it slides — your orifice widens around it and the stretch can feel genuinely good; that is the insert, not a lover.");
                         if (st.Npc != null)
                             st.Npc.PushWorldEvent("[intake] you are " + pct.ToString("0", CultureInfo.InvariantCulture)
                                 + "% of the way " + (st.Entry == SwallowDestination.Mouth ? "down the throat" : "into the body")
@@ -1297,7 +1359,7 @@ namespace KKLLMNPC
                     try
                     {
                         if (st.EaterNpc != null)
-                            st.EaterNpc.PushWorldEvent("[intake] " + st.Name + " slides FULLY in — the conversion begins; you can feel them settling deep in your " + SwallowLogic.InsideNoun(st.Entry) + ".");
+                            st.EaterNpc.PushWorldEvent("[intake] " + st.Name + " slides FULLY in — the conversion begins; you can feel them settling deep in your " + SwallowLogic.InsideNoun(st.Entry) + ", stretched wide around their body-shaft (you may savor the fullness — it is the meal, it is not a partner).");
                         if (st.Npc != null)
                             st.Npc.PushWorldEvent("[intake] you slide FULLY in — deep inside " + BodyLabel(st.Eater) + "'s " + SwallowLogic.InsideNoun(st.Entry) + "; the conversion begins.");
                     }
@@ -1320,7 +1382,7 @@ namespace KKLLMNPC
                         if (st.Npc != null)
                             st.Npc.PushWorldEvent("[conversion] you are " + where + " — " + pctI.ToString("0", CultureInfo.InvariantCulture) + "% through the conversion (about " + Mathf.CeilToInt(leftS).ToString("0", CultureInfo.InvariantCulture) + "s left). No sex is happening; your body's urges are being held off until it finishes.");
                         if (st.EaterNpc != null)
-                            st.EaterNpc.PushWorldEvent("[conversion] " + st.Name + " is " + where.Replace("deep inside " + BodyLabel(st.Eater) + "'s", "deep inside your") + " — " + pctI.ToString("0", CultureInfo.InvariantCulture) + "% through the conversion (about " + Mathf.CeilToInt(leftS).ToString("0", CultureInfo.InvariantCulture) + "s left)");
+                            st.EaterNpc.PushWorldEvent("[conversion] " + st.Name + " is " + where.Replace("deep inside " + BodyLabel(st.Eater) + "'s", "deep inside your") + " — " + pctI.ToString("0", CultureInfo.InvariantCulture) + "% through the conversion (about " + Mathf.CeilToInt(leftS).ToString("0", CultureInfo.InvariantCulture) + "s left). The insert inside you may feel sexual as it shifts — that's the meal's body doing its job; react however feels right");
                     }
                     catch (Exception) { }
                 }
@@ -1374,6 +1436,7 @@ namespace KKLLMNPC
             if (Consume(st))
             {
                 st.EggSpawned = true; // "handled" — remove the session
+                DestroyVirtualPen(st);
                 _active.RemoveAt(index);
             }
             // else: this tick's completion failed — keep the victim pinned and retry.
@@ -1564,6 +1627,7 @@ namespace KKLLMNPC
                 {
                     var st = _active[i];
                     _active.RemoveAt(i);
+                    DestroyVirtualPen(st);
                     try { ReleaseSwallowed(st); }
                     catch (Exception e)
                     {

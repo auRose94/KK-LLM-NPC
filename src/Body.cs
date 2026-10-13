@@ -1191,15 +1191,28 @@ namespace KKLLMNPC
                     return;
                 }
 
+                // VORE INSERT: the swallow manager spawns a REAL penis prefab under
+                // the swallowed body (scaled off the victim's cached body scale), and
+                // that penetrator IS allowed to register — the "victim as a large
+                // penis" design: the pred's orifice widens around it via the game's
+                // own shape keys, and the pred's arousal machinery runs normally
+                // (the insert CAN feel sexual, in context). Everything it does is
+                // labeled vore-insert so the model never mistakes the meal for a
+                // lover. The victim's OTHER incidental parts (their real head/dick
+                // brushing the hole on the way down) stay blocked.
+                string penGoName = null;
+                try { penGoName = penetrator.gameObject != null ? penetrator.gameObject.name : null; } catch (Exception) { }
+                bool voreInsert = penGoName != null && penGoName.StartsWith("vore:", StringComparison.Ordinal);
+
                 // A SWALLOWED person is penetrator machinery: their body (dick
                 // included) passing down the eater's throat registers as a real
                 // penetration — the eater got a [sex] event, a rhythm, and narrated
                 // the meal as sex ("let us enjoy this rhythm"). The victim's parts
-                // never count as penetration.
+                // never count as penetration — ONLY the labeled vore insert does.
                 try
                 {
                     var srcTf = penetrator.transform;
-                    if (srcTf != null)
+                    if (srcTf != null && !voreInsert)
                     {
                         var ownerKb = srcTf.GetComponentInParent<Kobold>();
                         // DIGESTING VICTIM: their body is penetrating machinery.
@@ -1215,6 +1228,8 @@ namespace KKLLMNPC
                 catch (Exception) { }
 
                 string whoPen = penetrator.gameObject != null ? CleanName(penetrator.gameObject.name) : "something";
+                if (voreInsert && penGoName != null && penGoName.Length > 5)
+                    whoPen = "vore-insert:" + CleanName(penGoName.Substring(5));
 
                 lock (_pen)
                 {
@@ -1234,6 +1249,9 @@ namespace KKLLMNPC
                             // me" minutes later and never knew they were being entered.
                             PushWorldEvent("[sex] you are BEING PENETRATED — " + whoPen + " entered your " + st.hole
                                 + ". This is real and happening NOW; respond (say), match/ask the rhythm, or use `feel` + `thrust` to take part — you may be locked in an animation meanwhile");
+                            if (voreInsert)
+                                PushWorldEvent("[vore-pen] CLARIFICATION: " + whoPen + " is a VORE INSERT — the swallowed meal's body is acting as the shaft while it slides deeper (" + st.hole
+                                    + "). It widens you and yes, it CAN feel sexual in context — that is the insert doing it, not a partner making love; your meal is still a meal.");
                         }
                         st.src = penetrator.gameObject != null ? penetrator.transform : null;
                         float d = worldSpaceDistanceToPenetrator;
@@ -1250,7 +1268,9 @@ namespace KKLLMNPC
                     {
                         _pen.Remove(penetrator); // pulled out
                         Logger.LogInfo(whoPen + " pulled out");
-                        PushWorldEvent("[sex] " + whoPen + " withdrew — that round is over; your body is yours again (say how it was, if you like)");
+                        PushWorldEvent(voreInsert
+                            ? "[vore-pen] the vore insert (" + whoPen + ") withdrew/lost grip — your " + st.hole + " settles closed again"
+                            : "[sex] " + whoPen + " withdrew — that round is over; your body is yours again (say how it was, if you like)");
                     }
                 }
             }
@@ -1386,8 +1406,22 @@ namespace KKLLMNPC
                 // lines are hole-sex ONLY and say so; the stomach guest names itself.
                 if (_pen.Count > 0)
                 {
-                    string rhythm = RhythmFrom(_pen);
-                    return "being PENETRATED sexually — a dick is inside one of your holes" + (rhythm != null ? ": " + rhythm : "")
+                    // Vore-insert entries get their OWN framing (victim-as-penis) —
+                    // and an explicit permission slip: the insert may feel sexual.
+                    string voreWho = null;
+                    lock (_pen)
+                        foreach (var kv in _pen)
+                            if (kv.Value != null && kv.Value.name != null && kv.Value.name.StartsWith("vore-insert:", StringComparison.Ordinal))
+                            { voreWho = kv.Value.name.Substring(12); break; }
+                    if (voreWho != null)
+                    {
+                        string rhythm = RhythmFrom(_pen);
+                        return "a VORE INSERT is inside you (inhabited by the swallowed body acting as a large penis — it widened your shape keys on the way in)"
+                            + (rhythm != null ? ": " + rhythm : "")
+                            + " — it CAN feel sexual in context: ride it with `thrust`/`feel`, moan, react — just keep knowing this is your MEAL going in, not a lover";
+                    }
+                    string rhythm2 = RhythmFrom(_pen);
+                    return "being PENETRATED sexually — a dick is inside one of your holes" + (rhythm2 != null ? ": " + rhythm2 : "")
                         + " — `feel` for details, thrust to ride the rhythm (a stomach guest is NOT this)";
                 }
                 if (_dickIn.Count > 0)
@@ -1443,6 +1477,13 @@ namespace KKLLMNPC
                 foreach (var kv in _pen)
                 {
                     var st = kv.Value;
+                    bool vore = st.name != null && st.name.StartsWith("vore-insert:", StringComparison.Ordinal);
+                    if (vore)
+                    {
+                        parts.Add(st.name + " filling your " + st.hole + " depth=" + F(st.depth) + "m "
+                            + "(the swallowed body as the shaft — widens as it slides; may feel sexual, still a meal)");
+                        continue;
+                    }
                     int pid = PartnerId(st.src);
                     parts.Add(st.name + " " + st.hole + " depth=" + F(st.depth) + "m thrust=" + F(st.vel)
                               + (pid > 0 ? " (with id=" + pid + ")" : " (non-kobold)"));
