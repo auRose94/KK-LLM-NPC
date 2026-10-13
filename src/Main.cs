@@ -123,6 +123,7 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgAIReportLog;
         internal ConfigEntry<float> _cfgHornyRate;
         internal ConfigEntry<float> _cfgHornyBaseline;
+        internal ConfigEntry<float> _cfgVoreAppetiteRate;
         internal ConfigEntry<string> _cfgModelTier;
         internal ConfigEntry<bool> _cfgAutoSwitch;
         internal ConfigEntry<string> _cfgThinking;
@@ -457,6 +458,8 @@ namespace KKLLMNPC
             _cfgBlockedScenes = Config.Bind("General", "BlockedScenes", "MainMenu,Loading,ErrorScene", "Comma-separated scene names where the LLM stays idle (MainMap is the playable world)");
             _cfgHornyRate = Config.Bind("Needs", "HornyClimbPerMin", 5f, "How fast the slow-burn horniness rises while the body gets NO stimulation (0.0-1.0 scale per minute). ~5 = half-horny after ~6 min idle, very horny after ~10 min");
             _cfgHornyBaseline = Config.Bind("Needs", "HornyBaseline", 0.08f, "Starting horniness when the NPC takes a body (0-1). Climbs from here when unstimulated");
+            _cfgVoreAppetiteRate = Config.Bind("Needs", "VoreAppetitePerMin", 1.5f,
+                "VORE DRIVE (2D, weaker sibling of lust — 0-1 per minute): how fast a kobold's appetite for swallowing rises; sated only by actually swallowing someone. The second axis, comfort, is a per-body affinity for big/comfy meals. High drive shows in the needs line ('vore: appetite=… comfort=…') and the idle cue as 'kobolds look tasty / invitingly big and comfy' roleplay pressure; whether a body can ACT on it is gated by [LittleTreats] SwallowDestination.");
             _cfgModelTier = Config.Bind("LLM", "ModelTier", "auto",
                 "Model capability tier: auto (probe at startup or detect from responses), small (≤13B — compact prompt, aggressive context compaction, fuzzy tools), medium (30B–70B), large (≥70B — full prompt, generous context). " +
                 "Set manually if auto-detection is wrong.");
@@ -543,6 +546,7 @@ namespace KKLLMNPC
             _cfgVisTemperature.Value = Mathf.Clamp(_cfgVisTemperature.Value, 0f, 2f);
             _cfgHornyRate.Value = Mathf.Clamp(_cfgHornyRate.Value, 0f, 60f);
             _cfgHornyBaseline.Value = Mathf.Clamp(_cfgHornyBaseline.Value, 0f, 1f);
+            _cfgVoreAppetiteRate.Value = Mathf.Clamp(_cfgVoreAppetiteRate.Value, 0f, 30f);
             _cfgTurnRate.Value = Mathf.Clamp(_cfgTurnRate.Value, 10f, 1000f);
             _cfgAccel.Value = Mathf.Clamp(_cfgAccel.Value, 0.5f, 50f);
             _cfgDecel.Value = Mathf.Clamp(_cfgDecel.Value, 0.5f, 50f);
@@ -738,6 +742,7 @@ namespace KKLLMNPC
                         foreach (var npc in watchSnapshot)
                         {
                             try { npc.StationLeaveWatch(); } catch (Exception) { }
+                            try { npc.ProximitySenseWatch(); } catch (Exception) { }
                         }
                     });
                 }

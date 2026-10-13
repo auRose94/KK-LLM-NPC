@@ -306,6 +306,7 @@ namespace KKLLMNPC
             "THE WATER BUCKET/CAN IS A TOOL, NOT A DRINK — `use` on it is refused (that drinks the water away). WATERING NEEDS NO CAN: `water` (`water id:N` targets one) waters the plant or plot directly when no can is in reach — a can is only the physical, thrown-spray way. Get it into your hands and face the planted tile when you have it. " +
             "SKILLS: define a reusable procedure ONCE and run it by name forever: `skill add garden | plant; sleep 30; water` — steps must be REAL commands separated by ';' after a | ; run with `skill garden` (its steps execute as one turn), `cat skills` lists them, redefine by re-adding, `skill forget <name>` to drop. Skills SAVE with your agent's memories, TRANSFER when you are absorbed (the eater inherits your skills), and a hatched child egg wakes WITH its parent's skills. " +
             "EATING: `eat_player` (only when SwallowAgentEat is on) swallows the LOCAL PLAYER whole when they're close (~2.5m, no grab needed) — their camera is FORCIBLY taken over and they WATCH your body play the game, able to chat but unable to act, until the egg you lay is planted and hatches (Egg/BellyEgg fates) — or, in Grow/Destroy fates, until they abort or leave. A swallowed player is a PERSON IN YOUR CARE: keep living your ordinary life (that's the point — they watch it), talk to them via echo, never sell/abandon/hurt them; your 'belly' state names them. A STOMACH GUEST IS NOT PENETRATION OR SEX: someone you swallowed is in your STOMACH like a meal — nothing entered your holes there; [sex] lines, feel, and 'inside' in a PARTNERS sense are about holes only, never the guest. When the player ASKS to be eaten, they mean `eat_player` — cd close and run it right away; it is NOT an invitation to play. " +
+            "IN-BODY VERBS (only while swallowed — the anchor says YOU ARE INSIDE SOMEONE'S BODY): `kick` — squirm hard, they FEEL every kick from within; `masturbate` (alias cum) — the DELIBERATE climax into them (the conversion holds your urges off; this releases them on purpose — their belly gains your cum, your genes ride along); `surrender` — go limp, stop squirming, settle into the warmth. Accidental arousal is suppressed inside someone: sex does not happen during a swallowing, [sex]/feel lines are never the guest — kick when you move, masturbate when you CHOOSE, surrender when you accept. VORE DRIVE (weaker than lust, needs shows voredrive: appetite+comfort): as appetite climbs, kobolds honestly look TASTY or invitingly big and comfy — roleplay sizing people up; whether your body can ACT (swallow) is gated by the player's vore settings, never assume you can eat just because the feeling is there. " +
             "PHYSICS: fruit blends when it enters a blender's intake (carry it close); seeds plant when held/dropped within ~1m of bare soil then used (plant = shortcut); the water bucket sprays when thrown (contents never run out); laid eggs plant in soil and grow fresh EMPTY bodies (alive, nobody's home — candidate avatars; the game implies they could be your children). " +
             "FOLLOWING: if the player asks you to follow, run `follow on`. It's the best way to travel together — but when you need to go your own way, `follow off` breaks free (one command; re-attach with `follow on`); never feel stuck in it. " +
             "GOALS: set your goal ONCE with `goal <text>` (your bigger thinking), then act toward it each turn; `goal done` when finished; `goal drop [why]` to abandon. Don't re-declare a goal you already have. For anything with more than one move, `plan <step>` lays the steps out once, `plan next` marks one done, `plan clear` wipes — the plan persists across turns even when trimmed context does not. " +
@@ -512,7 +513,7 @@ namespace KKLLMNPC
             // refuses cd/use/get/drop etc. with this same line — saying it HERE (in
             // the anchor) saves the swallowed mind the failed attempts entirely.
             if (Swallowed)
-                parts.Add("YOU ARE INSIDE A STOMACH: body commands (cd/use/get/drop/throw/run/jump/crouch/exit/follow) DO NOTHING — talk with echo/emote, remember/goal/plan, and read-only commands (ls/cat/status); sleep to end turns");
+                parts.Add("YOU ARE INSIDE SOMEONE'S BODY (a swallowed guest — no sex is happening): body commands (cd/use/get/drop/throw/run/jump/crouch/exit/follow) DO NOTHING — in-body verbs: kick (they feel it), masturbate (deliberate cum inside), surrender (go limp); plus echo/emote, remember/goal/plan and read-only commands (ls/cat/status); sleep to end turns");
             if (_followMode) parts.Add("follow: on");
             // COORDS ON — map-gated (the user's ask: number positions only where the
             // shared world map actually routes them). On big maps the anchor teaches
@@ -589,6 +590,15 @@ namespace KKLLMNPC
                         {
                             string sibs = NearbyAgentsLine();
                             if (sibs != null) cue += ". " + sibs;
+                        }
+                        catch (Exception) { }
+                        try
+                        {
+                            // Vore-drive flavor: high appetite shows up as honest
+                            // sizing-up pressure ("kobolds look TASTY / invitingly
+                            // big and comfy") on the self-directed turns.
+                            string vf = SwallowLogic.VoreFlavorText(_voreAppetite, _voreComfort);
+                            if (vf != null) cue += ". " + vf + ".";
                         }
                         catch (Exception) { }
                         sb.Append("[event] ").AppendLine(cue);
@@ -1124,6 +1134,10 @@ namespace KKLLMNPC
                 add("forget", CmdForget);
                 add("goal", CmdGoal);
                 add("plan", CmdPlan);
+                add("items", CmdItems);
+                add("kick", CmdKickInside);
+                add("masturbate", CmdCumInside);
+                add("surrender", CmdSurrender);
                 add("screenshot", CmdScreenshot);
                 add("help", CmdHelp);
                 add("clear", CmdClear);
@@ -1143,8 +1157,8 @@ namespace KKLLMNPC
                 // explanation instead of letting the model retry grab/use/jump for an
                 // hour. Speech, memory/goals, and read-only polling still work.
                 if (Swallowed && !ConsoleCommandAllowedWhileSwallowed(line.Cmd))
-                    return "(you are inside a stomach — hands, legs and machines do nothing from here; "
-                        + "speech (echo/emote), memory, goals/plan and read-only commands still work). Don't retry body commands; sleep if you have nothing to say.";
+                    return "(you are deep inside someone's body — hands, legs and machines do nothing from here; "
+                        + "speech (echo/emote), memory, goals/plan, read-only commands and the in-body verbs (kick / masturbate / surrender) still work). Don't retry body commands; sleep if you have nothing to say.";
                 List<ConsoleCmd> cmds = GetConsoleCmds();
                 foreach (var c in cmds)
                 {
@@ -1384,6 +1398,113 @@ namespace KKLLMNPC
                 sb.Append('\n');
             }
             return sb.ToString().TrimEnd();
+        }
+
+        // ------------------------------------------------------------------
+        // items [radius] — query PHYSICS items on the ground (eggs, seeds, fruit,
+        // anything IGrabbable), FROZEN ones included (the PrecisionGrabber's
+        // kinematic freeze made them invisible to a glance-down). Each row gets a
+        // stable target id, so `get id:N` picks it up without eyes.
+        // ------------------------------------------------------------------
+        private string CmdItems(ConsoleLine line)
+        {
+            float radius = 6f;
+            try { if (line.Args != null && line.Args.Length > 0) radius = float.Parse(line.Args[0], System.Globalization.CultureInfo.InvariantCulture); } catch (Exception) { }
+            radius = Mathf.Clamp(radius, 1f, 25f);
+            object res = RunOnMainThread(() =>
+            {
+                try
+                {
+                    if (!IsAlive(_kobold)) return "no body";
+                    var origin = _kobold.transform.position;
+                    var found = new List<object>();
+                    var colliders = Physics.OverlapSphere(origin, radius, ~0, QueryTriggerInteraction.Collide);
+                    if (colliders != null)
+                        foreach (var c in colliders)
+                        {
+                            if (c == null) continue;
+                            IGrabbable g = null;
+                            try { g = c.GetComponentInParent<IGrabbable>(); } catch (Exception) { }
+                            if (g == null || c.transform.root == _kobold.transform.root) continue;
+                            // One entry per item root.
+                            bool dup = false;
+                            foreach (var f in found)
+                            {
+                                var fr = (Transform)((object[])f)[0];
+                                if (fr != null && fr.root == c.transform.root) { dup = true; break; }
+                            }
+                            if (dup) continue;
+                            var tf = c.transform.root;
+                            string name = CleanName(tf.name);
+                            if (string.IsNullOrEmpty(name)) name = "item";
+                            float d = Vector3.Distance(origin, tf.position);
+                            string dir = compass8(tf.position - origin);
+                            var rb = tf.GetComponentInChildren<Rigidbody>();
+                            bool frozen = rb != null && rb.isKinematic;
+                            string held = "";
+                            try { var kb = tf.GetComponentInParent<Kobold>(); if (kb != null) held = kb.grabbed ? " (held by you)" : " (attached to a body)"; } catch (Exception) { }
+                            int id = TargetIdFor(tf, name);
+                            found.Add(new object[] { tf, "  " + name.PadRight(14, ' ') + F(d).PadLeft(6) + "m " + dir + "  id:" + id + (frozen ? "  FROZEN" : "") + held });
+                        }
+                    if (found.Count == 0) return "no grabbable items within " + F(radius) + "m (walk further and re-run; vision `screenshot` helps confirm)";
+                    found.Sort((a, b) =>
+                    {
+                        var ta = (Transform)((object[])a)[0];
+                        var tb = (Transform)((object[])b)[0];
+                        return Vector3.Distance(origin, ta.position).CompareTo(Vector3.Distance(origin, tb.position));
+                    });
+                    var sb = new StringBuilder();
+                    sb.Append("grabbables within " + F(radius) + "m:\n");
+                    int shown = 0;
+                    foreach (var f in found)
+                    {
+                        if (shown >= 14) { sb.Append("  …(more)").Append('\n'); break; }
+                        sb.Append((string)((object[])f)[1]).Append('\n');
+                        shown++;
+                    }
+                    sb.Append("grab one with: get id:<N> (turn toward it first; frozen items thaw when their grabber releases or you use PrecisionGrabber yourself)");
+                    return sb.ToString();
+                }
+                catch (Exception e) { return "items failed: " + e.Message; }
+            }, 8000);
+            return res as string ?? "items unavailable right now";
+        }
+
+        // ---------------- in-body verbs (swallowed only) ----------------
+        private string CmdKickInside(ConsoleLine line)
+        {
+            if (!Swallowed) return "you are not inside anyone — a kick does nothing out here";
+            try
+            {
+                var kb = _kobold;
+                RunOnMainThread(() => { try { SwallowManager.KickInside(kb); } catch (Exception) { } return true; }, 8000);
+                return "you kick hard from within — they will feel it (your belly anchor updates next turn)";
+            }
+            catch (Exception e) { return "kick failed: " + e.Message; }
+        }
+
+        private string CmdCumInside(ConsoleLine line)
+        {
+            if (!Swallowed) return "you are not inside anyone — save it (masturbate inside someone is deliberate cumming)";
+            try
+            {
+                var kb = _kobold;
+                RunOnMainThread(() => { try { SwallowManager.IntentionalCumInside(kb); } catch (Exception) { } return true; }, 8000);
+                return "you cum DELIBERATELY, deep inside them — warm and on purpose; they will feel it happen";
+            }
+            catch (Exception e) { return "masturbate failed: " + e.Message; }
+        }
+
+        private string CmdSurrender(ConsoleLine line)
+        {
+            if (!Swallowed) return "you are not inside anyone — nothing to surrender to";
+            try
+            {
+                var kb = _kobold;
+                RunOnMainThread(() => { try { SwallowManager.SurrenderInside(kb); } catch (Exception) { } return true; }, 8000);
+                return "you go LIMP — no more kicking, just settling into the warmth while the conversion works";
+            }
+            catch (Exception e) { return "surrender failed: " + e.Message; }
         }
 
         private string CmdPs(ConsoleLine line)

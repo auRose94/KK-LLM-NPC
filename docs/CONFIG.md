@@ -101,6 +101,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
 | `HornyClimbPerMin` | `5` | 0–60/min | How fast the slow-burn horniness rises while the body gets NO stimulation (0.0-1.0 scale per minute) |
+| `VoreAppetitePerMin` | `1.5` | VORE DRIVE (2D, weaker than lust): appetite climb per minute — sated only by actually swallowing someone; the second axis (comfort, per-body affinity for big/comfy meals) is seeded per body. High drive shows in the needs line and idle cues as 'kobolds look tasty / invitingly big and comfy' roleplay pressure; acting on it stays gated by SwallowDestination. |
 | `HornyBaseline` | `0.08` | 0–1 | Starting horniness when the NPC takes a body |
 
 ## [Memory] — Facts & Forgetting

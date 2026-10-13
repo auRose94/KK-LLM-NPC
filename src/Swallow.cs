@@ -119,6 +119,12 @@ namespace KKLLMNPC
             public float DigestSeconds;
             public Vector3 PullStartPos;
             public int Milestone;          // last narrated digest mark
+            public int LastPhase = -9;     // previous Advance phase (for the 0→1 full-insert edge)
+            public int InsertNotified;     // last narrated 25/50/75/98% intake step
+            public bool InsertFullNar;     // the "fully in — conversion begins" line
+            public float LastProgressEvent; // recurrent digest-progress heartbeat
+            public float LastKick;         // cooldown for the victim's `kick`
+            public bool Surrendered;       // the victim gave up wriggling (`surrender`)
             public float LastOwnerAssert;
             public float LastColliderAssert;
             public float LastStopAnim;
@@ -164,7 +170,19 @@ namespace KKLLMNPC
                         total = 0f;
                         try { now = Time.unscaledTime; } catch (Exception) { }
                     }
-                    float left = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - (now - st.StartUnscaled));
+                    float elapsed = now - st.StartUnscaled;
+                    // INTAKE (the virtual-insertion window): the held person is being
+                    // drawn in — the pred can CHECK the insert fraction every turn
+                    // ("full insert" is where the actual digestion starts).
+                    if (elapsed < SwallowLogic.PullSeconds)
+                    {
+                        float t = SwallowLogic.Smooth01(Mathf.Clamp01(elapsed / SwallowLogic.PullSeconds));
+                        parts.Add("TAKING IN " + st.Name + " — " + Mathf.RoundToInt(t * 100f).ToString("0", CultureInfo.InvariantCulture)
+                            + "% into your " + holeLabelFor(st.Hole) + " (" + SwallowLogic.InsertStageText(t)
+                            + "); the conversion starts when they are FULLY in");
+                        continue;
+                    }
+                    float left = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - elapsed);
                     string fate;
                     switch (Effect())
                     {
@@ -173,17 +191,20 @@ namespace KKLLMNPC
                         case SwallowEffect.Destroy: fate = "nothing will be left of them"; break;
                         default: fate = "an egg carrying their mixed genes pops out of you"; break;
                     }
-                    string via = !string.IsNullOrEmpty(st.Hole) && st.Hole != "mouth"
-                        ? ", taken in via your " + holeLabelFor(st.Hole) : "";
-                    parts.Add(st.Name + " (in your stomach" + via + ", ~" + Mathf.CeilToInt(left).ToString("0", CultureInfo.InvariantCulture)
+                    string noun = SwallowLogic.InsideNoun(st.Entry);
+                    parts.Add(st.Name + " (deep in your " + noun
+                        + (st.Entry == SwallowDestination.Mouth ? "" : ", taken in through your " + holeLabelFor(st.Hole))
+                        + (st.Surrendered ? ", they have SURRENDERED (limp)" : "")
+                        + ", ~" + Mathf.CeilToInt(left).ToString("0", CultureInfo.InvariantCulture)
                         + "s to conversion — " + fate + ")");
                 }
             if (parts.Count == 0) return null;
             // "INSIDE YOU" used to make RP models read the guest as PENETRATION
-            // ("you have someone inside you" = sex, in their priors). The guest is a
-            // meal sitting in the stomach — say so, explicitly and every time.
-            return "STOMACH GUEST (you swallowed " + (parts.Count == 1 ? "them" : "them all")
-                + " whole — a MEAL, not sex: nothing entered your holes, and [sex]/feel lines never mean the guest): "
+            // ("you have someone inside you" = sex, in their priors). A swallowed
+            // person is a conversion in progress, not hole-sex — say so explicitly
+            // every time, and name the ROUTE so the model knows where they went.
+            return "SWALLOWED GUEST"
+                + " (a MEAL-like conversion, not sex: nothing is penetrating your holes, and [sex]/feel lines never mean the guest): "
                 + string.Join(", ", parts.ToArray());
         }
 
@@ -462,9 +483,14 @@ namespace KKLLMNPC
                     try { if (NPCInstance.IsPlayerKobold(k) && !(PlayerVictimsAllowed() && NPCInstance.IsPlayerKobold(dropper))) continue; } catch (Exception) { }
                     try { if (k.grabbed) continue; } catch (Exception) { } // being held themselves
                     if (EaterBusy(k)) continue;                   // already digesting someone
-                    Vector3 headPos = HeadOf(k);
-                    if (!SwallowLogic.IsOnOrAboveHead(vPos.y, headPos.y)) continue;
-                    float d = Vector3.Distance(headPos, vPos);
+                    // FULL-INSERT RULE (replaces the bump-on-head check): the held
+                    // body must be stuffed INTO the receiver's mouth region — its
+                    // center below the maw point and within reach. Merely resting or
+                    // bumping ON TOP of the head no longer triggers anything (that
+                    // check started digestions from casual PrecisionGrabber bumps).
+                    Vector3 mouthPos = MouthOf(k);
+                    if (vPos.y > mouthPos.y + 0.12f) continue; // above the maw = not inserted
+                    float d = Vector3.Distance(mouthPos, vPos);
                     if (d >= bestDist) continue;
                     bestDist = d;
                     best = k;
@@ -812,7 +838,7 @@ namespace KKLLMNPC
                 try
                 {
                     npc.Swallowed = true;
-                    npc.PushWorldEvent(BeginPromiseText(eaterLabel) + (selfEat ? "" : " (" + who + " did the feeding)"));
+                    npc.PushWorldEvent(BeginPromiseText(eaterLabel, holeDest) + (selfEat ? "" : " (" + who + " did the feeding)"));
                     npc.PersistLifeForSwallow(); // snapshot BEFORE any end-of-digest destroy
                 }
                 catch (Exception) { }
@@ -828,8 +854,8 @@ namespace KKLLMNPC
                     try
                     {
                         st.EaterNpc.PushWorldEvent("you just " + entryVerb + " the PLAYER WHOLE — " + st.Name
-                            + " is in your STOMACH now via your " + holeLabelFor(hole)
-                            + " (a meal, NOT sex): their camera is gone, they WATCH everything through your body's eyes and CANNOT act (about "
+                            + " is inside your " + SwallowLogic.InsideNoun(holeDest) + " now via your " + holeLabelFor(hole)
+                            + " (a meal-like conversion, NOT sex): their camera is gone, they WATCH everything through your body's eyes and CANNOT act (about "
                             + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
                             + "s to conversion). " + PlayerFateHint() + " Keep living your ordinary life — go to work, play, talk — and speak to them whenever; they hear you. They are a person in your care: never sell, abandon or hurt them.");
                     }
@@ -849,13 +875,14 @@ namespace KKLLMNPC
                     try
                     {
                         st.EaterNpc.PushWorldEvent("you just " + entryVerb + " " + st.Name
-                             + " WHOLE — they are in your STOMACH now (a meal, not sex), digesting (about "
+                             + " WHOLE — they are deep inside your " + SwallowLogic.InsideNoun(holeDest)
+                             + " now (a meal-like conversion, not sex), digesting (about "
                             + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
                             + "s to conversion). Their fate follows this stomach's rules; you can speak while they convert.");
                     }
                     catch (Exception) { }
                 }
-                string inside = who == "the player" ? "them" : who + "'s stomach";
+                string inside = who == "the player" ? "them" : who + "'s " + SwallowLogic.InsideNoun(holeDest);
                 try { Plugin.FanoutWorldEventExcept("you watch " + who + " " + entryVerb + " " + st.Name + " WHOLE — they vanished into " + inside, st.EaterNpc, npc); }
                 catch (Exception) { }
             }
@@ -872,7 +899,7 @@ namespace KKLLMNPC
                     {
                         st.EaterNpc.PushWorldEvent("someone force-fed you: " + fedBy + " just fed " + st.Name + " into you"
                             + (hole == "mouth" ? " through your mouth" : " through your " + holeLabelFor(hole))
-                            + " and " + entryVerb + " — they are in YOUR stomach now, digesting. Their fate follows this stomach's rules; you can speak around them while they convert.");
+                            + " and " + entryVerb + " — they are deep inside YOUR " + SwallowLogic.InsideNoun(holeDest) + " now, digesting. Their fate follows this stomach's rules; you can speak around them while they convert.");
                     }
                     catch (Exception) { }
                 }
@@ -932,12 +959,17 @@ namespace KKLLMNPC
         // What the swallowed one is told happens to them — honest per mode, and
         // naming who did it. Grow and Destroy deliberately do NOT promise a rebirth
         // (there isn't one). Grow names what is actually taken (the gain toggles).
-        private static string BeginPromiseText(string who)
+        private static string BeginPromiseText(string who, SwallowDestination holeDest)
         {
+            string noun = SwallowLogic.InsideNoun(holeDest);
+            string via = holeDest == SwallowDestination.Mouth
+                ? " — they went in through " + who + "'s mouth"
+                : " — taken in through " + who + "'s " + holeLabelFor(SwallowLogic.DestinationLabel(holeDest).ToLowerInvariant());
             switch (Effect())
             {
                 case SwallowEffect.BellyEgg:
-                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening, the walls are just churning); you can still speak but you cannot move. You are slowly being converted into an EGG that will ride in " + who + "'s belly — when they sit on a nest and lay you, you will hatch out of it with new genes.";
+                    return who + " swallowed you WHOLE — you are deep inside their " + noun + " now"
+                        + via + " (a MEAL-like conversion — no sex is happening, the walls are just churning); you can still speak but you cannot move. You are slowly being converted into an EGG that will ride in " + who + "'s belly — when they sit on a nest and lay you, you will hatch out of it with new genes.";
                 case SwallowEffect.Grow:
                 {
                     var taken = new List<string>();
@@ -947,12 +979,12 @@ namespace KKLLMNPC
                     string what = taken.Count > 0
                         ? "They are ABSORBING you — " + JoinEnglish(taken) + " " + (taken.Count == 1 ? "is" : "are") + " becoming theirs."
                         : "They are ABSORBING you — your whole body is becoming theirs.";
-                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening); you can still speak but you cannot move. " + what + " There is no coming back.";
+                    return who + " swallowed you WHOLE — you are deep inside their " + noun + " now" + via + " (a MEAL-like conversion — no sex is happening); you can still speak but you cannot move. " + what + " There is no coming back.";
                 }
                 case SwallowEffect.Destroy:
-                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening); you can still speak but you cannot move. They are consuming you entirely. There is no coming back.";
+                    return who + " swallowed you WHOLE — you are deep inside their " + noun + " now" + via + " (a MEAL-like conversion — no sex is happening); you can still speak but you cannot move. They are consuming you entirely. There is no coming back.";
                 default:
-                    return who + " swallowed you WHOLE — you are inside their stomach now (a MEAL — no sex is happening); you can still speak but you cannot move. You feel the walls churn. You are slowly being converted into an EGG — when it's done, you will be reborn from it with new genes.";
+                    return who + " swallowed you WHOLE — you are deep inside their " + noun + " now" + via + " (a MEAL-like conversion — no sex is happening); you can still speak but you cannot move. You feel the walls around you shift and churn. You are slowly being converted into an EGG — when it's done, you will be reborn from it with new genes.";
             }
         }
 
@@ -1042,6 +1074,7 @@ namespace KKLLMNPC
                 for (int i = _active.Count - 1; i >= 0; i--)
                 {
                     var st = _active[i];
+                    try { SuppressVictimArousal(st); } catch (Exception) { }
                     try { Advance(st, i); }
                     catch (Exception e)
                     {
@@ -1049,6 +1082,152 @@ namespace KKLLMNPC
                     }
                 }
             }
+        }
+
+        // DIGESTION IS NOT SEX, at the body level: a swallowed victim still
+        // intersected the eater's penetration machinery after the pull — the game
+        // pumped their stimulation (PumpUpDick from dick-movement collisions), and
+        // at max it fired the Cum RPC: an accidental cumshot sprayed particles
+        // THROUGH the eater ("escapes the body, clipping particle spray"). Every
+        // tick we zero the victim's stimulation (public field, and we own the view
+        // after Begin's ownership transfer) plus the private arousal float, so the
+        // only cum that happens inside someone is DELIBERATE (`masturbate`).
+        private static FieldInfo _arousalField;
+        private static void SuppressVictimArousal(SwallowState st)
+        {
+            var v = st.Victim;
+            if (v == null || st.Surrendered == false) { } // (flag kept for future nuance)
+            try
+            {
+                var pv = v.photonView;
+                if (pv != null && !pv.IsMine) return; // remote victim keeps their own machinery; narration rides the mod channel
+                v.stimulation = 0f;
+                try
+                {
+                    if (_arousalField == null)
+                        _arousalField = typeof(Kobold).GetField("arousal", BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (_arousalField != null) _arousalField.SetValue(v, 0f);
+                }
+                catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
+        // In-body commands (victim side, main thread). Each no-ops politely when
+        // nobody is actually inside anyone.
+        private static SwallowState StateForVictim(Kobold victim)
+        {
+            try
+            {
+                int vid = victim.GetInstanceID();
+                foreach (var st in _active)
+                    if (!st.EggSpawned && st.VictimId == vid) return st;
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        // `masturbate` (also aliased cum): the DELIBERATE in-body climax. The
+        // passive one is suppressed (see SuppressVictimArousal) — this fires the
+        // game's own Cum RPC under our control AND lands Cum reagent in the pred's
+        // belly container with the victim's genes riding along, narrated to both.
+        internal static bool IntentionalCumInside(Kobold victim)
+        {
+            if (victim == null) return false;
+            var st = StateForVictim(victim);
+            if (st == null) return false;
+            try
+            {
+                if (victim.photonView != null)
+                    victim.photonView.RPC("Cum", RpcTarget.All);
+                try
+                {
+                    var belly = st.Eater != null ? st.Eater.bellyContainer : null;
+                    var bellyPv = belly != null ? belly.GetComponent<PhotonView>() : null;
+                    if (belly != null && bellyPv != null && ReagentDatabase.TryGetAsset("Cum", out var cum) && cum != null)
+                    {
+                        var contents = new ReagentContents();
+                        contents.AddMix(cum.GetReagent(25f));
+                        var buf = new NetStack.Serialization.BitBuffer(4);
+                        buf.AddReagentContents(contents);
+                        if (victim.photonView != null)
+                            bellyPv.RPC(nameof(GenericReagentContainer.ForceMixRPC), RpcTarget.All, buf,
+                                victim.photonView.ViewID, (byte)GenericReagentContainer.InjectType.Inject);
+                    }
+                }
+                catch (Exception) { }
+                string inside = InsideLine(st);
+                try { if (st.EaterNpc != null) st.EaterNpc.PushWorldEvent(inside + " — the person inside you deliberately cums: a warm burst goes off deep in your " + InsideNoun(st) + ", pooling inside."); } catch (Exception) { }
+                try { if (st.Npc != null) st.Npc.PushWorldEvent("you cum DELIBERATELY, deep inside " + BodyLabel(st.Eater) + " — warm, deliberate, yours; it pools in their " + InsideNoun(st) + "."); } catch (Exception) { }
+                try { Plugin.FanoutWorldEventExcept("you hear a muffled, deliberate climax from inside " + BodyLabel(st.Eater) + " — someone cums deep within them.", st.EaterNpc, st.Npc); } catch (Exception) { }
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // `kick`: the victim squirms deliberately — the pred FEELS it and their
+        // model is told; cooldown keeps it from becoming spam.
+        internal static bool KickInside(Kobold victim)
+        {
+            if (victim == null) return false;
+            var st = StateForVictim(victim);
+            if (st == null) return false;
+            float now = Time.unscaledTime;
+            if (now - st.LastKick < 5f) return true; // quietly throttled
+            st.LastKick = now;
+            try
+            {
+                if (st.EaterNpc != null)
+                {
+                    string[] kicks = {
+                        "something inside your " + InsideNoun(st) + " KICKS — " + st.Name + " squirms hard from within",
+                        "a strong jolt from inside: " + st.Name + " kicked against your gut",
+                        "movement inside you — " + st.Name + " squirms and presses outward",
+                    };
+                    st.EaterNpc.PushWorldEvent("[kick] " + kicks[UnityEngine.Random.Range(0, kicks.Length)] + ".");
+                }
+                if (st.Npc != null)
+                    st.Npc.PushWorldEvent("[kick] you kick hard inside " + BodyLabel(st.Eater) + " — you can feel it land; they will notice.");
+                // Bystanders sense the squirm too.
+                try { Plugin.FanoutWorldEventExcept("[kick] something in " + BodyLabel(st.Eater) + " visibly squirms — a kick from within.", st.EaterNpc, st.Npc); } catch (Exception) { }
+            }
+            catch (Exception) { }
+            return true;
+        }
+
+        // `surrender`: the victim goes limp and accepting; the pred's mind learns
+        // the ride stopped fighting.
+        internal static bool SurrenderInside(Kobold victim)
+        {
+            if (victim == null) return false;
+            var st = StateForVictim(victim);
+            if (st == null) return false;
+            if (st.Surrendered) return true;
+            st.Surrendered = true;
+            try
+            {
+                if (st.Npc != null)
+                    st.Npc.PushWorldEvent("[surrender] you go limp inside " + BodyLabel(st.Eater) + " — no more kicking, just settling into the warmth and the conversion.");
+                if (st.EaterNpc != null)
+                    st.EaterNpc.PushWorldEvent("[surrender] the one in your " + InsideNoun(st) + " has gone LIMP — " + st.Name + " surrendered; the squirming stops, only the conversion's rhythm is left.");
+                try { Plugin.FanoutWorldEventExcept("[surrender] the squirming inside " + BodyLabel(st.Eater) + " stops — " + st.Name + " has gone limp within them.", st.EaterNpc, st.Npc); } catch (Exception) { }
+            }
+            catch (Exception) { }
+            return true;
+        }
+
+        // Hole-aware inside wording: "stomach" only for a mouth entry — every other
+        // hole holds the person deep inside the body (the models kept recasting
+        // unbirths/cock-vore as "a meal in my stomach").
+        private static string InsideNoun(SwallowState st)
+        {
+            return SwallowLogic.InsideNoun(st.Entry);
+        }
+        private static string InsideLine(SwallowState st)
+        {
+            return st.Name + " is deep inside your " + InsideNoun(st)
+                + (st.Entry == SwallowDestination.Mouth ? " (they went in through your mouth)" : " (taken in through your " + holeLabelFor(st.Hole) + ")")
+                + " — " + st.Name + ", a whole person, converting";
         }
 
         private static void Advance(SwallowState st, int index)
@@ -1075,10 +1254,31 @@ namespace KKLLMNPC
             if (phase == 0)
             {
                 // Pull toward the ARMED entry hole (mouth by default; F7/WebUI can
-                // route through the rear/pussy/breast instead — same stomach after).
+                // route through the rear/pussy/dick/breast instead — same outcome).
                 Vector3 holePos = HolePos(st.Eater, st.Entry);
                 float k = SwallowLogic.Smooth01(phaseT);
                 st.Victim.transform.position = Vector3.Lerp(st.PullStartPos, holePos, k);
+                // VIRTUAL-INSERTION PROGRESS: the held body "goes down fully" — both
+                // minds get 25/50/75% checkpoints ("can be checked for full insert";
+                // the FULLY-IN edge is narrated at the phase handoff below).
+                int step = (int)(k * 4f); // 0..3
+                if (step > st.InsertNotified && phaseT < 1f)
+                {
+                    st.InsertNotified = step;
+                    int pct = Mathf.RoundToInt(k * 100f);
+                    string stage = SwallowLogic.InsertStageText(k);
+                    try
+                    {
+                        if (st.EaterNpc != null)
+                            st.EaterNpc.PushWorldEvent("[intake] " + st.Name + " is " + pct.ToString("0", CultureInfo.InvariantCulture)
+                                + "% of the way into your " + holeLabelFor(st.Hole) + " — " + stage + "; the conversion starts when they are FULLY in.");
+                        if (st.Npc != null)
+                            st.Npc.PushWorldEvent("[intake] you are " + pct.ToString("0", CultureInfo.InvariantCulture)
+                                + "% of the way " + (st.Entry == SwallowDestination.Mouth ? "down the throat" : "into the body")
+                                + " — " + stage + " (" + BodyLabel(st.Eater) + "'s " + holeLabelFor(st.Hole) + ").");
+                    }
+                    catch (Exception) { }
+                }
             }
             else
             {
@@ -1089,6 +1289,41 @@ namespace KKLLMNPC
 
             if (phase == 1)
             {
+                // FULL-INSERT edge (pull → digest): the body went down all the way —
+                // the conversion begins. One line to each mind, hole-aware.
+                if (st.LastPhase == 0 && !st.InsertFullNar)
+                {
+                    st.InsertFullNar = true;
+                    try
+                    {
+                        if (st.EaterNpc != null)
+                            st.EaterNpc.PushWorldEvent("[intake] " + st.Name + " slides FULLY in — the conversion begins; you can feel them settling deep in your " + SwallowLogic.InsideNoun(st.Entry) + ".");
+                        if (st.Npc != null)
+                            st.Npc.PushWorldEvent("[intake] you slide FULLY in — deep inside " + BodyLabel(st.Eater) + "'s " + SwallowLogic.InsideNoun(st.Entry) + "; the conversion begins.");
+                    }
+                    catch (Exception) { }
+                }
+                // RECURRENT STATUS: both minds get a numbered conversion heartbeat
+                // (~10s) so neither model has to guess where the process stands.
+                float nowT = Time.unscaledTime;
+                if (nowT - st.LastProgressEvent < 0f || nowT - st.LastProgressEvent > 10f)
+                {
+                    st.LastProgressEvent = nowT;
+                    float totalSec = SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds;
+                    float leftS = Mathf.Max(0f, totalSec - (nowT - st.StartUnscaled));
+                    float pct = Mathf.Clamp01((nowT - st.StartUnscaled) / totalSec);
+                    int pctI = Mathf.RoundToInt(pct * 100f);
+                    try
+                    {
+                        string where = "deep inside " + BodyLabel(st.Eater) + "'s " + SwallowLogic.InsideNoun(st.Entry)
+                            + (st.Entry == SwallowDestination.Mouth ? "" : " (entered through the " + holeLabelFor(st.Hole) + ")");
+                        if (st.Npc != null)
+                            st.Npc.PushWorldEvent("[conversion] you are " + where + " — " + pctI.ToString("0", CultureInfo.InvariantCulture) + "% through the conversion (about " + Mathf.CeilToInt(leftS).ToString("0", CultureInfo.InvariantCulture) + "s left). No sex is happening; your body's urges are being held off until it finishes.");
+                        if (st.EaterNpc != null)
+                            st.EaterNpc.PushWorldEvent("[conversion] " + st.Name + " is " + where.Replace("deep inside " + BodyLabel(st.Eater) + "'s", "deep inside your") + " — " + pctI.ToString("0", CultureInfo.InvariantCulture) + "% through the conversion (about " + Mathf.CeilToInt(leftS).ToString("0", CultureInfo.InvariantCulture) + "s left)");
+                    }
+                    catch (Exception) { }
+                }
                 int mark = SwallowLogic.MilestoneFor(phaseT, st.Milestone);
                 if (mark > st.Milestone)
                 {
@@ -1098,7 +1333,7 @@ namespace KKLLMNPC
                         try
                         {
                             if (mark == SwallowLogic.MarkChurn)
-                                st.Npc.PushWorldEvent("the stomach walls churn and press around you — warm, rhythmic, patient");
+                                st.Npc.PushWorldEvent("the walls around you churn and press — warm, rhythmic, patient");
                             else if (mark == SwallowLogic.MarkKnead)
                                 st.Npc.PushWorldEvent("the walls knead you steadily — your shape is starting to change, limbs going soft and smooth");
                             else if (mark == SwallowLogic.MarkEggForming)
@@ -1121,8 +1356,8 @@ namespace KKLLMNPC
                     {
                         float leftS = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - (Time.unscaledTime - st.StartUnscaled));
                         string feeling = mark == SwallowLogic.MarkChurn
-                            ? "your stomach churns around " + st.Name + " — they are in there, alive"
-                            : "your stomach kneads " + st.Name + " steadily — the conversion is underway";
+                            ? "your " + SwallowLogic.InsideNoun(st.Entry) + " churns around " + st.Name + " — they are in there, alive"
+                            : "your " + SwallowLogic.InsideNoun(st.Entry) + " kneads " + st.Name + " steadily — the conversion is underway";
                         try { st.EaterNpc.PushWorldEvent(feeling + " (about " + Mathf.CeilToInt(leftS) + "s left; their fate follows this stomach's rules)"); }
                         catch (Exception) { }
                     }
@@ -1132,6 +1367,7 @@ namespace KKLLMNPC
                 }
             }
 
+            st.LastPhase = phase;
             if (phase >= 0) return;
 
             // Done converting: apply the configured effect, then remove the body.
@@ -1394,6 +1630,13 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         private static bool Consume(SwallowState st)
         {
+            // A real swallow is the only sating event for the vore drive.
+            try
+            {
+                var eatNpc = st != null && st.Eater != null ? Plugin.InstanceForBody(st.Eater) : null;
+                if (eatNpc != null) eatNpc.VoreAppetiteSated();
+            }
+            catch (Exception) { }
             switch (Effect())
             {
                 case SwallowEffect.BellyEgg: return PourIntoBelly(st);
@@ -2329,10 +2572,12 @@ namespace KKLLMNPC
                 if (c == null) return false; // unknown words are prose anyway
                 if (c == "echo" || c == "emote" || c == "sleep" || c == "help" || c == "clear" || c == "report"
                     || c == "remember" || c == "forget" || c == "goal" || c == "plan") return true;
+                // The in-body verbs are MEANINGFUL only from inside someone.
+                if (c == "kick" || c == "masturbate" || c == "surrender") return true;
                 switch (c)
                 {
                     case "ls": case "ps": case "pwd": case "whoami": case "cat": case "status":
-                    case "hold": case "sonar": case "look": case "find": case "screenshot":
+                    case "hold": case "sonar": case "look": case "find": case "screenshot": case "items":
                         return true;
                     default: return false; // cd/use/get/drop/throw/run/turn/jump/crouch/exit/follow + module tools
                 }

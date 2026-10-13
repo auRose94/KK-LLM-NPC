@@ -134,6 +134,7 @@ namespace KKLLMNPC
             catch (Exception) { }
 
             string finalName = null;
+            bool llmChosen = false;
             // Endpoint-gate BEFORE spending minutes on the name loop: a busy local
             // server (the 2026-10-12 playtest: 5 attempts × 40s timeouts ≈ minutes of
             // a second NPC standing frozen while the first ate all the slots) fails
@@ -174,6 +175,7 @@ namespace KKLLMNPC
                     if (NameRegistry.TryReserve(chosen))
                     {
                         finalName = chosen;
+                        llmChosen = true;
                         Logger.LogInfo("KKLLMNPC: LLM name accepted: '" + chosen + "'");
                     }
                     else
@@ -202,6 +204,19 @@ namespace KKLLMNPC
             {
                 _npcName = finalName;
                 _persona = BuildPersona();
+            }
+            // FIRST TASK FRAMING: naming is the spawn-task, and the world hears the
+            // announcement — the model doesn't just silently exist before it picked
+            // who it is. Only an LLM-chosen name announces (fallback names are bookkeeping).
+            if (llmChosen)
+            {
+                try
+                {
+                    string announce = "My name — my first choice in this body — is " + _npcName + ". Remember it.";
+                    try { ToolSay(new TextArgs(announce)); } catch (Exception e) { Logger.LogWarning("name announce: " + e.Message); }
+                    try { Plugin.FanoutWorldEventExcept("you hear the newest kobold announce a name they CHOSE: they call themselves " + _npcName + ".", null, null); } catch (Exception) { }
+                }
+                catch (Exception) { }
             }
             // Identity bot AFTER the final name so chat attribution is right from
             // the NPC's very first line. Main thread (Photon).
@@ -400,8 +415,8 @@ namespace KKLLMNPC
                     }
                     catch (Exception) { }
                     // Validate: alphanumeric, 2-12 chars (matches the prompt)
-                    if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 12
-                        && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9]+$"))
+                    if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 14
+                        && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9-]+$"))
                     {
                         // A name that is just the species ± a digit ("Kobold", "Kobold2",
                         // "AbsolB3") is a unit label, not a name — reject it and let the

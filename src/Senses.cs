@@ -1018,6 +1018,21 @@ namespace KKLLMNPC
         // Horniness the model sees: the body's live stimulation while being played
         // with, otherwise the slowly-climbing slow-burn value (so the NPC starts
         // wanting play even when nothing is happening).
+        // One-line vore drive report for needs/`cat needs`: the 2D stat + flavor.
+        // Null below 0.2 appetite so the key vanishes when irrelevant.
+        internal string VoreDriveText()
+        {
+            try
+            {
+                float a = _voreAppetite;
+                if (a < 0.2f) return null;
+                string flavor = SwallowLogic.VoreFlavorText(a, _voreComfort);
+                return "appetite=" + F(a) + " comfort=" + F(_voreComfort)
+                    + " — roleplay sizing people up; whether your body can swallow is gated (" + (flavor ?? "") + ")";
+            }
+            catch (Exception) { return null; }
+        }
+
         private string HorninessText()
         {
             try
@@ -1077,6 +1092,15 @@ namespace KKLLMNPC
             return "usable";
         }
 
+        // Station state tag. The MAILBOX got a wrong ":busy" for months: Mailbox
+        // CanUse=false simply means NO MAIL — models read it as occupied ("I'll wait
+        // for the mailbox to free up"). Name the real states; stations keep :busy.
+        internal static string BusyTagFor(string kind, bool canUse)
+        {
+            if (kind == "mailbox") return canUse ? ":mail-waiting" : ":empty (no mail inside)";
+            return canUse ? "" : ":busy";
+        }
+
         // One short phrase explaining what a category is FOR, appended to the
         // nearby 'i' field so the model never has to guess (play ≠ resting).
         internal static string PurposeFor(string kind)
@@ -1120,14 +1144,43 @@ namespace KKLLMNPC
             try
             {
                 var names = new List<string>();
+                bool animStation = false;
                 foreach (var mb in go.GetComponents<MonoBehaviour>())
-                    if (mb != null) names.Add(mb.GetType().Name.ToLowerInvariant());
+                {
+                    if (mb == null) continue;
+                    var t2 = mb.GetType();
+                    names.Add(t2.Name.ToLowerInvariant());
+                    // IAnimationStationSet = any two-body ANIMATION station machine.
+                    // The only resting one in the game is BedMachine — every other
+                    // implementer (BreedingStation/BreedingMount/MilkingTable/modded
+                    // animation machines) is PLAY no matter what the mesh is called
+                    // ("LewdBed", "CumBed"…). This is what kept misclassifying
+                    // workshop sex stations as SleepyHeadStation beds.
+                    foreach (var it in t2.GetInterfaces())
+                        if (it != null && it.Name == "IAnimationStationSet") { animStation = true; break; }
+                }
                 var parent = go.transform.parent;
                 if (parent != null)
                     foreach (var mb in parent.GetComponents<MonoBehaviour>())
-                        if (mb != null) names.Add(mb.GetType().Name.ToLowerInvariant());
+                    {
+                        if (mb == null) continue;
+                        var t2 = mb.GetType();
+                        names.Add(t2.Name.ToLowerInvariant());
+                        foreach (var it in t2.GetInterfaces())
+                            if (it != null && it.Name == "IAnimationStationSet") { animStation = true; break; }
+                    }
                 if (names.Count == 0) return null;
                 s = string.Join("|", names.ToArray());
+                if (animStation && !s.Contains("bedmachine"))
+                {
+                    // A non-bed animation station is play unless an exact class in the
+                    // ordered list below would answer differently (nest/food/mailbox/
+                    // bodyswap/door) — those exact checks run right after this.
+                    bool exact = s.Contains("oviposition") || s.Contains("ovi") || s.Contains("brainswapper")
+                        || s.Contains("swapper") || s.Contains("electricblender") || s.Contains("grinder")
+                        || s.Contains("mailboxusable") || s.Contains("dragonmail") || s.Contains("soiltile");
+                    if (!exact) { return "play"; }
+                }
             }
             catch (Exception) { return null; }
             if (s.Contains("oviposition") || s.Contains("ovi")) return "nest";
@@ -1263,7 +1316,7 @@ namespace KKLLMNPC
                         }
                         else
                         {
-                            info = kind + stateTag + (canUse ? "" : ":busy")
+                            info = kind + BusyTagFor(kind, canUse)
                                    + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : "");
                         }
                         // Live occupancy for station machines ("slots 1/2 taken — you ARE
@@ -1407,6 +1460,47 @@ namespace KKLLMNPC
             }
             catch (Exception e) { Logger.LogWarning("people: " + e.Message); }
             return list;
+        }
+
+        // ------------------------------------------------------------------
+        // PROXIMITY WORLD SIGNALS (distance-aware events the models kept missing)
+        // The mailbox is the flagship: its space-beam + looped chime ARE the
+        // has-mail signal, but nothing ever told the model that — it walked up,
+        // read the old ":busy" tag and concluded the mailbox was occupied. Now:
+        // coming within earshot of a mailbox (or its state changing while near)
+        // lands an honest event naming the beam as the light-when-mail signal.
+        // ------------------------------------------------------------------
+        private int _proxMailState = -1;   // -1 unknown, 0 empty, 1 waiting
+        private bool _proxMailWasNear;
+
+        internal void ProximitySenseWatch()
+        {
+            if (!IsAlive(_kobold)) return;
+            try
+            {
+                foreach (var pl in BuildKeyPlaceList())
+                {
+                    if (pl.Kind != "mailbox" || !IsAlive(pl.Tf)) continue;
+                    float d = Vector3.Distance(pl.Pos, _kobold.transform.position);
+                    if (d > 14f) { if (_proxMailWasNear && d > 16f) { _proxMailWasNear = false; _proxMailState = -1; } continue; }
+                    bool near = d < 8f;
+                    if (!near) continue;
+                    bool waiting = false;
+                    try { waiting = ObjectiveManager.HasMail() && ObjectiveManager.GetCurrentObjective() == null; } catch (Exception) { }
+                    int stNow = waiting ? 1 : 0;
+                    if (_proxMailWasNear && stNow == _proxMailState) continue; // same state, still near — quiet
+                    bool firstNear = !_proxMailWasNear;
+                    _proxMailWasNear = true;
+                    bool changed = _proxMailState != stNow;
+                    _proxMailState = stNow;
+                    string dist = F(d);
+                    if (waiting)
+                        PushWorldEvent("[event] the mailbox " + dist + "m away: its SPACE-BEAM is glowing — mail is WAITING inside it. Use the mailbox to fetch the objective letter. That glow is the light-when-mail signal — the mailbox is never 'busy'.");
+                    else if (changed || firstNear)
+                        PushWorldEvent("[event] the mailbox " + dist + "m away: its space-beam is DARK — no mail inside right now. When a letter arrives the beam lights up; that glow is your signal to fetch it.");
+                }
+            }
+            catch (Exception e) { try { Logger.LogDebug("prox watch: " + e.Message); } catch (Exception) { } }
         }
 
         // ------------------------------------------------------------------
@@ -1630,7 +1724,7 @@ namespace KKLLMNPC
                         ["id"] = TargetIdFor(t.Item6.transform, nm),
                         ["n"] = nm,
                         ["addr"] = StationAddr(nm, pos, p),
-                        ["i"] = kind + (t.Item3 ? "" : ":busy") + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : ""),
+                        ["i"] = kind + BusyTagFor(kind, t.Item3) + (PurposeFor(kind) != null ? " (" + PurposeFor(kind) + ")" : ""),
                         ["d"] = F(d.magnitude),
                         // 'bearing' = world compass (N/SW...), stable while you turn;
                         // 'dir' = facing-relative, for pointing/walking right now.
@@ -1795,9 +1889,10 @@ namespace KKLLMNPC
                         ["bearing"] = Compass.NameOfOffset(d.x, d.z),
                         ["id"] = TargetIdFor(pl.Tf, pl.Name),
                     };
-                    if (pl.Kind == "nest" || pl.Kind == "bed")
+                    if (pl.Kind == "nest" || pl.Kind == "bed" || pl.Kind == "mailbox")
                     {
-                        // Station extras: landmark hints ("near window") + live slots.
+                        // Station extras: landmark hints ("near window") + live slots
+                        // + the mailbox's actual HAS-MAIL state.
                         GenericUsable u = null;
                         try { u = pl.Tf.GetComponent<GenericUsable>() ?? pl.Tf.GetComponentInParent<GenericUsable>(); } catch (Exception) { }
                         if (u != null)
@@ -1806,7 +1901,23 @@ namespace KKLLMNPC
                             if (hints != null) entry["hint"] = hints;
                             string slots = StationSlotsFor(u);
                             if (slots != null) entry["slots"] = slots;
-                            try { if (!u.CanUse(_kobold)) entry["busy"] = true; } catch (Exception) { }
+                            try
+                            {
+                                string k2 = pl.Kind;
+                                if (k2 == "mailbox")
+                                {
+                                    // The real mailbox states — CanUse=false is EMPTY,
+                                    // not busy (the model used to "wait for the mailbox").
+                                    // Same predicate as MailboxUsable.CanUse: mail present
+                                    // AND no active objective scroll yet.
+                                    bool waiting = false;
+                                    try { waiting = ObjectiveManager.HasMail() && ObjectiveManager.GetCurrentObjective() == null; } catch (Exception) { }
+                                    if (waiting) entry["mailstate"] = ":mail-waiting (space-beam glowing — use it to fetch the objective letter)";
+                                    else entry["mailstate"] = ":empty (no mail inside)";
+                                }
+                                else if (!u.CanUse(_kobold)) entry["busy"] = true;
+                            }
+                            catch (Exception) { }
                         }
                     }
                     list.Add(entry);
@@ -1864,8 +1975,9 @@ namespace KKLLMNPC
                       .Append("  ~").Append(dd).Append("m ").Append(br);
                     if (id != null) sb.Append("  id:").Append(id);
                     if (d.TryGetValue("hint", out hint)) sb.Append("  (").Append(hint).Append(')');
-                    object busy, slots;
-                    if (d.TryGetValue("busy", out busy)) sb.Append("  :busy");
+                    object busy, slots, mailState;
+                    if (d.TryGetValue("mailstate", out mailState)) sb.Append("  ").Append(mailState);
+                    else if (d.TryGetValue("busy", out busy)) sb.Append("  :busy");
                     if (d.TryGetValue("slots", out slots)) sb.Append("  | ").Append(slots);
                     sb.AppendLine();
                 }

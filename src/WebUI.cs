@@ -721,6 +721,12 @@ button.danger:hover{background:#704052}
 .kv b{color:#9fb4d0}
 .holdbar{position:sticky;top:0;background:#3a2f1b;color:#e8c17a;border:1px solid #75583a;border-radius:4px;padding:2px 8px;margin-bottom:4px;font-size:12px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:8px}
+details.cfgsec{background:#1b1e25;border:1px solid #333a45;border-radius:6px;margin:8px 0;padding:4px 10px}
+details.cfgsec>summary{cursor:pointer;padding:6px 2px;list-style:none}
+details.cfgsec>summary::marker{content:''}
+details.cfgsec>summary::before{content:'▸ ';color:#7d9ec7}
+details.cfgsec[open]>summary::before{content:'▾ ';color:#7d9ec7}
+details.cfgsec[open]{padding-bottom:2px}
 </style></head><body>
 <h1>KK-LLM-NPC debug</h1>
 <div id='meta' class='dim'>connecting…</div>
@@ -736,10 +742,14 @@ button.danger:hover{background:#704052}
 // scrolled up (the newest state is held; scrolling back to the bottom flushes
 // it), (4) details/summary open-state survives rebuilds, (5) a pause button
 // stops all polls (and the cadence is slower: 3s state, 15s reports).
-var sel=0, mode='kobolds', cfgList=[], pollSeq=0, PAUSED=false;
-function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt')}
+var sel=0, mode='kobolds', cfgList=[], insts=[], pollSeq=0, PAUSED=false;
+function esc(s){var x=String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,'&#39;');return x.split(String.fromCharCode(34)).join('&quot;')}
 function box(title,body){return '<h2>'+esc(title)+'</h2><div class=box>'+esc(body==null?'':body)+'</div>'}
 function setMeta(html){var m=document.getElementById('meta');if(m._kkHtml!==html){m.innerHTML=html;m._kkHtml=html;}}
+// Every clear must also drop the renderBox cache, or the next identical html
+// is treated as unchanged and skipped over an EMPTY box (this ate the whole
+// settings panel once).
+function clearBox(id){var el=document.getElementById(id);if(!el)return;el.innerHTML='';el._kkHtml=null;}
 // Render one scrollable/replaceable box. stickBottom boxes (log) hold when the
 // user scrolled up, and flush the held html once they return to the bottom.
 function renderBox(id, html, stickBottom){
@@ -834,37 +844,42 @@ function rich(name){
     renderBox('rich',g,false);
   };x.send();
 }
-function renderSettings(){
-  var tabsEl=document.getElementById('tabs');
-  var th='<div class=tab onclick=mode=&quot;kobolds&quot;;poll()>kobolds</div><div class=&quot;tab sel&quot;>settings</div>';
-  renderBox('tabs',th,false);
-  // Self-heal: an empty list re-fetches and re-renders when the fetch lands —
-  // the boot-time fetch once raced the first render and the page showed
-  // a loading placeholder forever.
+function ensureSettings(){
+  renderBox('tabs','<div class=tab onclick=mode=&quot;kobolds&quot;;poll()>kobolds</div><div class=&quot;tab sel&quot;>settings</div><button onclick=&quot;window._settingsBuilt=false;buildSettingsUi()&quot;>↻ refresh</button>',false);
+  window._settingsBuilt=true;
+  if(cfgList.length){buildSettingsUi();renderOps();return;}
+  // Self-heal: an empty list re-fetches and rebuilds when the fetch lands.
+  renderBox('settings','<h2>settings</h2><div class=box>loading config… (a refresh button is up top)</div>',false);
+  cfg(function(){ setTimeout(function(){ if(mode==='settings') { window._settingsBuilt=false; ensureSettings(); } }, 500); });
+}
+// Settings accordion: ONE <details> drawer per config category (first open),
+// full description as a hover TOOLTIP on each row (title attr) plus a dim
+// description line. rendered ONCE per entry and again only on ↻ refresh or a
+// successful set — while an input holds focus nothing rewrites the panel.
+function buildSettingsUi(){
   if(!cfgList.length){
-    renderBox('settings','<h2>settings</h2><div class=box>loading config…</div>',false);
-    cfg(function(){ setTimeout(function(){ if(mode==='settings') { renderSettings(); renderOps(); } }, 500); });
+    renderBox('settings','<h2>settings</h2><div class=box>loading config… (press ↻ refresh)</div>',false);
     return;
   }
-  var h='<h2>settings (live — saved to the BepInEx config file)</h2>';
-  var cur='';
-  h+='<table>';
+  var h='<h2>settings <span class=dim>(live — saved to the BepInEx config file; hover a name for its description)</span></h2>';
+  var cur='';var firstOpen=true;var rows='';
   cfgList.forEach(function(c){
-    if(c.section!==cur){cur=c.section;h+='<tr><td colspan=3><h2 style=margin:10px 0 2px>'+esc(c.section)+'</h2></td></tr>';}
-    h+='<tr><td style=color:#e8c17a;width:220px>'+esc(c.key)+'</td>'
-      +'<td><input id=cfg_'+esc(c.id)+' value=\''+esc(c.value)+'\' style=width:260px></td>'
-      +'<td><button onclick=post(&quot;/api/config&quot;,{id:&quot;'+esc(c.id)+'&quot;,value:document.getElementById(&quot;cfg_'+esc(c.id)+'&quot;).value})>set</button></td></tr>';
+    if(c.section!==cur){
+      if(cur!=='') rows+='</table></div></details>';
+      cur=c.section;
+      rows+='<details class=cfgsec'+(firstOpen?' open':'')+'><summary class=chip>'+esc(cur)+'</summary><div class=cfgbody><table>';
+      firstOpen=false;
+    }
+    var desc=String(c.desc||'').replace(/\s+/g,' ').trim();
+    var shortDesc=desc.length>150?desc.slice(0,150)+'…':desc;
+    rows+='<tr><td style=color:#e8c17a;width:220px title=\''+esc(desc)+'\'>'+esc(c.key)+'</td>'
+      +'<td><input id=cfg_'+esc(c.id)+' value=\''+esc(c.value)+'\' style=width:260px title=\''+esc(desc)+'\'></td>'
+      +'<td><button onclick=post(&quot;/api/config&quot;,{id:&quot;'+esc(c.id)+'&quot;,value:document.getElementById(&quot;cfg_'+esc(c.id)+'&quot;).value})>set</button></td></tr>'
+      +'<tr><td colspan=3 title=\''+esc(desc)+'\'><div class=dim style=font-size:11px;padding:0 8px 6px>'+esc(shortDesc)+'</div></td></tr>';
   });
-  h+='</table><div class=dim>full descriptions: GET /api/config</div>';
+  rows+='</table></div></details>';
+  h+=rows;
   renderBox('settings',h,false);
-}
-function opsHtml(){
-  return '<h2>operations</h2><div class=box>'
-    +'<button onclick=post(&quot;/api/ops&quot;,{action:&quot;delete_maps&quot;})>delete map + trail data</button> '
-    +'<small class=dim>(world map rebuilds from scratch)</small><br><br>'
-    +'<button class=danger onclick=if(confirm(&quot;Delete ALL saved kobold memory files?&quot;))post(&quot;/api/ops&quot;,{action:&quot;delete_memories_all&quot;})>delete ALL memory files</button> '
-    +'<button class=danger onclick=if(confirm(&quot;Reset every setting to its default?&quot;))post(&quot;/api/ops&quot;,{action:&quot;reset_defaults&quot;})>reset settings to defaults</button>'
-    +'<div class=dim style=margin-top:8px>memory files refresh with the ops tab</div></div>';
 }
 function renderOps(){
   renderBox('ops',opsHtml(),false);
@@ -881,8 +896,11 @@ function renderOps(){
 function render(d){
   renderMeta(d);
   renderBox('spectate',d.spectate&&d.spectate!=='none'?box('spectate',d.spectate):'',false);
-  if(mode==='settings'){renderSettings();renderOps();}
-  else{document.getElementById('settings').innerHTML='';document.getElementById('ops').innerHTML='';renderKobolds(d);}
+  // SETTINGS render on TAB ENTRY, not on every poll: a per-poll rewrite used to
+  // clobber whatever value was being typed (the page updated too fast to touch
+  // anything). Polls keep meta/log/spectate fresh; settings refresh explicitly.
+  if(mode==='settings'){ if(!window._settingsBuilt) ensureSettings(); }
+  else{window._settingsBuilt=false;clearBox('settings');clearBox('ops');renderKobolds(d);}
   var lg=(d.log||[]).map(function(l){var c='dim';if(l.indexOf('[warn]')===0)c='warn';if(l.indexOf('[error]')===0)c='err';return String('<div class='+c+'>')+esc(l)+'</div>'}).join('');
   renderBox('log',lg,true);
 }

@@ -472,6 +472,8 @@ namespace KKLLMNPC
         public static string SalvageNameFromCoT(string content, string takenList, string species)
         {
             if (string.IsNullOrEmpty(content)) return null;
+            // Dash-shaped labels ("Name — Ember") read as the colon form first.
+            content = content.Replace(" — ", ": ").Replace(" – ", ": ");
             string[] lines = content.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
 
             var taken = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
@@ -541,8 +543,8 @@ namespace KKLLMNPC
         private static string ValidSalvageCandidate(string candidate,
             System.Collections.Generic.HashSet<string> taken, string species)
         {
-            if (candidate == null || candidate.Length < 2 || candidate.Length > 12) return null;
-            if (!System.Text.RegularExpressions.Regex.IsMatch(candidate, "^[a-zA-Z0-9]+$")) return null;
+            if (candidate == null || candidate.Length < 2 || candidate.Length > 14) return null;
+            if (!System.Text.RegularExpressions.Regex.IsMatch(candidate, "^[a-zA-Z0-9-]+$")) return null;
             if (CoTStopwords.Contains(candidate)) return null;
             if (taken.Contains(candidate)) return null;
             if (IsSpeciesUnitLabel(candidate, species)) return null;
@@ -585,10 +587,14 @@ namespace KKLLMNPC
         /// verb + pronoun + candidate, end-of-line anchored. Null otherwise.</summary>
         private static string VerbalAnswerCandidate(string line)
         {
+            // Wide verb net — the reply formats keep multiplying in the field:
+            // "call her Ember" / "they named this one Ember" / "my name is Ember" /
+            // "my name shall be Ember" / "I name myself Ember" / "call me Ember".
             var match = System.Text.RegularExpressions.Regex.Match(line,
-                @"(?:call|calls|calling|called|named|naming|name)\s+" +
-                @"(?:her|him|them|it|myself|this\s+one|this\s+kobold|the\s+kobold|the\s+little\s+one)\s+" +
-                @"[""']?([A-Za-z0-9]{2,12})[""']?[\s.,!;:\-*""']*$",
+                @"(?:(?:my|their|her|his)\s+name(?:\s+(?:is|shall\s+be|will\s+be))?|" +
+                @"(?:call|calls|calling|called|named|naming|name))\s+" +
+                @"(?:her|him|them|it|myself|me|this\s+one|this\s+kobold|the\s+kobold|the\s+little\s+one)?\s*" +
+                @"[""']?([A-Za-z0-9-]{2,14})[""']?[\s.,!;:\-*""']*$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase
                     | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
             if (!match.Success) return null;
@@ -602,10 +608,12 @@ namespace KKLLMNPC
         {
             line = System.Text.RegularExpressions.Regex.Replace(
                 line, @"^\s*(?:[-*>]+|[0-9]{1,3}[.)])\s*", "");
+            // XML-ish wrappers some models emit around the name.
+            line = System.Text.RegularExpressions.Regex.Replace(line, @"</?[A-Za-z_][A-Za-z0-9_]{0,15}>", "");
             line = line.Replace("*", "").Replace("_", "").Replace("\"", "").Replace("'", "").Trim();
-            if (line.Length < 2 || line.Length > 12) return null;
+            if (line.Length < 2 || line.Length > 14) return null;
             for (int i = 0; i < line.Length; i++)
-                if (!char.IsLetterOrDigit(line[i])) return null;
+                if (!(char.IsLetterOrDigit(line[i]) || line[i] == '-')) return null;
             return line;
         }
 

@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Added (wave 2)
+
+- **Digestion narrates the ROUTE, not just the stomach.** A swallowed person rides "deep in their
+  body (taken in through the ass/pussy/cock/breast)" — "stomach" is now a mouth-entry-only word
+  (models kept recasting unbirths and cock-vore as a meal in a stomach). Every promise, milestone
+  and completion line is hole-aware.
+- **No more accidental orgasms inside someone.** A swallowed victim's stimulation is clamped to
+  zero every tick — the game's penetration machinery used to keep pumping them until the Cum RPC
+  fired an unintended cumshot that sprayed particles THROUGH the pred. The in-body verbs replace
+  it on purpose: `kick` (they feel it, cooldown), `masturbate`/`cum` (the DELIBERATE climax —
+  fires the game's own orgasm and lands real Cum reagent in the pred's belly with your genes
+  riding), `surrender` (go limp; the pred is told the squirming stopped). Both minds also get
+  numbered `[conversion]` progress events (~10s) and a `[intake]` checkpoint ladder (25/50/75%) as
+  the held body "goes down fully" — full insert is where the conversion begins.
+- **Full-insert trigger semantics.** Force-feeding no longer triggers from a body bumping ON TOP
+  of a head: the held person's center must be stuffed actually INTO the receiver's maw (below the
+  mouth point, within reach). The held body behaves as a virtual penetrator whose insert fraction
+  is checkable every turn (TAKING IN: <name> — NN% in).
+- **Mailbox tells the truth.** `:busy` on a mailbox was CanUse=false = NO MAIL; it now reports
+  `:mail-waiting` / `:empty (no mail inside)`, and a proximity watcher announces the real has-mail
+  signal (the space-beam glow) on approach and on every change — the models walked up and "waited
+  for the mailbox to free up" for months.
+- **Sex stations are no longer SleepyHeadStations.** Station classification now consults
+  `IAnimationStationSet`: the only resting animation station is BedMachine; every other
+  implementer (workshop "bed"-named sex machines included) classifies as play.
+- **`items [radius]`** lists grabbable PHYSICS items around the NPC — eggs, seeds, food, and
+  FROZEN (PrecisionGrabber) ones included — each with a stable target id so `get id:N` works
+  without eyes or a downward glance.
+- **Naming announces itself.** An LLM-chosen name is announced to the world as the body's first
+  act ("My name — my first choice in this body — is X") and siblings hear it; the salvage net
+  widened (my-name-is/shall-be forms, quoted/bold/XML-wrapped names, dash-labeled lines, hyphenated
+  names) so fewer "still thinking" replies fall back.
+- **Vore drive** (`[Needs] VoreAppetitePerMin`, default 1.5 — weaker sibling of lust): a 2D stat
+  (appetite climbing, sated only by eating; comfort, a per-body affinity) that surfaces in needs
+  and idle cues as honest sizing-up roleplay pressure — acting on it stays gated by
+  SwallowDestination.
+- **WebUI settings got UX**: per-category accordion drawers with hover tooltips (full description
+  on every row), rendered on tab entry only — polls never clobber a value you're typing; a ↻
+  refresh button re-reads config.
+
 ## [Unreleased]
 
 ## [1.1.0] - 2026-10-12

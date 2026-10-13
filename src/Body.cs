@@ -325,6 +325,15 @@ namespace KKLLMNPC
             if (_charAnimator != null) { try { _charAnimator.SetLookEnabled(false); } catch (Exception) { } }
             _navTarget = null; _navTargetName = null; _path = null; _pathIdx = 0; _pathGoalSet = false; _stimSource = null;
             _horny = _cfgHornyBaseline != null ? _cfgHornyBaseline.Value : 0.08f;
+            // Vore COMFORT (2nd drive axis): a stable per-body affinity for
+            // "invitingly big and comfy" meals — deterministic from the body's name.
+            try
+            {
+                int h = 5381; string nm = CleanName(target.name) ?? "kobold";
+                foreach (char cnm in nm) h = ((h << 5) + h) + cnm;
+                _voreComfort = 0.3f + ((h & 0xFF) / 255f) * 0.5f;
+            }
+            catch (Exception) { _voreComfort = 0.5f; }
             _hornyPrevStim = target != null && target.stimulationMax > 0f
                 ? Mathf.Clamp01(target.stimulation / target.stimulationMax) : 0f;
             _hornySaturatedFor = 0f;

@@ -540,6 +540,10 @@ namespace KKLLMNPC
             { "plan",       "your steps for the current goal: plan <step text> | plan | plan next (step done) | plan clear" },
 
             // ---- misc ----
+            { "items",      "list grabbable PHYSICS items around you: items [radius] — eggs/seeds/fruit/frozen ones, each with a target id so `get id:N` works without eyes" },
+            { "kick",       "IN-BODY: kick (only while swallowed) — squirm hard inside them; they feel every one" },
+            { "masturbate", "IN-BODY (only while swallowed): cum deliberately, deep inside them — the intentional climax; their belly gains your cum (genes ride)" },
+            { "surrender",  "IN-BODY (only while swallowed): go limp — stop squirming, accept the conversion" },
             { "screenshot", "show yourself your current view (image)" },
             { "report",     "file a dev bug note: report <what's broken/frustrating> (sonar wrong, cd fails...)" },
             { "help",       "list all commands" },
@@ -556,6 +560,8 @@ namespace KKLLMNPC
             { "go", "cd" }, { "goto", "cd" }, { "go_to", "cd" }, { "move_to", "cd" }, { "travel", "cd" }, { "move", "cd" }, { "walk_to", "cd" }, { "navigate", "cd" },
             // interact
             { "interact", "use" }, { "touch", "use" }, { "try", "use" }, { "operate", "use" },
+            // in-body verbs
+            { "cum", "masturbate" }, { "cum_inside", "masturbate" }, { "squirm", "kick" }, { "giveup", "surrender" }, { "give_up", "surrender" },
             // short walk
             { "walk", "run" }, { "step", "run" }, { "sprint", "run" }, { "walk_ray", "run" },
             // look
@@ -1204,6 +1210,8 @@ namespace KKLLMNPC
                 case "remember": case "forget": case "goal": case "plan":
                 case "skill":
                     return "MEMORY & GOALS";
+                case "kick": case "masturbate": case "surrender":
+                    return "IN-BODY (only while swallowed)";
                 default:
                     if (cmd == "hold") return "READ (poll the game)";
                     return "MISC";

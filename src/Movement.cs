@@ -337,6 +337,9 @@ namespace KKLLMNPC
                 bool driven = stimN >= Consts.HornyStimDriven || IsInAnimationStation() || IsPenetrated() || IsDickInside();
                 if (!driven) lock (_stateLock) { _horny = Mathf.Min(1f, _horny + (rate / 60f) * dt); }
                 _hornyPrevStim = stimN;
+                // Vore drive always climbs (its own cadence, weaker than lust) — only a
+                // real swallow sates it (VoreAppetiteSated at Consume).
+                VoreAppetiteClimb(dt);
             }
             catch (Exception e) { Logger.LogDebug($"UpdateHorniness: {e.Message}"); }
         }

@@ -90,6 +90,7 @@ namespace KKLLMNPC
         internal string _pronounsOverride;
         internal ConfigEntry<float> _cfgHornyRate;
         internal ConfigEntry<float> _cfgHornyBaseline;
+        internal ConfigEntry<float> _cfgVoreAppetiteRate;
         internal ConfigEntry<string> _cfgModelTier;
         internal ConfigEntry<bool> _cfgAutoSwitch;
         internal ConfigEntry<string> _cfgThinking;
@@ -539,6 +540,22 @@ namespace KKLLMNPC
         // Written on the main thread (FixedUpdate), read by perception on the LLM
         // thread — volatile float is 32-bit atomic.
         internal volatile float _horny = 0.08f;
+        // VORE DRIVE (2D, weaker sibling of lust): appetite rises slowly with time
+        // and is sated only by actually swallowing someone; comfort is this BODY's
+        // stable affinity ("invitingly big and comfy"). Surfed in needs + the idle
+        // cue so the models roleplay sizing people up.
+        internal volatile float _voreAppetite = 0.06f;
+        internal float _voreComfort = 0.5f;
+        internal void VoreAppetiteSated()
+        {
+            lock (_stateLock) _voreAppetite = Mathf.Clamp01(_voreAppetite - 0.35f);
+        }
+        internal void VoreAppetiteClimb(float dt)
+        {
+            float rate = 1.5f;
+            try { if (_cfgVoreAppetiteRate != null && _cfgVoreAppetiteRate.Value >= 0f) rate = _cfgVoreAppetiteRate.Value; } catch (Exception) { }
+            lock (_stateLock) { if (rate > 0f) _voreAppetite = Mathf.Min(1f, _voreAppetite + (rate / 60f) * dt); }
+        }
         // Previous tick's stimulation, NORMALIZED 0-1 (see UpdateHorniness), and how
         // long stimulation has been sustained near max without a climax.
         private float _hornyPrevStim = 0f;
@@ -645,6 +662,7 @@ namespace KKLLMNPC
             _cfgRadarScale = plugin._cfgRadarScale;
             _cfgAIReportLog = plugin._cfgAIReportLog;
             _cfgHornyRate = plugin._cfgHornyRate;
+            _cfgVoreAppetiteRate = plugin._cfgVoreAppetiteRate;
             _cfgHornyBaseline = plugin._cfgHornyBaseline;
             _cfgModelTier = plugin._cfgModelTier;
             _cfgAutoSwitch = plugin._cfgAutoSwitch;

@@ -216,6 +216,30 @@ internal static class TestSwallow
         Eq(true, SwallowLogic.EntryVerb(SwallowDestination.Dick).Contains("cock"), "dick entry names the cock");
         Eq(true, SwallowLogic.EntryVerb(SwallowDestination.Nipple).Contains("nipple"), "nipple entry names the nipple");
 
+        // --- hole-aware inside wording: "stomach" is a MOUTH-only noun — models kept
+        // recasting unbirths/cock-vore/anals as "a meal in my stomach". ---
+        Eq("stomach", SwallowLogic.InsideNoun(SwallowDestination.Mouth), "mouth rides in the stomach");
+        Eq("body", SwallowLogic.InsideNoun(SwallowDestination.Anal), "anal rides in the body");
+        Eq("body", SwallowLogic.InsideNoun(SwallowDestination.Pussy), "pussy rides in the body");
+        Eq("body", SwallowLogic.InsideNoun(SwallowDestination.Dick), "dick rides in the body");
+        Eq("body", SwallowLogic.InsideNoun(SwallowDestination.Nipple), "nipple rides in the body");
+
+        // --- intake progress wording (virtual insertion, % in feel/anchor) ---
+        Eq("barely in", SwallowLogic.InsertStageText(0.1f), "10% barely");
+        Eq("about halfway in", SwallowLogic.InsertStageText(0.5f), "50% halfway");
+        Eq("almost fully in", SwallowLogic.InsertStageText(0.8f), "80% almost");
+        Eq("fully in", SwallowLogic.InsertStageText(1.0f), "100% fully");
+        Eq("fully in", SwallowLogic.InsertStageText(5f), "clamps over-unity");
+
+        // --- vore drive flavor (2D: appetite + comfort) ---
+        Eq(null, SwallowLogic.VoreFlavorText(0.1f, 0.5f), "below threshold: no flavor");
+        Eq(true, SwallowLogic.VoreFlavorText(0.3f, 0.8f).IndexOf("comfortable", StringComparison.OrdinalIgnoreCase) >= 0,
+            "low-mid appetite + comfort: comfy-daydream flavor");
+        Eq(true, SwallowLogic.VoreFlavorText(0.3f, 0.2f).Contains("tasty"), "low-mid appetite + low comfort: tasty flavor");
+        Eq(true, SwallowLogic.VoreFlavorText(0.9f, 0.9f).Contains("invitingly big"), "max appetite + comfort: invitingly big");
+        Eq(true, SwallowLogic.VoreFlavorText(0.9f, 0.1f).Contains("TASTY"), "max appetite + low comfort: TASTY");
+        Eq(true, SwallowLogic.VoreFlavorText(5f, -2f).Length > 0, "clamps over/under-unity inputs");
+
         if (_failed == 0) Console.WriteLine("test_swallow: all OK");
         else Console.WriteLine("test_swallow: " + _failed + " failure(s)");
         Environment.Exit(_failed);

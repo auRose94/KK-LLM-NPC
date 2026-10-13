@@ -266,5 +266,42 @@ namespace KKLLMNPC
                 default: return "swallowed whole";
             }
         }
+
+        // Where the victim RIDEs inside the eater — "stomach" only for a mouth entry.
+        // Every other hole holds them deep inside the body; saying "stomach" there
+        // confused the models ("a meal in my stomach" for an unbirth). Pure.
+        public static string InsideNoun(SwallowDestination d)
+        {
+            return d == SwallowDestination.Mouth ? "stomach" : "body";
+        }
+
+        // Intake progress wording for the virtual-insertion narration (0..1).
+        public static string InsertStageText(float t)
+        {
+            float clamped = t < 0f ? 0f : (t > 1f ? 1f : t);
+            if (clamped >= 1f) return "fully in";
+            if (clamped >= 0.75f) return "almost fully in";
+            if (clamped >= 0.5f) return "about halfway in";
+            if (clamped >= 0.25f) return "well in";
+            return "barely in";
+        }
+
+        // VORE DRIVE flavor (agent-side encouragement): a 2D stat — appetite (how much
+        // food-thoughts rise) and comfort (a per-body affinity for "invitingly big and
+        // comfy"). Pure so tests cover the banding.
+        public static string VoreFlavorText(float appetite, float comfort)
+        {
+            float a = appetite < 0f ? 0f : (appetite > 1f ? 1f : appetite);
+            if (a < 0.2f) return null;
+            if (a < 0.45f) return comfort >= 0.5f
+                ? "a passing daydream about a comfortable, snug meal"
+                : "kobolds look faintly tasty right now";
+            if (a < 0.75f) return comfort >= 0.5f
+                ? "you keep sizing kobolds up — who would be invitingly big and comfy to keep inside"
+                : "you keep sizing kobolds up — several of them look tasty";
+            return comfort >= 0.5f
+                ? "a full, warm, comfortable meal is almost all you can think about — every kobold looks invitingly big and soft"
+                : "food-thoughts dominate: kobolds look downright TASTY, and each of them would make a proper meal";
+        }
     }
 }
