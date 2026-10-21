@@ -73,7 +73,7 @@ namespace KKLLMNPC
                 };
                 ApplyThinkingParams(payload);
                 string body = Json.Write(payload);
-                string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                string json = SafeHttp.Post(Endpoint(), body, Val(_cfgApiKey),
                     retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 512 * 1024,
                     onError: ReportEndpointError);
                 if (json == null) return;
@@ -232,12 +232,17 @@ namespace KKLLMNPC
         // system_prompt_name.txt — the shipped file overrides this when present,
         // and both must carry the same text with the {gender} {species}
         // {traits} {taken} placeholders (the prompt-sync trap).
+        //
+        // Reasoning families (qwen-style unmarked "Thinking Process:" walls) are
+        // ALLOWED to think here — fighting it just burned the budget three re-rolls
+        // in a row and shipped fallback names. The protocol is think-then-answer:
+        // the reply must END with the "Name: <the name>" line, which the validator
+        // and SalvageNameFromCoT mine from the end.
         internal static readonly string NamePromptTemplateBuiltin =
             "Name one kobold character. Gender: {gender}. Species: {species}. Personality: {traits}. {taken}" +
-            "Reply with ONE name only: 2-12 letters or digits, no spaces, no punctuation, no explanation. " +
-            "Never the species name with a number attached (like Kobold2) — invent an actual name. " +
-            "Do not think out loud or show your reasoning; if reasoning appears in your reply anyway, " +
-            "your reply MUST end with a final line of the form Name: <the name>";
+            "Think as much as you need — reasoning is welcome. However your reply MUST end with one final line of the exact form: Name: <the name> — " +
+            "<the name> is ONE name only: 2-12 letters or digits, no spaces, no punctuation, nothing after that line. " +
+            "Never the species name with a number attached (like Kobold2) — invent an actual name.";
 
         // The name-prompt chat template: [LLM] NamePromptFile when present,
         // else the built-in. Both go through TextUtil.ExpandTemplate so a
@@ -262,9 +267,13 @@ namespace KKLLMNPC
         // that print their monologue as plain text burn the whole budget before
         // naming, and a fixed budget re-rolled three times hits the same wall —
         // each re-roll gets 3× then 6× the base so the reasoning can complete.
+        // The latest rejected (stripped) reasoning is carried into the next re-roll's
+        // prompt verbatim-abridged so the model corrects instead of re-deriving.
+        private string _lastRejectedNameThink = "";
+
         internal string ChooseNameWithLLM(string gender, string species, string traits, int attempt = 1)
         {
-            if (string.IsNullOrEmpty(Val(_cfgEndpoint)))
+            if (string.IsNullOrEmpty(Endpoint()))
             {
                 Logger.LogInfo("[" + MyName() + "] name selection: no endpoint configured — using fallback name");
                 return null;
@@ -290,7 +299,11 @@ namespace KKLLMNPC
                 if (attempt >= 4)
                     prompt += "\nTIME IS UP — no more thinking, no questions, no waiting. Answer immediately with exactly one final line of the form: Name: <one word>.";
 
-                int baseTokens = FamilyProfile.EmitsThinkBlocks ? 320 : 128;
+                // Naming now WELCOMES reasoning (the prompt asks only for the final
+                // "Name:" line) — give think families room to finish think-then-
+                // answer before the ladder starts multiplying (field-observed qwen
+                // name-wall CoT overflowed two 320-token budgets whole).
+                int baseTokens = FamilyProfile.EmitsThinkBlocks ? 512 : 128;
                 int maxTokens;
                 switch (attempt)
                 {
@@ -308,24 +321,35 @@ namespace KKLLMNPC
                         new Dictionary<string, object> { ["role"] = "user", ["content"] = prompt },
                     },
                     ["temperature"] = 0.9,
-                    // Thinking families need many tokens for reasoning before the
-                    // name — 16 dies inside the marker block, which is why name
-                    // selection historically failed on reasoner models.
-                    // Worse are the templates that print reasoning as PLAIN text
-                    // (no markers to strip): the whole budget dies inside the
-                    // monologue and the validator rejects the blob (observed:
-                    // ~300-token CoT bullets truncated three times at the cap).
-                    // The ladder gives each re-roll more headroom so the
-                    // reasoning can complete and the answer land.
+                    // NAMING NEVER THUNK: a name call is latency-bound and single-purpose.
+                    //Servers that honor the knobs (kk-serve ✓ chat_template_kwargs,
+                    // Ollama think=false, llama.cpp reasoning_budget) skip CoT
+                    // entirely; servers that don't still get the ladder below.
+                    // (Previously this WELCOMED reasoning — that burned whole
+                    // budgets on qwen-style "Thinking Process:" walls.)
                     ["max_tokens"] = maxTokens,
                     ["stream"] = false,
                 };
+                // force the thinking-off fields REGARDLESS of the operator's [LLM].Thinking
+                var nameThinkOff = ModelFamilies.ThinkingOffPayloadPart();
+                if (nameThinkOff != null)
+                    foreach (var kv in nameThinkOff) payload[kv.Key] = kv.Value;
+                // The user's explicit choice can only REINFORCE it
                 ApplyThinkingParams(payload);
+                // RETRY WITH MEMORY: a rejected attempt's reasoning is carried in
+                // verbatim (abridged) so the re-roll corrects instead of re-burning
+                // the same monologue — the field reports why the last reply failed
+                if (_lastRejectedNameThink.Length > 0)
+                    prompt = prompt + "\n(Your last reply was rejected because it never ended with the required 'Name: <one name>' line. "
+                        + "Its reasoning was: " + Shorten(_lastRejectedNameThink, 400) + ")\n" 
+                        + "Use that conclusion. Reply with the reasoning ALREADY DONE: end your reply with the lone final line: Name: <one name> — nothing after it.";
                 string body = Json.Write(payload);
 
-                string json = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                var nameSw = System.Diagnostics.Stopwatch.StartNew();
+                string json = SafeHttp.Post(Endpoint(), body, Val(_cfgApiKey),
                     retries: 2, timeout: TimeSpan.FromSeconds(40), maxResponseBytes: 64 * 1024,
                     onError: ReportEndpointError);
+                try { RecordNameTurn(attempt, prompt, json, nameSw.ElapsedMilliseconds); } catch (Exception) { }
                 if (json == null) return null;
                 {
                     var root = Json.Parse(json) as Dictionary<string, object>;
@@ -370,6 +394,9 @@ namespace KKLLMNPC
                         try { content = msg.GetValueOrDefault("reasoning_content") as string ?? ""; } catch (Exception) { }
                     }
                     content = ModelFamilies.StripThinkBlocks(content ?? "");
+                    // remember WHY this attempt failed for the retry-instructions:
+                    // the (stripped) reasoning goes to the next attempt's prompt
+                    _lastRejectedNameThink = content ?? "";
                     if (string.IsNullOrEmpty(content))
                     {
                         // Log the MESSAGE FIELD (the actual answer container) — the old
@@ -429,6 +456,7 @@ namespace KKLLMNPC
                             return null;
                         }
                         Logger.LogInfo("[" + MyName() + "] LLM chose name: " + content);
+                        _lastRejectedNameThink = "";
                         return content;
                     }
                     // The visible reply carried no bare name — but it may be a
@@ -443,7 +471,9 @@ namespace KKLLMNPC
                         string salvaged = ModelFamilies.SalvageNameFromCoT(content, taken, species);
                         if (!string.IsNullOrEmpty(salvaged))
                         {
+                            DataRecord.MarkSalvage();
                             Logger.LogInfo("[" + MyName() + "] LLM chose name: " + salvaged + " (salvaged from an unmarked reasoning reply)");
+                            _lastRejectedNameThink = "";
                             return salvaged;
                         }
                     }
@@ -603,6 +633,8 @@ namespace KKLLMNPC
                     // perception building costs main-thread time the dead endpoint
                     // isn't worth.
                     if (EndpointBlocked()) { Thread.Sleep(1000); continue; }
+                    _lastDecisionSource = perception; // pass the loop's built perception into the decision slice
+                    MaybeRunDecisionPass(); // optional clef-flash pre-tick recognition
                     string reply = QueryLLM(userJson, imageB64);
                     if (reply == null) { Thread.Sleep((int)(GetDynamicThinkInterval() * 1000)); continue; }
 
@@ -866,11 +898,12 @@ namespace KKLLMNPC
             {
                 // Memory injected into the perception so the NPC remembers what it
                 // was doing — otherwise each turn starts from zero.
-                string mem = string.Format(",\"last_thought\":{0},\"memory\":{1},\"facts\":{2},\"last_action\":{3},\"scene\":{4},\"history\":{5},\"chat_log\":{6},\"model_error\":{7}",
+                string mem = string.Format(",\"last_thought\":{0},\"memory\":{1},\"facts\":{2},\"last_action\":{3},\"scene\":{4},\"history\":{5},\"chat_log\":{6},\"model_error\":{7},\"guidance\":{8}",
                     Json.Write(_lastThought + (_blockedInfo != null ? " (" + _blockedInfo + ")" : "")),
                     ThoughtHistoryJson(), FactsJson(),
                     Json.Write(_lastAction), Json.Write(_sceneDesc), HistoryJson(), ChatLogJson(),
-                    Json.Write(_modelError));
+                    Json.Write(_modelError),
+                    Json.Write(GuidanceJson()));
                 string percep = perceptionJson;
                 if (percep.EndsWith("}")) percep = percep.Substring(0, percep.Length - 1) + mem + "}";
                 string text = "perception:" + percep;
@@ -948,6 +981,7 @@ namespace KKLLMNPC
                 };
                 ApplyThinkingParams(payload);
                 string toolName = null, toolArgs = null;
+                _llmCallMode = CallModeAct;
                 string fullContent = PostChatPayload(payload, out toolName, out toolArgs);
                 if (fullContent == null) return null;
                 // Reasoning markers must never reach tool/JSON parsing — strip early
@@ -996,7 +1030,128 @@ namespace KKLLMNPC
         private const float ImageCooldownSeconds = 90f, SchemaCooldownSeconds = 300f, ToolsCooldownSeconds = 300f;
         private float _imageCooldownUntil, _schemaCooldownUntil, _toolsCooldownUntil;
 
+        // ------------------------------------------------------------------
+        // training-data record ([DataRecord] — see src/DataRecord.cs for the
+        // file contract; naming and vision post directly and record themselves)
+        // ------------------------------------------------------------------
+        private const int CallModeUnknown = 0, CallModeAct = 1, CallModeConsole = 2;
+        private int _llmCallMode;
+
+        private static string ExtractRespContent(string rawResponse)
+        {
+            try
+            {
+                var root = Json.Parse(rawResponse) as Dictionary<string, object>;
+                var choices = root != null ? root.GetValueOrDefault("choices") as List<object> : null;
+                if (choices == null || choices.Count == 0) return null;
+                var msg = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("message") as Dictionary<string, object>;
+                return msg != null ? msg.GetValueOrDefault("content") as string : null;
+            }
+            catch (Exception) { return null; }
+        }
+
+        private void RecordTurn(Dictionary<string, object> payload, string content, string toolName,
+            string toolArgs, List<ToolCallRec> calls, long ms)
+        {
+            if (!DataRecord.Enabled) return;
+            object modelBoxed;
+            var rec = new Dictionary<string, object>();
+            rec["mode"] = _llmCallMode == CallModeConsole ? "console" : "act";
+            try { rec["npc"] = MyName(); } catch (Exception) { rec["npc"] = ""; }
+            rec["model"] = payload.TryGetValue("model", out modelBoxed) && modelBoxed != null ? modelBoxed.ToString() : "";
+            rec["ok"] = (content != null || toolName != null || (calls != null && calls.Count > 0)) ? 1 : 0;
+            rec["ms"] = ms;
+            object msgsBoxed;
+            payload.TryGetValue("messages", out msgsBoxed);
+            rec["msgs"] = DataRecord.RecordableMessages(msgsBoxed);
+            // Record-only frame: a text-only runtime model receives no image parts,
+            // but the console cadence captured the first-person view at decision time
+            // (MaybeAutoScreenshot). Resolve it to a hashed media file and park it as
+            // a turn-LEVEL frame_ref — separate from `msgs`, which must stay exactly
+            // what the runtime model saw.
+            if (_recorderShotB64 != null)
+            {
+                bool hadImages = DataRecord.ConversationHasImage(msgsBoxed);
+                if (_llmCallMode == CallModeConsole && !hadImages)
+                {
+                    string fname = DataRecord.MaterializeDataUri(_recorderShotB64);
+                    if (fname != null) rec["frame_ref"] = fname;
+                }
+                _recorderShotB64 = null;
+            }
+            object toolsBoxed;
+            if (payload.TryGetValue("tools", out toolsBoxed) && toolsBoxed != null)
+            {
+                string h = DataRecord.HashOf(toolsBoxed);
+                if (h != null)
+                {
+                    rec["tools_ref"] = h;
+                    DataRecord.VocabOnce("tools", h, toolsBoxed);
+                }
+            }
+            var resp = new Dictionary<string, object>();
+            if (!string.IsNullOrEmpty(content)) resp["content"] = content;
+            if (toolName != null)
+            {
+                resp["tool"] = toolName;
+                if (!string.IsNullOrEmpty(toolArgs)) resp["tool_args"] = toolArgs;
+            }
+            if (calls != null && calls.Count > 0)
+            {
+                var arr = new List<object>();
+                foreach (var c in calls)
+                {
+                    if (c == null || string.IsNullOrEmpty(c.Name)) continue;
+                    var one = new Dictionary<string, object> { ["name"] = c.Name };
+                    if (c.Args != null) one["args"] = c.Args;
+                    arr.Add(one);
+                }
+                if (arr.Count > 0) resp["calls"] = arr.ToArray();
+            }
+            if (resp.Count > 0) rec["resp"] = resp;
+            DataRecord.Turn(rec);
+        }
+
+        // Naming round-trips post directly (not through PostChatPayload), so they
+        // record themselves — same file contract as RecordTurn.
+        private void RecordNameTurn(int attempt, string prompt, string rawResponse, long ms)
+        {
+            if (!DataRecord.Enabled) return;
+            var rec = new Dictionary<string, object>
+            {
+                ["mode"] = "name",
+                ["npc"] = MyName(),
+                ["model"] = Val(_cfgModel),
+                ["attempt"] = attempt,
+                ["ms"] = ms,
+                ["ok"] = rawResponse != null ? 1 : 0,
+                ["msgs"] = DataRecord.RecordableMessages(new object[]
+                {
+                    new Dictionary<string, object> { ["role"] = "user", ["content"] = prompt },
+                }),
+            };
+            if (rawResponse != null)
+            {
+                string content = ExtractRespContent(rawResponse);
+                var resp = new Dictionary<string, object>();
+                if (content != null) resp["content"] = content;
+                else resp["raw"] = rawResponse.Length > 4096 ? rawResponse.Substring(0, 4096) : rawResponse;
+                rec["resp"] = resp;
+            }
+            DataRecord.Turn(rec);
+        }
+
         private string PostChatPayload(Dictionary<string, object> payload, out string toolName, out string toolArgs,
+            List<ToolCallRec> callsOut = null, bool allowThinkBoost = true)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string content = PostChatPayloadImpl(payload, out toolName, out toolArgs, callsOut, allowThinkBoost);
+            try { RecordTurn(payload, content, toolName, toolArgs, callsOut, sw.ElapsedMilliseconds); } catch (Exception) { }
+            _llmCallMode = CallModeUnknown;
+            return content;
+        }
+
+        private string PostChatPayloadImpl(Dictionary<string, object> payload, out string toolName, out string toolArgs,
             List<ToolCallRec> callsOut = null, bool allowThinkBoost = true)
         {
             toolName = null; toolArgs = null;
@@ -1017,7 +1172,7 @@ namespace KKLLMNPC
                     // slot held hostage in the parallel gate — the third attempt
                     // pinned the gate ~6 minutes while every other NPC starved
                     // (2026-10-12 second-kobold freeze). The next think-tick retries.
-                    rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                    rawResponse = SafeHttp.Post(Endpoint(), body, Val(_cfgApiKey),
                         retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
                         onRetry: r => Logger.LogDebug("LLM retry: " + r),
                         onError: err => lastError = err);
@@ -1079,7 +1234,7 @@ namespace KKLLMNPC
                         while (true)
                         {
                             body = Json.Write(payload);
-                            rawResponse = SafeHttp.Post(Val(_cfgEndpoint), body, Val(_cfgApiKey),
+                            rawResponse = SafeHttp.Post(Endpoint(), body, Val(_cfgApiKey),
                                 retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
                                 onRetry: r => Logger.LogDebug("LLM retry: " + r),
                                 onError: err => lastError = err);
@@ -1113,7 +1268,7 @@ namespace KKLLMNPC
                     int nextTok = curTok * 4; if (nextTok > 16384) nextTok = 16384;
                     payload["max_tokens"] = nextTok;
                     Logger.LogWarning("[" + MyName() + "] think-only reply (reasoning burned the whole " + curTok + "-token budget, no content) — retrying once with max_tokens " + nextTok);
-                    return PostChatPayload(payload, out toolName, out toolArgs, callsOut, false);
+                    return PostChatPayloadImpl(payload, out toolName, out toolArgs, callsOut, false);
                 }
                 return content;
             }
@@ -2063,22 +2218,14 @@ namespace KKLLMNPC
 
         // Given partial JSON like {"action":"wal...   or   {"action":"walk","say":"hi
         // extract whatever action/say we can with regex so the NPC still acts.
+        // (Delegates to the dependency-free TruncatedArgs module, whose regexes are compiled once
+        // instead of per call — see src/TruncatedArgs.cs.)
         private JsonObj TrySalvageTruncated(string s)
         {
-            if (string.IsNullOrEmpty(s)) return null;
-            var d = new Dictionary<string, object>();
-            var ma = System.Text.RegularExpressions.Regex.Match(s, "\"action\"\\s*:\\s*\"([a-z_]+)");
-            if (!ma.Success) return null;
-            d["action"] = ma.Groups[1].Value;
-            var ms = System.Text.RegularExpressions.Regex.Match(s, "\"say\"\\s*:\\s*\"([^\"]*)");
-            if (ms.Success) d["say"] = ms.Groups[1].Value;
-            foreach (var num in new[] { "speed", "strafe", "turn_deg", "yaw_deg", "pitch_deg", "x", "y", "z", "id", "at", "heading_deg", "range" })
-            {
-                var mn = System.Text.RegularExpressions.Regex.Match(s, "\"" + num + "\"\\s*:\\s*(-?[0-9.]+)");
-                if (mn.Success) d[num] = double.Parse(mn.Groups[1].Value, CultureInfo.InvariantCulture);
-            }
-            Logger.LogWarning("salvaged truncated act args: action=" + d["action"]);
-            return new JsonObj(d);
+            var salvaged = TruncatedArgs.Salvage(s);
+            if (salvaged != null)
+                Logger.LogWarning("salvaged truncated act args: action=" + salvaged.Dict["action"]);
+            return salvaged;
         }
 
         // Small-model salvage: scan freeform text for a known tool word and infer

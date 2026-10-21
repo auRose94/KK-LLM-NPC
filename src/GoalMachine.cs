@@ -353,6 +353,32 @@ namespace KKLLMNPC
             }
         }
 
+        // The game says objective '<questTitle>' is finished. If the agent's CURRENT
+        // goal is that quest (≥2 significant shared words), retire it automatically —
+        // a dead quest that stays a goal makes the NPC obsess over it turn after turn.
+        // Only game-confirmed closures reach here (QuestSense → FanoutQuestFinished).
+        internal void QuestGoalAutoClear(string questTitle)
+        {
+            if (string.IsNullOrEmpty(questTitle)) return;
+            string done = null;
+            lock (_goalLock)
+            {
+                if (string.IsNullOrEmpty(_goal)) return;
+                var qWords = SignificantWords("quest objective completed " + questTitle);
+                if (SharedWordCount(_goal, qWords) < 2) return;
+                done = _goal;
+                _recentlyFinished(done);
+                _goal = null;
+                _goalTick = -1;
+                _goalRepeats = 0;
+                _goalProgress = "";
+                ShedFactsForGoal(done);
+                PlanClear("game quest completed"); // the plan ladder belongs to the goal
+            }
+            PushHistory("goal", "game-cleared: " + done + " (the game objective '" + questTitle + "' is finished)");
+            Logger.LogInfo("goal auto-cleared (game quest completed): " + done);
+        }
+
         private static readonly char[] WordSeparators = new[] { ' ', '\t', '\n', '\r', ',', ';', ':', '.', '(', ')', '[', ']', '{', '}', '/', '-', '\\', '"', '\'', '`', '!' };
         private static readonly string[] StopWords = { "the", "and", "for", "with", "your", "from", "into", "onto", "over", "under", "just", "very", "some", "this", "that", "then", "than", "have", "will", "would", "could", "should", "their", "there", "where", "when", "what", "which", "who", "how", "why", "been", "being", "also", "only", "even", "much", "many", "other", "again", "about", "after", "before", "between", "during", "while", "because", "until", "within", "without", "don't", "dont", "can't", "cant", "it's", "its" };
 

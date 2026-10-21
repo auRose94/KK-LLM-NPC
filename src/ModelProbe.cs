@@ -62,11 +62,25 @@ namespace KKLLMNPC
                 const int probeRetries = 3;
                 const int probeDelayMs = 1000;
 
+                // 0. Ollama discovery — tries /api/tags then /api/show. This is the
+                //    richest local source (installed-model list + live context window),
+                //    so we probe it first and skip the Kobold/LMStudio flows when it
+                //    succeeds. If Ollama doesn't answer, we fall through to /model and
+                //    /v1/models below.
+                for (int attempt = 0; attempt < probeRetries; attempt++)
+                {
+                    TryOllama(baseUrl, apiKey);
+                    if (DetectedModelName != null || DetectedContextLength > 0 || AvailableModels.Count > 0) break;
+                    if (attempt < probeRetries - 1)
+                        LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/tags attempt " + (attempt + 1) + "/" + probeRetries + ", retrying...");
+                    Thread.Sleep(probeDelayMs);
+                }
+
                 // 1. Try KoboldCpp /model endpoint (richest info)
                 for (int attempt = 0; attempt < probeRetries; attempt++)
                 {
                     TryKoboldModel(baseUrl, apiKey);
-                    if (DetectedModelName != null || DetectedContextLength > 0) { break; }
+                    if (DetectedModelName != null || DetectedContextLength > 0) break;
                     if (attempt < probeRetries - 1)
                         LLMNPCPlugin.Log?.LogInfo("ModelProbe: /model probe attempt " + (attempt + 1) + "/" + probeRetries + ", retrying...");
                     Thread.Sleep(probeDelayMs);
@@ -106,6 +120,79 @@ namespace KKLLMNPC
                 DetectedError = e.Message;
                 LLMNPCPlugin.Log?.LogWarning("ModelProbe: failed — " + e.Message);
             }
+        }
+
+        // ------------------------------------------------------------------
+        // Ollama — an externally-running host the mod adopts (the game cannot
+        // spawn the Ollama ELF under Proton). /api/tags lists installed models;
+        // /api/show returns the *loaded* model's real context window, which is
+        // what makes ContextCore compaction work (it reads DetectedContextLength).
+        // ------------------------------------------------------------------
+        private static void TryOllama(string baseUrl, string apiKey)
+        {
+            try
+            {
+                // /api/tags — installed models (fall back to nothing if absent).
+                string tagsJson = HttpGet(baseUrl + "/api/tags", apiKey);
+                if (tagsJson != null)
+                {
+                    var installed = OllamaArgs.ParseTags(tagsJson);
+                    if (installed != null && installed.Count > 0)
+                    {
+                        foreach (var m in installed)
+                        {
+                            AvailableModels.Add(new ModelInfo { Id = m.Name });
+                        }
+                        // The model Ollama last used / was loaded is the first
+                        // tags entry (order is by most-recently-used).
+                        if (string.IsNullOrEmpty(DetectedModelName) && installed.Count > 0)
+                            DetectedModelName = installed[0].Name;
+                        LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/tags: " + installed.Count + " model(s), current=" + (DetectedModelName ?? "?"));
+                    }
+                }
+
+                // /api/show — the loaded model's context window + quantization.
+                // No model selected yet? Ask for the first installed model so we
+                // at least learn the window; a follow-up poll after the user
+                // picks one refines it.
+                if (DetectedContextLength <= 0 && !string.IsNullOrEmpty(DetectedModelName))
+                {
+                    var payload = new Dictionary<string, object> { ["model"] = DetectedModelName };
+                    string showJson = HttpPost(baseUrl + "/api/show", Json.Write(payload), apiKey);
+                    if (showJson != null)
+                    {
+                        var show = OllamaArgs.ParseShow(showJson);
+                        if (show != null)
+                        {
+                            int real = OllamaArgs.EffectiveContext(show, DetectedContextLength);
+                            if (real > 0)
+                            {
+                                DetectedContextLength = real;
+                                LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/show: context=" + DetectedContextLength);
+                            }
+                            if (DetectedTier == null && !string.IsNullOrEmpty(show.Architecture))
+                                DetectedTier = ClassifyArch(show.Architecture);
+                            if (string.IsNullOrEmpty(DetectedQuantization) && !string.IsNullOrEmpty(show.Quantization))
+                                DetectedQuantization = show.Quantization;
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                LLMNPCPlugin.Log?.LogInfo("ModelProbe /api: " + e.Message);
+            }
+        }
+
+        // Architecture-family hint (from /api/show model_info.general.architecture)
+        // into a small/medium/large tier. Best-effort; unknown → null.
+        private static string ClassifyArch(string arch)
+        {
+            if (string.IsNullOrEmpty(arch)) return null;
+            string a = arch.ToLowerInvariant();
+            if (a.IndexOf("qwen") >= 0 || a.IndexOf("llama") >= 0 || a.IndexOf("mistral") >= 0)
+                return "medium";
+            return null;
         }
 
         // ------------------------------------------------------------------
@@ -438,6 +525,30 @@ namespace KKLLMNPC
             // Short timeout, 2 attempts: the probe runs at startup and must not
             // stall the plugin if the server is down.
             return SafeHttp.Get(url, apiKey, retries: 2, timeout: TimeSpan.FromSeconds(5));
+        }
+
+        // POST with a JSON body — used for /api/show, whose payload carries
+        // the target model name. Same short-timeout discipline as HttpGet.
+        private static string HttpPost(string url, string body, string apiKey)
+        {
+            try
+            {
+                var req = (System.Net.HttpWebRequest)WebRequest.Create(url);
+                req.Method = "POST";
+                req.ContentType = "application/json";
+                req.Timeout = 5000;
+                if (!string.IsNullOrEmpty(apiKey))
+                    req.Headers["Authorization"] = "Bearer " + apiKey;
+                byte[] bytes = Encoding.UTF8.GetBytes(body ?? "{}");
+                req.ContentLength = bytes.Length;
+                using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
+                using (var resp = req.GetResponse())
+                using (var stream = resp.GetResponseStream())
+                using (var reader = new System.IO.StreamReader(stream, Encoding.UTF8))
+                    return reader.ReadToEnd();
+            }
+            catch (WebException) { return null; }
+            catch (Exception) { return null; }
         }
     }
 }

@@ -246,6 +246,37 @@ static class ConsoleShellTests
             "bulleted command list");
     }
 
+    // ---- echo-tail split ("echo done cat quest" rescues the trailing cat) ----
+    static void EchoCatTailTests()
+    {
+        string h, t;
+        Assert(ConsoleShell.TrySplitEchoCatTail("echo I will go check cat quest", out h, out t)
+            && t == "cat quest" && h == "echo I will go check", "glued cat quest splits: h='" + h + "' t='" + t + "'");
+        var lines = ConsoleShell.ParseReply("echo I will go check cat quest");
+        Assert(lines.Count == 2 && lines[0].Cmd == "echo" && lines[1].Cmd == "cat", "split → echo then cat lines");
+        Assert(lines[0].Payload == "I will go check", "speech keeps the head only: '" + lines[0].Payload + "'");
+        Assert(ConsoleShell.TrySplitEchoCatTail("say done, cat objective", out h, out t)
+            && t == "cat objective" && h == "say done,", "say alias works");
+        Assert(ConsoleShell.TrySplitEchoCatTail("echo checking the objective cat mail.", out h, out t)
+            && t == "cat mail", "punctuated subject trimmed");
+        // false positives stay whole
+        Assert(!ConsoleShell.TrySplitEchoCatTail("echo I love the cat facts here", out h, out t),
+            "article before cat → no split");
+        Assert(ConsoleShell.ParseReply("echo I love the cat facts here").Count == 1, "article FP = one speech line");
+        Assert(!ConsoleShell.TrySplitEchoCatTail("echo my cat quests today", out h, out t),
+            "unknown subject → no split");
+        Assert(!ConsoleShell.TrySplitEchoCatTail("echo \"check cat quest\"", out h, out t),
+            "quoted speech → no split");
+        Assert(!ConsoleShell.TrySplitEchoCatTail("echo cat quest", out h, out t),
+            "bare echo cat quest = pure command, nothing to rescue");
+        Assert(!ConsoleShell.TrySplitEchoCatTail("echo we should use the door", out h, out t),
+            "action verb tail → no split (hands/feet stay echo-bound)");
+        Assert(!ConsoleShell.TrySplitEchoCatTail("cd bed", out h, out t),
+            "non-echo lines untouched");
+        Assert(!ConsoleShell.TrySplitEchoCatTail("echo I check cat quest | tail -1", out h, out t),
+            "pipes stay the payload-data rule's business");
+    }
+
     // ---- help ----
 
     static void HelpText()
@@ -366,6 +397,7 @@ static class ConsoleShellTests
         ParseReplyMixedProse();
         ParseReplyEmpty();
         ParseReplyBullets();
+        EchoCatTailTests();
         HelpText();
         ExtraNames();
         ToolCallToLineTests();

@@ -17,6 +17,43 @@ reasoning pass server-side (Ollama `think=false`, llama.cpp/vLLM `chat_template_
 {enable_thinking:false}`, llama.cpp `reasoning_budget=0`) — the first thing to try when a
 thinking family "takes slow/lost turns"; the struggled-trio notes above are a candidate.
 
+## Custom chat templates (templates/chat/)
+
+For models whose **embedded** chat template mishandles the game's payloads,
+`templates/chat/` ships serve-side fix-ups — no mod changes, the files only shape what
+the model sees:
+
+- **`chat-kk-chatml.jinja`** — generic ChatML/pipe-special families (Qwen, GLM,
+  ZDTaichu, MiMo-V2-Flash, …). Handles the mod's exact payload shapes: parts-array
+  vision turns collapsed to text + an `[image]` marker (stock string-concat templates
+  crash on those with a TypeError — MiMo-7B-RL's does), replayed `tool_calls` with
+  dict-or-string-or-double-encoded arguments (MiMo stock blindly re-quotes the string
+  form), `role:"tool"` flattened to a user turn, a tools section only when NativeTools
+  sends one, and the `enable_thinking:false` empty-reasoning block that `Thinking=off`
+  requests (absent kwarg = thinking stays on).
+- **`chat-mimo-7b.jinja`** — MiMo-7B-RL: byte-faithful to its stock template plus the
+  string-arguments tolerance and a header comment.
+
+Both are written to the llama.cpp **minja** subset and render-tested through
+game-shaped payloads (details in that directory's README). Install: llama.cpp
+`--jinja --chat-template-file templates/chat/<file>.jinja`; LM Studio: My Models →
+gear → Advanced Configuration sidebar → Prompt Template → "Jinja Template" → paste.
+**Keep fine-tuned bases on their embedded templates** — training serialized episodes
+with the base's own template at the token-id level; a serve-time override de-syncs it.
+
+## Serving the fine-tune (serve/ — kk-serve)
+
+The Qwen-track fine-tune (`training/`) is a bf16 HF artifact + LoRA adapter. LM
+Studio/llama.cpp want GGUF — a re-quantized, adapter-merged copy of the thing the
+training run validated. `serve/kk_serve.py` is the repo's numpy+torch alternative:
+it loads the artifact as trained, honors the same request shapes as LM Studio
+(thinking-off kwarg, NativeTools `tool_calls`, image-part ladder), and reuses
+prefix KV between the mod's long repeated console turns — the dominant latency
+lever for the 3-s/tick conversation cadence. `Model` matching is loose (`/v1/models`
+reports the real name), second-GPU and LAN serving work like any other endpoint.
+See [serve/README.md](../serve/README.md); `serve/tests/` carries the contract
+suite (45 tests, no GPU needed for the parser/pipeline halves).
+
 ## Ranking (field status, Oct 2026)
 
 Ranking is observational for now — no formal benchmark has run yet (see plan below).
@@ -51,6 +88,10 @@ startup line `model family 'x' from '<id>'` always shows what was chosen.
 2. **Metrics, all already logged**: turns-to-task (from `KKLLMNPC: LLM loop` + tool
    history lines), tool error rate + which tools (the report log's last-10-tool-calls),
    say-suppression/self-reply incidents, model_error/format retries.
+2b. **Salvage-fires per 100 turns** — with `[DataRecord] Enabled`, the turn log
+   (`kkllmnpc_turns.jsonl`) self-labels every reply that needed recovery (markup/name-CoT
+   salvage, junk carving) via its `salvage` marker; the share of clean replies per model is
+   the direct measure of how much prompt-armor that model actually needs.
 3. **Ground truth**: `kkllmnpc_ai_reports.log` (the NPC's own complaints) + BepInEx log
    parsing; the report tool exists precisely so benchmark runs produce their own
    evidence.

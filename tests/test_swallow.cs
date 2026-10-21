@@ -240,6 +240,64 @@ internal static class TestSwallow
         Eq(true, SwallowLogic.VoreFlavorText(0.9f, 0.1f).Contains("TASTY"), "max appetite + low comfort: TASTY");
         Eq(true, SwallowLogic.VoreFlavorText(5f, -2f).Length > 0, "clamps over/under-unity inputs");
 
+        // --- per-agent vore controls: target parse (agent's vore_target) ---
+        Eq("MOUTH", SwallowLogic.DestinationLabel(SwallowLogic.ParseDestination("mouth")), "mouth parses");
+        Eq("ANAL", SwallowLogic.DestinationLabel(SwallowLogic.ParseDestination("ass")), "ass → anal");
+        Eq("ANAL", SwallowLogic.DestinationLabel(SwallowLogic.ParseDestination("butt")), "butt → anal");
+        Eq("ANAL", SwallowLogic.DestinationLabel(SwallowLogic.ParseDestination("  ANAL ")), "canonical + spaces");
+        Eq("PUSSY", SwallowLogic.DestinationLabel(SwallowLogic.ParseDestination("vagina")), "vagina → pussy");
+        Eq("DICK", SwallowLogic.DestinationLabel(SwallowLogic.ParseDestination("cock")), "cock → dick");
+        Eq("NIPPLE", SwallowLogic.DestinationLabel(SwallowLogic.ParseDestination("breast")), "breast → nipple");
+        Eq(true, SwallowLogic.ParseDestination("wibble") == SwallowDestination.Off, "unparseable hole never guesses");
+        Eq(true, SwallowLogic.ParseDestination("") == SwallowDestination.Off, "empty = off");
+
+        // --- parsed-with-knowledge: clear vs unknown must be distinguishable ---
+        {
+            SwallowDestination d; bool clear, bad;
+            SwallowLogic.TryParseDestination("global", out d, out clear, out bad);
+            Eq(true, clear && !bad && d == SwallowDestination.Off, "'global' = explicit clear");
+            SwallowLogic.TryParseDestination("pussy", out d, out clear, out bad);
+            Eq(true, !clear && !bad && d == SwallowDestination.Pussy, "real pick = not clear");
+            SwallowLogic.TryParseDestination("zzz", out d, out clear, out bad);
+            Eq(true, bad && !clear, "nonsense = bad (agent is told)");
+            SwallowLogic.TryParseDestination("", out d, out clear, out bad);
+            Eq(true, bad, "empty target = bad");
+        }
+
+        // --- per-agent vore controls: fate parse (agent's vore_mode) ---
+        {
+            SwallowEffect m; bool clear, bad;
+            SwallowLogic.TryParseEffect("egg", out m, out clear, out bad);
+            Eq("Egg", m.ToString(), "egg parses");
+            SwallowLogic.TryParseEffect("belly", out m, out clear, out bad);
+            Eq("BellyEgg", m.ToString(), "belly → bellyegg");
+            SwallowLogic.TryParseEffect("absorb", out m, out clear, out bad);
+            Eq("Grow", m.ToString(), "absorb → grow");
+            SwallowLogic.TryParseEffect("kill", out m, out clear, out bad);
+            Eq("Destroy", m.ToString(), "kill → destroy");
+            SwallowLogic.TryParseEffect("global", out m, out clear, out bad);
+            Eq(true, clear && !bad, "'global' mode = clear");
+            SwallowLogic.TryParseEffect("zzz", out m, out clear, out bad);
+            Eq(true, bad, "nonsense mode = bad");
+        }
+
+        // --- F8 fate cycle + labels ---
+        Eq("BellyEgg", SwallowLogic.NextEffect(SwallowEffect.Egg).ToString(), "egg → bellyegg cycles");
+        Eq("Grow", SwallowLogic.NextEffect(SwallowEffect.BellyEgg).ToString(), "bellyegg → grow cycles");
+        Eq("Destroy", SwallowLogic.NextEffect(SwallowEffect.Grow).ToString(), "grow → destroy cycles");
+        Eq("Egg", SwallowLogic.NextEffect(SwallowEffect.Destroy).ToString(), "destroy → egg cycles");
+        Eq("EGG", SwallowLogic.EffectLabel(SwallowEffect.Egg), "egg label");
+        Eq("BELLY-EGG", SwallowLogic.EffectLabel(SwallowEffect.BellyEgg), "bellyegg label");
+        Eq("GROW", SwallowLogic.EffectLabel(SwallowEffect.Grow), "grow label");
+        Eq("DESTROY", SwallowLogic.EffectLabel(SwallowEffect.Destroy), "destroy label");
+
+        // --- clear-word set shared by both knobs ---
+        Eq(true, SwallowLogic.IsPreferenceClearWord("off") && SwallowLogic.IsPreferenceClearWord("global")
+            && SwallowLogic.IsPreferenceClearWord("none") && SwallowLogic.IsPreferenceClearWord("Clear"),
+            "clear words recognized");
+        Eq(true, !SwallowLogic.IsPreferenceClearWord("mouth") && !SwallowLogic.IsPreferenceClearWord("grow"),
+            "real picks are not clear words");
+
         if (_failed == 0) Console.WriteLine("test_swallow: all OK");
         else Console.WriteLine("test_swallow: " + _failed + " failure(s)");
         Environment.Exit(_failed);

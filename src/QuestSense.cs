@@ -24,6 +24,16 @@ namespace KKLLMNPC
         private static int _stars = -1;
         private static float _lastPoll = -99f;
         private static readonly object _lock = new object();
+        // The objective OBJECT on the scroll (not just its title string): title-only
+        // diffing misreads autoAdvance chains — quest finishes, next letter switches
+        // in, and all we ever saw was "progress". Reference identity catches the
+        // hand-off and lets us say "that quest is FINISHED".
+        private static DragonMailObjective _lastObj;
+        // Consecutive poll exceptions = scene teardown (the manager singleton dies
+        // mid-throw). Retiring state only after a streak avoids one bad call
+        // masquerading as "quest completed".
+        private static int _errStreak;
+        private static float _lastGoodPoll = -99f;
 
         // Main-thread poll from the plugin's Update, 1/s.
         internal static void Tick(LLMNPCPlugin plugin)
@@ -35,35 +45,95 @@ namespace KKLLMNPC
                 _lastPoll = Time.unscaledTime;
 
                 string title = null, body = null;
+                DragonMailObjective obj = null;
                 try
                 {
-                    var obj = ObjectiveManager.GetCurrentObjective();
-                    if (obj != null) { title = obj.GetTitle(); body = obj.GetTextBody() ?? ""; }
+                    obj = ObjectiveManager.GetCurrentObjective();
+                    if (obj != null)
+                    {
+                        title = obj.GetTitle();
+                        body = obj.GetTextBody() ?? "";
+                        if (string.IsNullOrEmpty(title)) { obj = null; title = null; body = null; }
+                    }
                 }
-                catch (Exception) { }
+                catch (Exception)
+                {
+                    // The manager is per-scene: a throw usually means scene teardown.
+                    // Retain state across the gap; only a streak retires it silently.
+                    try
+                    {
+                        if (++_errStreak >= 2)
+                            lock (_lock) { _lastObj = null; _title = null; _body = null; _hasMail = false; _errStreak = 0; }
+                    }
+                    catch (Exception) { }
+                    return;
+                }
+                _errStreak = 0;
+                bool sceneStable = Time.unscaledTime - _lastGoodPoll < 5f;
+                _lastGoodPoll = Time.unscaledTime;
                 bool hasMail = false;
                 try { hasMail = ObjectiveManager.HasMail(); } catch (Exception) { }
                 int stars = -1;
                 try { stars = ObjectiveManager.GetStars(); } catch (Exception) { }
 
-                string ev = null;
+                string ev = null, doneTitle = null;
                 lock (_lock)
                 {
-                    bool had = _title != null;
+                    bool had = _lastObj != null || !string.IsNullOrEmpty(_title);
                     bool has = !string.IsNullOrEmpty(title);
-                    if (has && !had)
-                        ev = "A NEW OBJECTIVE LETTER is live in the top-right scroll: '" + title + "' — " + body
-                            + " That is the PLAYER'S current game objective; offer to help, take it on as your goal, and report progress.";
-                    else if (has && !string.Equals(title, _title, StringComparison.Ordinal))
-                        ev = "objective progress: '" + title + "' — " + body;
-                    else if (!has && had)
-                        ev = "the scroll OBJECTIVE was COMPLETED (stars: " + (_stars < 0 ? "?" : _stars.ToString()) + ") — new letters arrive at the MAILBOX";
-                    if (hasMail && !_hasMail && !has)
+                    if (has)
+                    {
+                        if (_lastObj != null && _lastObj != obj)
+                        {
+                            // A different letter is on the scroll. On an unstable poll
+                            // window (scene change) we can't trust this to mean the old
+                            // one completed — announce the new letter only.
+                            if (had && sceneStable)
+                            {
+                                doneTitle = string.IsNullOrEmpty(_title) ? "(previous letter)" : _title;
+                                ev = "OBJECTIVE COMPLETED: '" + doneTitle + "' — that quest is FINISHED and can't be worked again."
+                                    + " If your current goal (set_goal) was that quest, run complete_goal now and forget any facts you kept about it."
+                                    + " The scroll now shows a NEW letter: '" + title + "' — " + body
+                                    + " That is the PLAYER'S current game objective; offer to help, take it on as your goal, and report progress.";
+                            }
+                            else
+                                ev = "A NEW OBJECTIVE LETTER is live in the top-right scroll: '" + title + "' — " + body
+                                    + " That is the PLAYER'S current game objective; offer to help, take it on as your goal, and report progress.";
+                        }
+                        else if (_lastObj == null)
+                        {
+                            if (!had)
+                                ev = "A NEW OBJECTIVE LETTER is live in the top-right scroll: '" + title + "' — " + body
+                                    + " That is the PLAYER'S current game objective; offer to help, take it on as your goal, and report progress.";
+                            else if (!string.Equals(title, _title, StringComparison.Ordinal))
+                                ev = "objective progress: '" + title + "' — " + body;
+                        }
+                        else if (!string.Equals(title, _title, StringComparison.Ordinal))
+                        {
+                            ev = "objective progress: '" + title + "' — " + body;
+                        }
+                    }
+                    else if (_lastObj != null && had && sceneStable)
+                    {
+                        // Scroll emptied by the manager itself: completion, not teardown
+                        // (teardown exits above via the error streak; an unstable poll
+                        // window never gets to claim a completion).
+                        doneTitle = string.IsNullOrEmpty(_title) ? "(previous letter)" : _title;
+                        ev = "OBJECTIVE COMPLETED: '" + doneTitle + "' (stars: " + (_stars < 0 ? "?" : _stars.ToString()) + ")"
+                            + " — that quest is FINISHED and can't be worked again. If your current goal (set_goal) was that quest,"
+                            + " run complete_goal now and forget any facts you kept about it. New letters arrive at the MAILBOX.";
+                    }
+                    else if (hasMail && !_hasMail && !has)
+                    {
                         ev = "MAIL is waiting at the mailbox — get it by USING the mailbox (the letter box; NOT the sell machine) — the next objective letter is inside, and YOU can fetch it for your player";
-                    _title = title; _body = body; _hasMail = hasMail;
+                    }
+                    _title = title; _body = body; _hasMail = hasMail; _lastObj = obj;
                     if (stars >= 0) _stars = stars;
                 }
                 if (ev != null) try { plugin.FanoutWorldEvent(ev); } catch (Exception) { }
+                // Belt for the prompt event: actively shed quest-scoped facts and retire
+                // a goal that was that quest, so nobody keeps grinding a dead objective.
+                if (doneTitle != null) try { plugin.FanoutQuestFinished(doneTitle); } catch (Exception) { }
             }
             catch (Exception) { }
         }

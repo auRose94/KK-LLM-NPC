@@ -190,9 +190,16 @@ namespace KKLLMNPC
             var r = GoalResolver.Resolve(grid, gx, gz, refY);
             if (!r.Found) return false;
             gc = r.Cell; gl = r.Layer;
-            // Keep the caller's X/Z: only the floor height comes from the grid,
-            // so a goal on a walkable cell isn't nudged to the cell centre.
-            goalPoint = new Vector3(goal.x, r.Height, goal.z);
+            if (r.Snapped)
+                // The raw goal X/Z sits in something solid (typically a wall corner) —
+                // end the route at the landing cell instead of pinning the final
+                // waypoint back onto the raw X/Z, which drove the last leg straight
+                // through the wall ("arrived outside the building, interacted in").
+                goalPoint = grid.CellPos(r.Cell, r.Layer);
+            else
+                // Keep the caller's X/Z: only the floor height comes from the grid,
+                // so a goal on a walkable cell isn't nudged to the cell centre.
+                goalPoint = new Vector3(goal.x, r.Height, goal.z);
             return true;
         }
     }

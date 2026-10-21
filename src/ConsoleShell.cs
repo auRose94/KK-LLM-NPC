@@ -37,6 +37,11 @@ namespace KKLLMNPC
         // so inner spacing and quotes of the speech/fact text are preserved.
         public string Payload;
         public bool IsUnknown { get { return Cmd == null; } }
+        // Pipeline stages (ConsolePipe): IsFilter = a stream filter (grep/head/…)
+        // that consumes the previous stage's output and spends no game-command
+        // budget; PipeDown = this line's output feeds the NEXT line as pipe input.
+        public bool IsFilter;
+        public bool PipeDown;
     }
 
     // ------------------------------------------------------------------
@@ -330,7 +335,10 @@ namespace KKLLMNPC
             // which the word-scavenger below cannot recover reliably.
             var fromCalls = ConsoleTools.ToolCallMarkupLines(reply);
             if (fromCalls.Count > 0)
+            {
+                DataRecord.MarkSalvage(); // markup the server didn't parse — carried on the next record
                 return string.Join("\n", fromCalls.ToArray());
+            }
             var outLines = new System.Collections.Generic.List<string>();
             foreach (var rawLine in reply.Split('\n'))
             {
@@ -339,7 +347,7 @@ namespace KKLLMNPC
                 {
                     string head = rawLine.Substring(0, cut).Trim().TrimEnd(':', ',', ';');
                     if (head.Length > 0) outLines.Add(head); // clean head (echo text or prose)
-                    SalvageCommands(rawLine.Substring(cut), outLines);
+                    if (SalvageCommands(rawLine.Substring(cut), outLines)) DataRecord.MarkSalvage();
                 }
                 else GlueSplit(rawLine, outLines);
             }
@@ -546,6 +554,13 @@ namespace KKLLMNPC
             { "surrender",  "IN-BODY (only while swallowed): go limp — stop squirming, accept the conversion" },
             { "screenshot", "show yourself your current view (image)" },
             { "report",     "file a dev bug note: report <what's broken/frustrating> (sonar wrong, cd fails...)" },
+            // ---- pipes (stream filters over the previous command's output) ----
+            { "grep",       "pipe filter: grep [-i] [-v] [-c] <text> — e.g. ps | grep k | head -n 5" },
+            { "head",       "pipe filter: head [-n N] — first N lines (default 10)" },
+            { "tail",       "pipe filter: tail [-n N] — last N lines (default 10)" },
+            { "wc",         "pipe filter: wc [-w words | -c chars] — counts lines by default" },
+            { "sort",       "pipe filter: sort [-r] — alphabetize (r = reverse)" },
+            { "uniq",       "pipe filter: uniq [-c] — collapse adjacent duplicates (c = show counts)" },
             { "help",       "list all commands" },
             { "clear",      "clear the screen (no game effect)" },
         };
@@ -918,10 +933,91 @@ namespace KKLLMNPC
             {
                 string line = ParseLine(raw);
                 if (line == null) continue;
-                var cl = Parse(line);
-                if (cl != null) outp.Add(cl);
+                // Glued echo tail: `echo I will check mail cat quest` — the words
+                // after echo are all spoken (the payload rule), so the trailing
+                // command never RAN and the model believed it had checked. When the
+                // echo's unquoted speech ends in a read-only `cat <subject>`, split
+                // the tail off so it executes as its own line.
+                string tail, head;
+                if (TrySplitEchoCatTail(line, out head, out tail))
+                {
+                    EmitReplyLine(outp, head);
+                    var ctl = Parse(tail);
+                    if (ctl != null) outp.Add(ctl);
+                    continue;
+                }
+                EmitReplyLine(outp, line);
             }
             return outp;
+        }
+
+        // Parse one reply line into console lines (pipeline chains explode).
+        private static void EmitReplyLine(List<ConsoleLine> outp, string line)
+        {
+            var chain = ExplodePipeline(line);
+            if (chain == null)
+            {
+                var cl = Parse(line);
+                if (cl != null) outp.Add(cl);
+                return;
+            }
+            foreach (var st in chain) outp.Add(st);
+        }
+
+        // Echo-tail split (pure, unit-testable). Deliberately narrow to the shape
+        // models actually produce (`... cat quest`), with false-positive guards:
+        //   * quote/pipe/semicolon anywhere in the speech → no split (quoted speech
+        //     is deliberate; pipes/semicolons are the payload-data rule's domain);
+        //   * the tail is ONLY a final `cat <known subject>` pair — never anything
+        //     that moves hands/feet (use/get/drop/go are refused by design);
+        //   * the word before `cat` must not be an article/possessive ("I love the
+        //     cat facts" is speech; "let me check cat facts" is a glued command);
+        //   * the echo must still have speech left (a bare "echo cat quest" is a
+        //     quoted-command attempt, not speech + tail).
+        internal static bool TrySplitEchoCatTail(string line, out string head, out string tail)
+        {
+            head = null; tail = null;
+            if (line == null) return false;
+            string t = line.Trim();
+            if (t.Length == 0 || t.IndexOf('(') >= 0) return false;
+            string cmdWord = t.Split(' ')[0];
+            string cmd = CanonicalTight(cmdWord);
+            if (cmd == null || cmd != "echo") return false;
+            int sp = t.IndexOf(' ');
+            if (sp < 0) return false;
+            string speech = t.Substring(sp + 1).Trim();
+            if (speech.Length == 0) return false;
+            if (speech.IndexOf('\"') >= 0 || speech.IndexOf('\'') >= 0
+                || speech.IndexOf('|') >= 0 || speech.IndexOf(';') >= 0) return false;
+            var words = new List<string>();
+            foreach (var w in speech.Split(' ')) if (w.Length > 0) words.Add(w);
+            // Need: <speech head (>0 words) + cat + subject  (≥3 tokens total).
+            if (words.Count < 3) return false;
+            if (CanonicalTight(words[words.Count - 2]) != "cat") return false;
+            string beforeCat = words[words.Count - 3].ToLowerInvariant();
+            if (beforeCat == "the" || beforeCat == "a" || beforeCat == "an" || beforeCat == "my"
+                || beforeCat == "our" || beforeCat == "your" || beforeCat == "this" || beforeCat == "that"
+                || beforeCat == "one" || beforeCat == "some" || beforeCat == "no") return false;
+            string subj = words[words.Count - 1].ToLowerInvariant().TrimEnd('.', ',', ';', '!', '?', ':');
+            if (!IsCatSubject(subj)) return false;
+            var sb = new StringBuilder(t.Substring(0, sp + 1));
+            for (int i = 0; i < words.Count - 2; i++)
+            { if (i > 0) sb.Append(' '); sb.Append(words[i]); }
+            head = sb.ToString();
+            tail = "cat " + subj;
+            return head.Length > cmdWord.Length; // speech head is guaranteed non-empty (≥2 words)
+        }
+
+        // `cat` subjects that make sense glued behind speech (quest/objective/mail
+        // are the observed cases). Mirrors CmdCat's subject list in Console.cs.
+        private static readonly string[] EchoCatSubjects = {
+            "facts", "goal", "plan", "chat", "needs", "history", "stations", "places",
+            "map", "body", "hold", "here", "player", "quest", "skills", "objective", "mail", "steps", "key"
+        };
+
+        private static bool IsCatSubject(string s)
+        {
+            return Array.IndexOf(EchoCatSubjects, s) >= 0;
         }
 
         // Parse one line. Returns null for blank lines.
@@ -1023,6 +1119,54 @@ namespace KKLLMNPC
             string s = ParseLine(line);
             if (s == null) return null;
             return ToLine(s);
+        }
+
+        // ONE line → the chain of lines to run: pipelines (`ps | grep k | head`)
+        // and sequences (`cd kitchen && ls`) explode into their stages, flags wired
+        // for the executor to pipe outputs through. Runs the line UNSPLIT (single
+        // stage) in the legacy shapes, on purpose:
+        //   * the first stage's command is a PAYLOAD command (echo/remember/goal/
+        //     plan/skill/report) — their ';' and '|' are DATA (skill steps are
+        //     "name | step;step");;
+        //   * any stage's first token isn't a known command (the pipe chars then
+        //     belong to a payload we parse as a whole; the unknown stage keeps its
+        //     own error path);
+        //   * there aren't at least two real stages.
+        // The FIRST stage being a payload command disqualifies the whole line; later
+        // stages may be payload commands (cd work && echo done).
+        public static List<ConsoleLine> ExplodePipeline(string line)
+        {
+            var stages = ConsolePipe.StagesOf(line);
+            if (stages == null || stages.Count < 2) return null;
+            var outp = new List<ConsoleLine>();
+            string firstCmd = Canonical(FirstWord(stages[0].Raw));
+            if (firstCmd == null || IsPayloadCommand(firstCmd)) return null;
+            foreach (var st in stages)
+            {
+                if (string.IsNullOrEmpty(st.Raw)) continue;
+                string s = ParseLine(st.Raw);
+                if (s == null) continue;
+                var cl = ToLine(s);
+                if (cl == null || cl.IsUnknown) return null; // unknown stage = not ours to split
+                cl.Raw = s;
+                cl.IsFilter = ConsolePipe.IsFilter(cl.Cmd);
+                cl.PipeDown = st.PipeDown;
+                outp.Add(cl);
+            }
+            if (outp.Count < 2) return null;
+            // The last stage never pipes down (nothing comes after).
+            outp[outp.Count - 1].PipeDown = false;
+            return outp;
+        }
+
+        // First whitespace-delimited word of a raw stage (canonicalizing input).
+        private static string FirstWord(string s)
+        {
+            if (s == null) return null;
+            s = s.Trim();
+            int i = 0;
+            while (i < s.Length && !char.IsWhiteSpace(s[i])) i++;
+            return i < s.Length ? s.Substring(0, i) : s;
         }
 
         // "a b \"c d\" e" → [a, b, "c d", e]

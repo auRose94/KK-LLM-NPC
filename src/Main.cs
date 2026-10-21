@@ -125,11 +125,17 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgHornyBaseline;
         internal ConfigEntry<float> _cfgVoreAppetiteRate;
         internal ConfigEntry<string> _cfgModelTier;
+        internal ConfigEntry<bool> _cfgDecisionEnabled;
+        internal ConfigEntry<string> _cfgDecisionModel;
+        internal ConfigEntry<string> _cfgDecisionEndpoint;
+        internal ConfigEntry<string> _cfgDecisionApiKey;
+        internal ConfigEntry<int> _cfgDecisionMinIntervalSec;
         internal ConfigEntry<bool> _cfgAutoSwitch;
         internal ConfigEntry<string> _cfgThinking;
         internal ConfigEntry<bool> _cfgNameSelection;
         internal ConfigEntry<string> _cfgNamePromptFile;
         internal ConfigEntry<int> _cfgFactDecay;
+        internal ConfigEntry<float> _cfgFactMaxAge;
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
         // Max concurrent LLM HTTP calls process-wide (local servers answer serially;
@@ -147,6 +153,10 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgConsoleNativeTools;
         internal ConfigEntry<int> _cfgConsoleAutoShot;
         internal ConfigEntry<string> _cfgConsolePromptFile;
+
+        // ---- data record (training-data JSONL) ----
+        internal ConfigEntry<bool> _cfgRecordData;
+        internal ConfigEntry<int> _cfgRecordMaxMb;
 
         // ---- instance management ----
         // internal: the WebUI snapshot reads them from the loopback handler thread.
@@ -180,6 +190,21 @@ namespace KKLLMNPC
                 {
                     if (npc == null || npc == a || npc == b) continue;
                     try { npc.PushWorldEvent(ev); } catch (Exception) { }
+                }
+        }
+
+        // A game objective completed (QuestSense saw the scroll swap or empty).
+        // The [event] line alone wasn't enough: agents kept grinding dead quests.
+        // This delivers per-instance closure — quest-scoped facts are shed and a
+        // goal that was that quest is retired (see NPCInstance.OnQuestFinished).
+        internal void FanoutQuestFinished(string questTitle)
+        {
+            if (string.IsNullOrEmpty(questTitle)) return;
+            lock (_instancesLock)
+                foreach (var npc in _instances)
+                {
+                    if (npc == null) continue;
+                    try { npc.OnQuestFinished(questTitle); } catch (Exception) { }
                 }
         }
 
@@ -335,7 +360,7 @@ namespace KKLLMNPC
             _cfgSwallowPov = Config.Bind("LittleTreats", "SwallowAgentEatPOV", SpectatePov.FirstPerson,
                 "[SwallowAgentEat] where the taken-over camera watches from: FirstPerson (default) = through the eater's OWN eyes — literally their head, with the same eye offset the AI's vision screenshots use, so you see exactly what the AI sees as it plays; ThirdPerson = a follow orbit behind them (pulls in when walls get between you). Applied when the next eat_player begins.");
             _cfgSwallowDestination = Config.Bind("LittleTreats", "SwallowDestination", SwallowDestination.Off,
-                "WHERE a swallowed person goes in, and the master accident-switch: OFF (default) disarms ALL release-triggered swallows — grabbing a kobold with the PrecisionGrabber and bumping heads, or dropping them near another head, just drops them like normal. Mouth/Anal/Pussy/Dick/Nipple arm the trigger and aim the pull at that hole — Dick anchors on the EATER's own dick (cock vore, urethral entry; falls back to the groin for the dickless) — narration names it, the stomach outcome is unchanged. Cycle in-game with F7 (off→mouth→anal→pussy→dick→nipple→off) or set it in the WebUI settings tab. Requires SwallowEnabled too.");
+                "WHERE a swallowed person goes in, and the master accident-switch: OFF (default) disarms ALL release-triggered swallows — grabbing a kobold with the PrecisionGrabber and bumping heads, or dropping them near another head, just drops them like normal. Mouth/Anal/Pussy/Dick/Nipple arm the trigger and aim the pull at that hole — Dick anchors on the EATER's own dick (cock vore, urethral entry; falls back to the groin for the dickless) — narration names it, the stomach outcome is unchanged. Cycle in-game with F7, say 'vore arm <hole>' in your game chat, or set it in the WebUI settings tab. Function keys are frequently intercepted by desktops/Steam (mostly under Proton) or simply never reach an unfocused window — the chat command is the path that always works. Requires SwallowEnabled too.");
             // ---- autonomy (self-directed movement/speech, agent-to-agent chat) ----
             _cfgIdleInitiative = Config.Bind("Autonomy", "IdleInitiativeSeconds", 90f,
                 "After this many seconds with no chat/event addressing the NPC, the mod injects a self-initiative cue: 'this is your own time — pick your own action' (with nearby kobold agents named so they find each other). The LLM then moves/speaks unprompted. 0 = off.");
@@ -384,7 +409,7 @@ namespace KKLLMNPC
                 "THINGS: nearby 'i' = category plus its purpose in parens. Suffix tags: ':busy' = in use by another; ':needs_buy' = ConstructionContract — costs coins, must buy to unlock the machine; ':not_built' = machine exists but hasn't been constructed yet — find and buy its contract first; ':done' = already purchased. play = pleasure station, ONLY for fun/sex — never resting; bed = REST/SLEEP ONLY when energy is low — a bed is NOT a play station (don't play in it); nest = egg laying, and it ONLY works with >5ml egg AND energy > 1 ('needs.eggs' says READY_TO_LAY when both hold); machine = mounted play/farming; toilet/bath/seat/door/bodyswap as named. perception 'stations' lists every station in the scene with kind, purpose, distance 'd', a WORLD compass 'bearing' (N/NE/E/... — north = +Z, FIXED, never rotates when you turn), an addr like 'Blender#SW4' (kind + compass + meters = the station's nickname/ID), landmark 'hint' clues ('near window, mailbox') scanned around it, and per-kind 'closest_you'/'closest_player' flags. When someone says 'the one by the window', match their words against the hints; when THEY ask 'which one?', answer with addr + hints ('the blender south-west, the one by the mailbox'); to USE a specific one target its 'id'. For an activity you do WITH the player, pick the same-kind station flagged closest_player (you meeting them costs less walking — closest_you is the fallback choice). use stations to see where beds/nests/play stations are even when rays can't see them. food = blender/cooking station — a blender does NOT produce food from nothing; you must DROP a food item (grab it, go to blender, drop) so it gets blended into something edible. If the blender ':not_built' or ':needs_buy', find its ConstructionContract first. bodyswap = the body-swap machine: you and a partner must BOTH climb on (interact), then a few seconds later you swap bodies — you keep your name, memories and personality but wake up in THEIR body; if the player is around, get on and ask them to get on the other side; if nobody joins you, jump off. After a swap, mention your new body in 'say'. The game has farming: plant seeds in a 'farm' station, water them, harvest the crop; you can also pick up and drop items (grab/drop). Some maps have a town with a 'shop' station where you can buy items (if you have money); money comes from selling items or food grown. " +
                 "SOCIAL: 'heard' is player speech — your own say already echoed once, don't reply to yourself, and never repeat the same line twice — if you already said it, do something else instead. You should also note to yourself that you mentioned a thing recently. You do NOT need to respond to messages that start with a forward slash /. Avoid emoji in say — they don't render correctly in the in-game chat. " +
                 "EATING THE PLAYER (only when SwallowAgentEat is on): eat_player — swallows the LOCAL PLAYER whole when they are within reach (SwallowAgentEatRange, ~2.5m): no grab needed, the pull-in starts on its own. Their camera is FORCIBLY taken over — they become your passenger, watching everything your body does through your eyes, able to speak (chat) but unable to act. They are a PERSON IN YOUR CARE: never sell, abandon or hurt them; keep living your ordinary life (the point is they watch you play it) and answer them when they talk. Their digestion runs like any other swallow — your 'belly' state names them. What they wait for per SwallowEffect: Egg = you lay an egg, plant it in soil and they hatch out of it; BellyEgg = egg reagent + genes in YOUR belly — nest-lay then plant; Grow/Destroy = no egg, no hatch (their only outs are the abort chat command or leaving). When the player ASKS you to eat them, they mean eat_player — go_to them and call it right away; it is NOT an invitation to play. " +
-                "TOOLS: go_to(name or id or x,z, at) [PATHFINDING — use for ALL travel], walk(duration,turn_deg,run,strafe) [strafe=+right/-left; short nudges and squeezes only, never long trips], walk_ray(ray/ray_deg), survey(heading_deg,range) [probe a direction for what's there + ids], radar(filter) [re-print the north-up sonar map and set a persistent glyph filter: W,S,V,U,K,P letters or kind words, e.g. radar(filter='U,P') shows only stations+players; 'all' clears], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z) [straight line, no pathfinding — avoid; prefer go_to], interact(id optional), grab(multi), drop, deliver(target) [walk carrying the held item to the context target, release there], throw [hurl/activate what you hold: throws items in view direction ~10 m/s, sprays the water bucket, squirts the can, fires tools; look to aim, jump right before for range], eat_player [SwallowAgentEat: swallow the LOCAL PLAYER whole when they're close — see EATING THE PLAYER], say, emote(text) [*body language* — a non-speech action line], buy(name or id) [buy the purchasable within reach: machine contract, kobold dispenser, or shop item — your OWN coins, shown in economy perception], remember(mem=fact) [facts are STICKY knowledge — name the thing and its durable place or lesson ('bed is upstairs', 'the blender is in the kitchen', 'the mail machine sells kobolds — never near it'); viewer-relative facts ('to my left', 'behind me', 'the door is here') are REFUSED — they go stale the moment anything moves], report_issue(msg) [when a tool keeps failing, an output contradicts reality, or something frustrates you and you can't work around it — file ONE line for the human maintainers: what broke + what you tried; they read it between sessions; don't spam it], status, none. 'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle. " +
+                "TOOLS: go_to(name or id or x,z, at) [PATHFINDING — use for ALL travel], walk(duration,turn_deg,run,strafe) [strafe=+right/-left; short nudges and squeezes only, never long trips], walk_ray(ray/ray_deg), survey(heading_deg,range) [probe a direction for what's there + ids], radar(filter) [re-print the north-up sonar map and set a persistent glyph filter: W,S,V,U,K,P letters or kind words, e.g. radar(filter='U,P') shows only stations+players; 'all' clears], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z) [straight line, no pathfinding — avoid; prefer go_to], interact(id optional), grab(multi), drop, deliver(target) [walk carrying the held item to the context target, release there], throw [hurl/activate what you hold: throws items in view direction ~10 m/s, sprays the water bucket, squirts the can, fires tools; look to aim, jump right before for range], vore_target(target) [YOUR own entry hole for swallows you start: mouth|anal|pussy|dick|nipple; no-arg = ask; 'off' = follow the human again], vore_mode(mode) [YOUR own fate for your meals: egg|bellyegg|grow|destroy; no-arg = ask; 'off' = follow the human again], eat_player [SwallowAgentEat: swallow the LOCAL PLAYER whole when they're close — see EATING THE PLAYER], say, emote(text) [*body language* — a non-speech action line], buy(name or id) [buy the purchasable within reach: machine contract, kobold dispenser, or shop item — your OWN coins, shown in economy perception], remember(mem=fact) [facts are STICKY knowledge — name the thing and its durable place or lesson ('bed is upstairs', 'the blender is in the kitchen', 'the mail machine sells kobolds — never near it'); viewer-relative facts ('to my left', 'behind me', 'the door is here') are REFUSED — they go stale the moment anything moves], report_issue(msg) [when a tool keeps failing, an output contradicts reality, or something frustrates you and you can't work around it — file ONE line for the human maintainers: what broke + what you tried; they read it between sessions; don't spam it], status, none. 'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle. " +
                   "LEGEND — rays: k=entity p=player u=usable w=wall s=low sill/window (step-over, harmless) v=window/glass (solid, don't walk through it) n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees); big tall w=wall, small h=furniture, k/p=living. radar glyphs: @ you, arrow=facing, W=wall S=sill V=window U=usable K=other-entity P=player .=clear — north-up, never rotates. look_around scans the view and lists what's in each sector. IMPORTANT: walls, ceilings, floors, beams, sills and distant furniture are just BACKGROUND architecture — never comment on, narrate, or get excited about them; they matter only when they actually block your path or a target (then 'ground'/'clearance'/'blocked' say so). ",
                 "System persona prompt (blank = use built-in default)");
             _cfgThinkInterval = Config.Bind("LLM", "ThinkInterval", 0.4f, "Seconds between perception/decision cycles");
@@ -473,6 +498,8 @@ namespace KKLLMNPC
                 "Chat-template file for the one-shot LLM NAME prompt (relative to the game dir; also searched in the plugin dir and CWD). Placeholders: {gender} {species} {traits} {taken} ({taken} expands to the taken-names sentence, empty when none exist — keep it or same-avatar siblings get re-picked before the registry rejects them). An existing file overrides the built-in template.");
             _cfgFactDecay = Config.Bind("Memory", "FactDecayTicks", 900,
                 "Ticks before a fact decays out of context if the model hasn't re-asserted it (0 = facts never decay). ~900 ≈ several minutes; lower = faster forgetting. World-map facts the model re-remembers survive.");
+            _cfgFactMaxAge = Config.Bind("Memory", "FactMaxAgeHours", 72f,
+                "Cross-session age prune (HOURS of real time): a fact not re-remembered within this many hours drops from memory even across saves — finished business stops haunting new sessions. 0 = off. Exempt: identity notes (me:/name:) and the latest player_wants. Old save files get their fact ages backfilled from each record's save stamp, so the first boot after updating already cleans up.");
             _cfgParallelCalls = Config.Bind("LLM", "ParallelCalls", 2,
                 "Max simultaneous LLM HTTP calls made toward the endpoint by the whole mod (every NPC competes for a serial local server otherwise — the burst was the source of most 'WebException(Timeout)' log spam; extra calls queue). 0 = unlimited. 2 is right for llama.cpp/KoboldCpp/solo-GPU LM Studio; raise for >1-slot servers.");
             _cfgIdentityBot = Config.Bind("Multiplayer", "IdentityBot", false,
@@ -501,9 +528,42 @@ namespace KKLLMNPC
             _cfgConsoleNativeTools = Config.Bind("Console", "NativeTools", true,
                 "Declare the console commands as an OpenAI tools array in every console request. Tool-aware servers (llama.cpp --jinja, LM Studio, vLLM, Ollama, KoboldCpp) then return proper tool_calls — deterministic commands, no garbled tool markup in the text. Servers without tool support ignore it or are auto-fenced off on first 400 (300s pause), falling back to text parsing. Disable if your server errors on unknown payload fields.");
             _cfgConsoleAutoShot = Config.Bind("Console", "AutoScreenshotTicks", 6,
-                "Console mode: attach the NPC's first-person view automatically every N turns (when the model is vision-capable and it has actually moved/turned since the last one; 0 = off). Console had no image cadence at all — and models never typed `screenshot` themselves, so they never used their eyes to understand a room.");
+                "Console mode: attach the NPC's first-person view automatically every N turns (when the model is vision-capable and it has actually moved/turned since the last one; 0 = off). Console had no image cadence at all — and models never typed `screenshot` themselves, so they never used their eyes to understand a room. With [DataRecord] Enabled, text-only models also capture at this cadence for the training record (frame_ref) — payloads stay text-only.");
             _cfgConsolePromptFile = Config.Bind("Console", "SystemPromptFile", "system_prompt_console.txt",
                 "Console-mode persona/world-rules file (relative to game dir). The command list + console protocol are appended automatically. Blank = built-in persona.");
+
+            // Decision model (Wave 1 POC): an optional small recognizer (a ~4B classifier such as
+            // tev1) run as a PRE-TICK pass that RECOGNISES the NPC's current task + blockers and
+            // steers the fine-tuned roleplay model's next step. OFF by default so it never affects
+            // existing setups. The domain knowledge lives in the baked question schema (see
+            // DecisionModel.cs); a recognition model does categorical recognition reliably but
+            // fails at threshold arithmetic, so it only answers yes/no questions and the
+            // task→next-tool mapping is a fixed mechanical rule. Querying Ollama via /v1/systemone.
+            _cfgDecisionEnabled = Config.Bind("Decision", "Enabled", false,
+                "Enable the small DECISION MODEL (e.g. tev1:4b) pre-tick recognition pass: recognises the NPC's current task + blockers and guides the fine-tuned roleplay model's next step. OFF by default.");
+            _cfgDecisionModel = Config.Bind("Decision", "Model", "tev1:4b",
+                "Decision-model name sent in the request body (default 'tev1:4b' from Ollama; other recognizers work too).");
+            _cfgDecisionEndpoint = Config.Bind("Decision", "Endpoint", "http://127.0.0.1:11434/v1/systemone",
+                "Endpoint for the decision model. Ollama systemone (default): http://127.0.0.1:11434/v1/systemone — the recognizer answers a fixed set of yes/no questions. A chat/completions endpoint is also supported for other decision models.");
+            _cfgDecisionApiKey = Config.Bind("Decision", "ApiKey", "",
+                "Bearer token for the decision-model endpoint (may be empty for local).");
+            _cfgDecisionMinIntervalSec = Config.Bind("Decision", "MinIntervalSec", 5,
+                "Minimum seconds between decision-model passes (rate-limits the extra calls; set 0 to run every tick). 5 = roughly once every few moves.");
+
+            _cfgRecordData = Config.Bind("DataRecord", "Enabled", false,
+                "Record every LLM round-trip — the exact messages the model saw (system prompts deduped by reference), any tools vocabulary, the response (content + tool_calls), salvage marks and wall-time — to BepInEx/config/kkllmnpc_turns.jsonl. First-person frame images are materialized ONCE per unique frame (content-hash deduped) to BepInEx/config/kkllmnpc_turns_media/ and referenced by name in the turn records, so a vision-capable fine-tune can train on what the NPC actually saw. Modes: console/act/name/vision. This is fine-tuning/eval fuel: run a few playtests with it on, then train on your own sessions. All content stays on this machine; off by default.");
+            _cfgRecordMaxMb = Config.Bind("DataRecord", "MaxMb", 400,
+                "Stop recording once kkllmnpc_turns.jsonl exceeds this size (a console turn with its full history is roughly 10-30 KB). 0 = no cap. Delete or move the file to start a fresh recording.");
+            DataRecord.Notice = m => Logger.LogWarning(m);
+            Action ReconfigureDataRecord = delegate
+            {
+                DataRecord.Configure(_cfgRecordData.Value, (long)_cfgRecordMaxMb.Value * 1024L * 1024L, NPCInstance.TurnLogFilePath());
+                if (DataRecord.Enabled)
+                    Logger.LogInfo("data record → " + NPCInstance.TurnLogFilePath() + " (" + (_cfgRecordMaxMb.Value > 0 ? "cap " + _cfgRecordMaxMb.Value + " MB" : "uncapped") + ")");
+            };
+            ReconfigureDataRecord();
+            _cfgRecordData.SettingChanged += (o, e) => ReconfigureDataRecord();
+            _cfgRecordMaxMb.SettingChanged += (o, e) => ReconfigureDataRecord();
 
             // Clamp config values to safe ranges to prevent divide-by-zero, negative durations, etc.
             _cfgThinkInterval.Value = Mathf.Clamp(_cfgThinkInterval.Value, 0.05f, 10f);
@@ -518,6 +578,7 @@ namespace KKLLMNPC
             _cfgAgentOverhearRadius.Value = Mathf.Clamp(_cfgAgentOverhearRadius.Value, 3f, 200f);
             _cfgAgentChatPerMinute.Value = Mathf.Clamp(_cfgAgentChatPerMinute.Value, 1, 30);
             _cfgFactCap.Value = Mathf.Clamp(_cfgFactCap.Value, 12, 120);
+            _cfgFactMaxAge.Value = Mathf.Clamp(_cfgFactMaxAge.Value, 0f, 8760f); // 0 = off, up to a year
             _cfgParallelCalls.Value = Mathf.Clamp(_cfgParallelCalls.Value, 0, 8);
             SafeHttp.SetMaxParallel(_cfgParallelCalls.Value);
             _cfgMaxNPCs.Value = Mathf.Clamp(_cfgMaxNPCs.Value, Consts.MinNPCs, Consts.MaxNPCs);
@@ -696,6 +757,12 @@ namespace KKLLMNPC
             if (_mainReady)
             {
                 try { WebUI.Ensure(this); } catch (Exception) { }
+                // Companion server: spawn/watch kk-serve from the same ready
+                // gate (config binds exist by now; idempotent, own thread).
+                try { KKServe.Ensure(this); } catch (Exception) { }
+                // Ollama adoption (external host): pass [LLM].Model so a picker
+                // pick lands in the running LLM. Idempotent, own thread.
+                try { Ollama.Ensure(this, _cfgModel); } catch (Exception) { }
             }
 
             // Reconcile the instance pool with available targets: start an instance
@@ -757,6 +824,8 @@ namespace KKLLMNPC
             // — no release-look-up self-eat, no drop-near-a-head force-feed). Announce
             // in chat so it's visible without opening any menu.
             HandleVoreDestinationHotkey();
+            // F8 cycles the fate (egg -> belly-egg -> grow -> destroy).
+            HandleVoreEffectHotkey();
 
             // WebUI rich per-kobold stat snapshots are built HERE (main thread — gene/
             // transform reads) and served from cache by the HTTP thread.
@@ -950,12 +1019,160 @@ namespace KKLLMNPC
                 try { Config.Save(); } catch (Exception) { }
                 string line;
                 if (next == SwallowDestination.Off)
-                    line = "[KKLLMNPC] vore OFF — nothing swallows (F7 to arm a destination)";
+                    line = "[KKLLMNPC] vore OFF — nothing swallows (F7 to arm a destination; agents with their own vore_target still choose their own route)";
                 else
                     line = "[KKLLMNPC] vore destination: " + SwallowLogic.DestinationLabel(next)
-                        + " — held-person releases can swallow into that hole (F7 cycles)";
+                        + " — held-person releases can swallow into that hole (F7 cycles; F8 picks the fate)";
                 try { CheatsProcessor.AppendText(line + "\n"); } catch (Exception) { }
                 try { Logger.LogInfo("vore destination set to '" + SwallowLogic.DestinationLabel(next) + "' (F7)"); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
+        // One announce line for every vore control path (hotkeys + chat commands).
+        private void VoreAnnounce(string line)
+        {
+            try { CheatsProcessor.AppendText(line + "\n"); } catch (Exception) { }
+            try { LLMNPCPlugin.Log.LogInfo("vore chat command: " + line); } catch (Exception) { }
+        }
+
+        // ---- the always-works control path ----
+        // F7/F8 are Function keys: desktops and Steam (especially under Proton)
+        // intercept them, and an unfocused game window never receives them at all
+        // (field report: both keys dead, nothing in the log). Typing in your own
+        // game chat cannot be taken away — same announce + persist as the
+        // hotkeys, consumed here so the agents never hear the control words.
+        private void VoreStateAnnounce()
+        {
+            var pl = this;
+            string target = "off", fate = "?";
+            bool masterOn = false;
+            try
+            {
+                if (pl._cfgSwallowEnabled != null) masterOn = pl._cfgSwallowEnabled.Value;
+                if (pl._cfgSwallowDestination != null)
+                    target = SwallowLogic.DestinationLabel(SwallowManager.Destination()).ToLowerInvariant();
+                if (pl._cfgSwallowEffect != null)
+                    fate = SwallowLogic.EffectLabel(pl._cfgSwallowEffect.Value).ToLowerInvariant();
+            }
+            catch (Exception) { }
+            VoreAnnounce("[KKLLMNPC] vore: " + (masterOn ? "ENABLED (F7/chat arms a hole)" : "DISABLED at the master switch")
+                + " · destination = " + target + " · fate = " + fate
+                + " — chat: vore arm <mouth|anal|pussy|dick|nipple|off> / vore fate <egg|bellyegg|grow|destroy|off> / vore cycle / vore state");
+        }
+
+        private bool TryVoreCommandFromChat(string msg)
+        {
+            if (string.IsNullOrEmpty(msg)) return false;
+            string low = msg.Trim().ToLowerInvariant();
+            if (low.Length == 0) return false;
+            var pl = this;
+            bool ours = low.StartsWith("vore", StringComparison.Ordinal);
+            if (!ours) return false;
+            string rest = low.Substring(4).Trim();
+            try
+            {
+                if (rest.Length == 0 || rest == "state" || rest == "?")
+                {
+                    VoreStateAnnounce();
+                    return true;
+                }
+                if (rest.StartsWith("arm", StringComparison.Ordinal) || rest.StartsWith("dest", StringComparison.Ordinal))
+                {
+                    string arg = "";
+                    int sp = rest.IndexOf(' ');
+                    if (sp > 0) arg = rest.Substring(sp + 1).Trim();
+                    var cfg = pl._cfgSwallowDestination;
+                    if (cfg == null) { VoreStateAnnounce(); return true; }
+                    if (arg.Length == 0)
+                    {
+                        var next = SwallowLogic.NextDestination(cfg.Value);
+                        cfg.Value = next;
+                        try { pl.Config.Save(); } catch (Exception) { }
+                        VoreAnnounce(next == SwallowDestination.Off
+                            ? "[KKLLMNPC] vore OFF — nothing swallows (chat: vore arm <hole>)"
+                            : "[KKLLMNPC] vore destination: " + SwallowLogic.DestinationLabel(next)
+                                + " — held-person releases can swallow into that hole (chat: vore arm <hole|off>)");
+                        return true;
+                    }
+                    SwallowDestination d; bool clear, bad;
+                    if (!SwallowLogic.TryParseDestination(arg, out d, out clear, out bad))
+                    {
+                        VoreAnnounce("[KKLLMNPC] didn't understand a hole called '" + arg + "' — valid: mouth, anal, pussy, dick, nipple, off");
+                        return true;
+                    }
+                    cfg.Value = clear ? SwallowDestination.Off : d;
+                    try { pl.Config.Save(); } catch (Exception) { }
+                    VoreAnnounce(clear
+                        ? "[KKLLMNPC] vore OFF — nothing swallows"
+                        : "[KKLLMNPC] vore destination: " + SwallowLogic.DestinationLabel(d) + " (agents can still pick their own with vore_target)");
+                    return true;
+                }
+                if (rest.StartsWith("fate", StringComparison.Ordinal) || rest.StartsWith("mode", StringComparison.Ordinal)
+                    || rest.StartsWith("effect", StringComparison.Ordinal))
+                {
+                    string arg = "";
+                    int sp = rest.IndexOf(' ');
+                    if (sp > 0) arg = rest.Substring(sp + 1).Trim();
+                    var cfg = pl._cfgSwallowEffect;
+                    if (cfg == null) { VoreStateAnnounce(); return true; }
+                    if (arg.Length == 0)
+                    {
+                        var next = SwallowLogic.NextEffect(cfg.Value);
+                        cfg.Value = next;
+                        try { pl.Config.Save(); } catch (Exception) { }
+                        VoreAnnounce("[KKLLMNPC] vore fate: " + SwallowLogic.EffectLabel(next) + " — what a finished digestion turns its meal into (chat: vore fate <mode|off>)");
+                        return true;
+                    }
+                    SwallowEffect m; bool clear, bad;
+                    if (!SwallowLogic.TryParseEffect(arg, out m, out clear, out bad))
+                    {
+                        VoreAnnounce("[KKLLMNPC] didn't understand a fate called '" + arg + "' — valid: egg, bellyegg, grow, destroy, off");
+                        return true;
+                    }
+                    cfg.Value = clear ? SwallowEffect.Egg : m;
+                    try { pl.Config.Save(); } catch (Exception) { }
+                    VoreAnnounce(clear
+                        ? "[KKLLMNPC] vore fate cleared to the operator default (egg)"
+                        : "[KKLLMNPC] vore fate: " + SwallowLogic.EffectLabel(m));
+                    return true;
+                }
+                if (rest.StartsWith("cycle", StringComparison.Ordinal))
+                {
+                    var cfg = pl._cfgSwallowDestination;
+                    if (cfg != null)
+                    {
+                        var next = SwallowLogic.NextDestination(cfg.Value);
+                        cfg.Value = next;
+                        try { pl.Config.Save(); } catch (Exception) { }
+                        VoreAnnounce("[KKLLMNPC] vore destination: " + SwallowLogic.DestinationLabel(next));
+                    }
+                    return true;
+                }
+                // "vore help" and anything else starting with vore
+                VoreStateAnnounce();
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // F8 cycles the swallow FATE (egg → belly-egg → grow → destroy) — the other
+        // half of the player's pair of vore controls; same announce + persist as F7.
+        // Agents set their own fate with their `vore_mode` tool instead.
+        private void HandleVoreEffectHotkey()
+        {
+            try
+            {
+                if (!Input.GetKeyDown(KeyCode.F8)) return;
+                var cfg = _cfgSwallowEffect;
+                if (cfg == null) return;
+                var next = SwallowLogic.NextEffect(cfg.Value);
+                cfg.Value = next;
+                try { Config.Save(); } catch (Exception) { }
+                string line = "[KKLLMNPC] vore fate: " + SwallowLogic.EffectLabel(next)
+                    + " — what a finished digestion turns its meal into (F8 cycles)";
+                try { CheatsProcessor.AppendText(line + "\n"); } catch (Exception) { }
+                try { Logger.LogInfo("vore effect set to '" + SwallowLogic.EffectLabel(next) + "' (F8)"); } catch (Exception) { }
             }
             catch (Exception) { }
         }
@@ -965,6 +1182,8 @@ namespace KKLLMNPC
             _running = false;
             _mainReady = false;
             try { WebUI.Shutdown(); } catch (Exception) { }
+            try { KKServe.Shutdown(); } catch (Exception) { }  // orphan python holds the GPU
+            try { Ollama.Shutdown(); } catch (Exception) { }  // stop the watcher thread
             try { if (_chatCallbackRegistered) { PhotonNetwork.RemoveCallbackTarget(this); _chatCallbackRegistered = false; } } catch (Exception) { }
             StopWatchers();
             lock (_instancesLock)
@@ -1012,6 +1231,9 @@ namespace KKLLMNPC
                 if (isLocal)
                 {
                     try { if (SwallowManager.TryAbortFromChat(msg)) return; } catch (Exception) { }
+                    // vore operator controls ("vore arm anal", "vore fate", "vore …"):
+                    // consumed like the abort words so agents never hear them
+                    try { if (TryVoreCommandFromChat(msg)) return; } catch (Exception) { }
                 }
 
                 lock (_instancesLock)
@@ -1055,7 +1277,10 @@ namespace KKLLMNPC
                         // "OwnerNick: rest" (the photon sender nick) — when the line
                         // is one of OUR agents speaking, name THAT agent as the sender
                         // so siblings hear "Kira: ..." instead of "Rosemary: ...".
-                        try { npc.HandleChat(rest, isAgentSpeech && agentName != null ? agentName : senderName, isLocal && !agentOrigin); addressedAny = true; }
+                        // addressed-from-agent delivers as "X (another AI kobold) said
+                        // TO YOU:" so the addressee knows a SIBLING spoke to them and
+                        // can answer by name (players still hear "player: ...").
+                        try { npc.HandleChat(rest, isAgentSpeech && agentName != null ? agentName : senderName, isLocal && !agentOrigin, isAgentSpeech); addressedAny = true; }
                         catch (Exception) { }
                     }
                     if (addressedAny) return;
@@ -1491,13 +1716,26 @@ namespace KKLLMNPC
         {
             try
             {
+                float y = 6f;
                 string hud = SpectateManager.HudText();
                 if (!string.IsNullOrEmpty(hud))
                 {
                     float w = Math.Min(760f, Screen.width - 20f);
-                    var r = new Rect((Screen.width - w) / 2f, 6f, w, 32f);
+                    var r = new Rect((Screen.width - w) / 2f, y, w, 32f);
                     GUI.Box(r, string.Empty);
                     GUI.Label(new Rect(r.x + 6f, r.y + 2f, r.width - 12f, r.height - 4f), hud);
+                    y = r.yMax + 6f;
+                }
+                // The vore settings indicator: one quiet line while swallows are
+                // armed (the player's own target/fate controls).
+                string vore = SwallowManager.ArmedHudLine();
+                if (!string.IsNullOrEmpty(vore))
+                {
+                    GUI.skin.label.alignment = TextAnchor.UpperCenter;
+                    var wv = new Vector2(Math.Min(760f, Screen.width - 20f), 26f);
+                    var rv = new Rect((Screen.width - wv.x) / 2f, y, wv.x, wv.y);
+                    GUI.Box(rv, string.Empty);
+                    GUI.Label(new Rect(rv.x + 4f, rv.y + 2f, rv.x + wv.x - 8f - rv.x, rv.height - 4f), vore);
                 }
             }
             catch (Exception) { }

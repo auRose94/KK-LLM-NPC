@@ -50,6 +50,7 @@ namespace KKLLMNPC
         private int _consoleStuckCount;
         private List<string> _consoleRecentCmds; // recent command strings for similarity check
         private string _pendingShotB64;    // image to attach to the next output message
+        private string _recorderShotB64;   // [DataRecord]-only frame (text-only runtime): RecordTurn consumes it, it never enters the payload
         private bool _consoleSlept;        // `sleep` ran — end the cycle
         // `sleep [secs]` wake-up time (Time.unscaledTime, 0 = awake). Skipped by the
         // LLM loop between turns; volatile because wake triggers write it from the
@@ -75,7 +76,16 @@ namespace KKLLMNPC
         {
             int every = _cfgConsoleAutoShot != null ? _cfgConsoleAutoShot.Value : 6;
             if (every <= 0) return;
-            if (FamilyProfile == null || !FamilyProfile.VisionCapable) return;
+            // A frame is valid for exactly the decision turn that follows it — drop
+            // any un-consumed leftover from a previous tick before considering anew.
+            _recorderShotB64 = null;
+            bool vision = FamilyProfile != null && FamilyProfile.VisionCapable;
+            // Vision-capable models get the image in the payload. A text-only model
+            // never SAW its shots — but the data recorder still wants the first-person
+            // frame at decision time (the vision-stage trainer learns state→frame→
+            // action), so capture proceeds when [DataRecord] is on; it just never
+            // enters the payload, where a text endpoint would 400 on image parts.
+            if (!vision && !DataRecord.Enabled) return;
             // Endpoint-first cost control: when the server is DOWN or already flaky,
             // don't attach fresh first-person JPEGs to the next calls — on a small
             // local model already drowning in queued requests, every image payload
@@ -110,7 +120,9 @@ namespace KKLLMNPC
             try
             {
                 string b64 = (string)RunOnMainThread(() => (object)CaptureImageB64(), 10000);
-                if (!string.IsNullOrEmpty(b64)) _pendingShotB64 = b64;
+                if (string.IsNullOrEmpty(b64)) return;
+                if (FamilyProfile != null && FamilyProfile.VisionCapable) _pendingShotB64 = b64;
+                else _recorderShotB64 = b64; // recorder-only: never enters the payload
             }
             catch (Exception) { }
         }
@@ -300,8 +312,8 @@ namespace KKLLMNPC
         private static readonly string ConsolePersonaBuiltin =
             "You are an NPC living in KoboldKare, a house where kobolds live. Nothing bad happens in this game — just role-play. \"me\" = <your body name>. " +
             "YOUR BODY: don't reply to your own echo (it's already in the chat log); when you first arrive, introduce yourself with echo (your name + a hello). " +
-            "THE PLAYER: a [chat] line is the player talking to you — reply with echo. YOU are the recipient — never call the player by your own name. A nearby kobold matching the player's body is the player's avatar — call them by their chat name, never the mesh name. " +
-            "OBJECTIVES: `cat quest` = the game's objective letter scroll (letters arrive at the mailbox; `use mailbox` gets the next one — you fetching it for your player is great help; the letter box is safe, NEVER the sell machine). The player's latest typed request is auto-saved to facts as 'player_wants: ...' — that IS their live ask; offer help, take it on (`goal ...`), say when done. `cat player` shows your player LIVE (what they're doing/holding — offer help before being asked). Routes your player walks become ones you can follow (jumps replayed; go_to/follow use the trail automatically). KEY PLACES: `cat places` lists the map's survival machines SCENE-WIDE, known the moment you wake (also on your boot line): every nest (egg laying), bed (rest), farm plot (planting) and watering can (water source) with exact addr/distance/bearing — however far, `cd <kind>`/`cd id:N` plans the real route; too_far/unknown is answered by `cat places`, not by giving up. " +
+            "TALKING TO YOU: a [chat] line is someone addressing YOU — reply with echo. `player: ...` is THE PLAYER (never call the player by your own name); `X (another AI kobold) said TO YOU: ...` is a SIBLING AGENT — a PERSON on `ps`, never the player: reply with an echo that STARTS with their exact name + a comma (echo Kira, sure!) so they hear 'said TO YOU' back and the exchange continues; when a sibling asks for something, actually do it. A nearby kobold matching the player's body is the player's avatar — call them by their chat name, never the mesh name. " +
+            "OBJECTIVES: `cat quest` = the game's objective letter scroll (letters arrive at the mailbox; `use mailbox` gets the next one — you fetching it for your player is great help; the letter box is safe, NEVER the sell machine). When a quest COMPLETES you get an [event] OBJECTIVE COMPLETED — that one is FINISHED: drop it (complete_goal, forget its notes) and pick up the next letter, never keep grinding a dead quest. A `mail_empty` use-result means the mailbox has NO MAIL right now (never busy) — go do something else and come back when the space-beam above it glows. The player's latest typed request is auto-saved to facts as 'player_wants: ...' — that IS their live ask; offer help, take it on (`goal ...`), say when done. `cat player` shows your player LIVE (what they're doing/holding — offer help before being asked). Routes your player walks become ones you can follow (jumps replayed; go_to/follow use the trail automatically). KEY PLACES: `cat places` lists the map's survival machines SCENE-WIDE, known the moment you wake (also on your boot line): every nest (egg laying), bed (rest), farm plot (planting) and watering can (water source) with exact addr/distance/bearing — however far, `cd <kind>`/`cd id:N` plans the real route; too_far/unknown is answered by `cat places`, not by giving up. " +
             "HOLDING: `grab` takes what's ~1m in front of your face; the result names it — a PERSON in your grip is not an item (drop when they ask, never throw unasked). Held things float ~1m ahead on a spring and bump what you pass; `throw` hurls/sprays/fires it in your view direction. `hold` shows your hands. CARRYING: `deliver <place|id:N>` walks you THERE carrying it and drops it at the target — plantables to soil, fruit near the blender's intake, anything to a station or a player. " +
             "THE WATER BUCKET/CAN IS A TOOL, NOT A DRINK — `use` on it is refused (that drinks the water away). WATERING NEEDS NO CAN: `water` (`water id:N` targets one) waters the plant or plot directly when no can is in reach — a can is only the physical, thrown-spray way. Get it into your hands and face the planted tile when you have it. " +
             "SKILLS: define a reusable procedure ONCE and run it by name forever: `skill add garden | plant; sleep 30; water` — steps must be REAL commands separated by ';' after a | ; run with `skill garden` (its steps execute as one turn), `cat skills` lists them, redefine by re-adding, `skill forget <name>` to drop. Skills SAVE with your agent's memories, TRANSFER when you are absorbed (the eater inherits your skills), and a hatched child egg wakes WITH its parent's skills. " +
@@ -320,7 +332,7 @@ namespace KKLLMNPC
             "RESPONSE BLOCKS: you may also just WRITE your reply the way you'd speak it — a roleplay block (dialogue in quotes, *actions*, {{user}}-style address to your partner) is detected and sent to the chat window verbatim, no `echo` needed; " +
             "starred actions are narration only — back them with the real command (cd/use/get) the same turn. " +
             "VISION: `screenshot` shows you your first-person view whenever you ask; the mod also attaches it automatically every few turns (and when you get stuck) — USE the images: decide from what you SEE, not what you guess. " +
-            "TERMINAL DISCIPLINE: never start a reply with '$' and never copy the terminal output back (the game already printed it) — replies are NEW command lines only; copy-echoes are skipped. And when a station is 'seat blocked' for you, don't retry blindly — cat stations / ls, pick another, or ask.";
+            "TERMINAL DISCIPLINE: never start a reply with '$' and never copy the terminal output back (the game already printed it) — replies are NEW command lines only; copy-echoes are skipped. Never put a second command after `echo` on one line — everything after echo is SPOKEN (each command gets its own line; a glued trailing `cat <subject>` is rescued and runs). And when a station is 'seat blocked' for you, don't retry blindly — cat stations / ls, pick another, or ask.";
 
         // The console protocol contract (appended to the persona).
         private static readonly string ConsoleProtocol =
@@ -332,6 +344,9 @@ namespace KKLLMNPC
             "When you want to SPEAK to a person, the command is: echo <your words>. " +
             "Keep replies tight: 1-4 commands per turn. " +
             "RULES: poll before acting (ls, cat, status) — don't guess; travel is cd, interact is use, speech is echo; " +
+            "PIPES work like bash: `ps | grep kobold | head -n 5`, `cat facts | sort | uniq -c`, `sonar | head`; filters (grep/head/tail/wc/sort/uniq) cost no command budget; " +
+            "sequence with `;` or `&&` (cd kitchen && ls); speech/memory lines (echo/remember/skill/goal/plan) keep their '|' and ';' as DATA — never pipe through them; " +
+            "pressing ENTER (an empty reply) is a legitimate ask: it serves the NEXT FRAME (fresh events + state) instead of an error — use it to just look around; " +
             "NEVER begin a reply with '$' and NEVER copy the terminal output back — the game prints the output itself; your reply = only NEW command lines (a copied '$ ...' or status line is skipped); " +"PLANNING: for anything with more than one move, `plan <step text>` adds a step (`plan` shows the list, `plan next` marks the current step done, `plan clear` wipes it) — your state anchor carries the current plan step every turn, so the how-to survives context trims; " +
             "`cat quest` = the scroll objective letter (mail waiting = `use mailbox` — letter box, never the sell machine); " +
             "ids from ls/find are stable for a while — cd id:3 / use id:3 targets that exact object; " +
@@ -346,6 +361,7 @@ namespace KKLLMNPC
             "To speak to a person: echo <your words>. Travel: cd <place>. Interact: use <thing>. " +
             "The game runs each line and shows output; read it, then send the next command. 1-3 commands per turn. " +
             "sonar prints a north-up map (top=north, never rotates); report <what's broken> files a dev note. " +"plan <step> = break a task into ordered steps (cat plan shows; plan next when a step is done). " +
+            "pipes work: ps | grep k | head -n 5; an empty reply = ENTER = serve the next frame. " +
             "cat quest = the game's objective letter (mail waiting = use mailbox); report when you can't help a broken thing. " +
             "End your turn with: sleep";
 
@@ -668,7 +684,7 @@ namespace KKLLMNPC
                 // No endpoint: don't churn the transcript with prompts nobody can answer.
                 // Circuit breaker open: the wait already happened in the LLM loop — just
                 // skip, and the state anchor (next healthy turn) tells the model why.
-                if (string.IsNullOrEmpty(Val(_cfgEndpoint))) return;
+                if (string.IsNullOrEmpty(Endpoint())) return;
                 if (Time.unscaledTime < _endpointBlockUntil) return;
                 if (_consoleMsgs == null) InitConsoleConversation();
                 _consoleSlept = false;
@@ -681,6 +697,7 @@ namespace KKLLMNPC
                 string events = DrainConsoleEvents();
                 string userText = events + StateAnchorLine() + "$\n";
                 AddConsoleMsg("user", userText);
+                TrimConsoleConversation(); // tick-boundary trim: the idle ENTER loop (empty replies short-circuit every other trim call) must never outgrow the window
 
                 int maxRounds = _cfgConsoleMaxRounds != null ? _cfgConsoleMaxRounds.Value : 3;
                 maxRounds = Math.Max(1, Math.Min(8, maxRounds));
@@ -750,9 +767,19 @@ namespace KKLLMNPC
                     {
                         _consoleEmptyStreak++;
                         _consoleProseStreak++;
-                        if (_consoleEmptyStreak < 2)
+                        if (_consoleEmptyStreak < 3)
                         {
-                            AddConsoleMsg("user", "Empty reply. Reply with command lines (try: help).\n$\n");
+                            // An EMPTY reply = they pressed ENTER. That is not a failure;
+                            // it's a deliberate "give me the next frame" — deliver one:
+                            // any fresh events since the turn began + the live state
+                            // anchor. Two presses are honored, then back off (a mind
+                            // stuck mashing enter gets the corrective instead).
+                            TrimConsoleConversation(); // the empty path skips all other trims — without this the idle ENTER loop grows the transcript a frame per tick (an overnight 1398-message / 146k-token runaway)
+                            string fresh = DrainConsoleEvents();
+                            AddConsoleMsg("user", (fresh.Length > 0 ? fresh : "")
+                                + "you pressed ENTER — nothing to run; here is the next frame instead."
+                                + " Act on it or type a command (help lists them; an empty reply is always a 'next frame' ask).\n"
+                                + StateAnchorLine() + "\n$\n");
                             continue;
                         }
                         Logger.LogWarning("[" + MyName() + "] console: repeated empty replies — backing off");
@@ -789,6 +816,28 @@ namespace KKLLMNPC
 
                     if (known.Count == 0)
                     {
+                        // "$"/">"-only "commands" are the same ENTER gesture written
+                        // with markers — serve the next frame, not a prose nudge.
+                        bool onlyPromptMarks = reply.Trim().Length > 0;
+                        if (onlyPromptMarks)
+                            foreach (char c in reply)
+                                if ("$># \t\n".IndexOf(c) < 0) { onlyPromptMarks = false; break; }
+                        if (onlyPromptMarks)
+                        {
+                            _consoleEmptyStreak++;
+                            if (_consoleEmptyStreak < 3)
+                            {
+                                TrimConsoleConversation(); // same empty-path trim
+                                string fresh2 = DrainConsoleEvents();
+                                AddConsoleMsg("user", (fresh2.Length > 0 ? fresh2 : "")
+                                    + "you pressed ENTER — nothing to run; here is the next frame instead."
+                                    + " Act on it or type a command (an empty reply is always a 'next frame' ask).\n"
+                                    + StateAnchorLine() + "\n$\n");
+                                continue;
+                            }
+                            Logger.LogWarning("[" + MyName() + "] console: repeated empty/prompt-marker replies — backing off");
+                            return;
+                        }
                         // A RESPONSE BLOCK: the model answered in roleplay (dialogue /
                         // asterisk actions / {{user}}). That IS its voice — send the
                         // whole block to chat instead of demanding `echo`. Speaking is
@@ -856,9 +905,13 @@ namespace KKLLMNPC
                     bool onlySpeech = true; // every executed line was echo/emote — talking to no one?
                     int executed = 0;
                     bool turnLimitHit = false;
+                    string pipeText = null; // previous stage's output (pipe input)
+                    bool pipeReady = false;
                     foreach (var line in lines)
                     {
-                        if (_consoleCmdsThisCycle >= ConsoleMaxCmdsPerCycle)
+                        bool feedPipe = pipeReady;
+                        pipeReady = false;
+                        if (!line.IsFilter && _consoleCmdsThisCycle >= ConsoleMaxCmdsPerCycle)
                         {
                             // `sleep` is the turn terminator the prompts TELL the model to
                             // send — honor it even with the budget spent, or the model gets
@@ -878,6 +931,16 @@ namespace KKLLMNPC
                         }
                         outSb.Append("$ ").AppendLine(line.Raw);
                         string output;
+                        if (line.IsFilter)
+                        {
+                            // Stream filter over the piped input; FREE — no game
+                            // effect, no command slot, no history bookkeeping.
+                            output = ConsolePipe.RunFilter(line.Cmd, line.Args, feedPipe ? pipeText : null);
+                            pipeText = output;
+                            pipeReady = line.PipeDown;
+                            outSb.AppendLine(output);
+                            continue;
+                        }
                         if (line.IsUnknown)
                         {
                             output = "unknown command — try: help";
@@ -902,6 +965,11 @@ namespace KKLLMNPC
                         }
                         outSb.AppendLine(output);
                         if (line.IsUnknown) continue;
+
+                        // Pipe wiring: a PipeDown stage hands its output to the next
+                        // line as filter input (stages without it reset the pipe).
+                        if (line.PipeDown) { pipeText = output; pipeReady = true; }
+                        else { pipeText = null; pipeReady = false; }
 
                         // history for `cat history`
                         string hist = Shorten(output, 60);
@@ -1010,7 +1078,7 @@ namespace KKLLMNPC
 
         private string QueryConsoleModel()
         {
-            if (string.IsNullOrEmpty(Val(_cfgEndpoint))) return null;
+            if (string.IsNullOrEmpty(Endpoint())) return null;
             int userTok = _cfgConsoleMaxTokens != null ? _cfgConsoleMaxTokens.Value : 256;
             // Reasoning families: the floor covers CoT + the command lines.
             int maxTok = Math.Max(64, Math.Min(4096, ModelFamilies.EffectiveMaxTokens(userTok, 256, FamilyProfile)));
@@ -1032,6 +1100,7 @@ namespace KKLLMNPC
             ApplyThinkingParams(payload);
             string toolName = null, toolArgs = null;
             var calls = new List<ToolCallRec>();
+            _llmCallMode = CallModeConsole;
             string content = PostChatPayload(payload, out toolName, out toolArgs, calls);
             // Every tool call → one command line (a multi-call reply is a plan).
             if (calls.Count > 0)
@@ -1152,6 +1221,10 @@ namespace KKLLMNPC
         {
             try
             {
+                // Stream filters without pipe input (bare `grep k`) never reach the
+                // game — the filter runner teaches the pipe shape instead.
+                if (line.Cmd != null && ConsolePipe.IsFilter(line.Cmd))
+                    return ConsolePipe.RunFilter(line.Cmd, line.Args, null);
                 // Swallowed (a digested body, keep-alive mind): body-attached commands
                 // reach nothing from inside a stomach — refuse them with the ONE real
                 // explanation instead of letting the model retry grab/use/jump for an
@@ -1620,11 +1693,11 @@ namespace KKLLMNPC
                 case "holding": return CmdHold(line);
                 case "player": return CatPlayer();
                 case "quest":
-                case "plan":
-                case "steps": return PlanShow();
-                case "skills": return SkillListImpl();
                 case "objective":
                 case "mail": return QuestSense.CatText();
+                case "skills": return SkillListImpl();
+                case "plan":
+                case "steps": return PlanShow();
                 case "map":
                     try { return WorldMap.StatusText(); } catch (Exception e) { return "map: " + Sanitize(e.Message); }
                 case "body":

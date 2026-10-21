@@ -11,6 +11,7 @@
 //
 // This file is deliberately self-contained: only Json.cs (no Unity, no NPCInstance, no
 // BepInEx), so it can run in the headless test suite.
+using System;
 using System.Collections.Generic;
 
 namespace KKLLMNPC
@@ -58,6 +59,73 @@ namespace KKLLMNPC
                 Rationale = Field(g, "rationale") ?? "",
             };
         }
+
+        // Turn a recognizer's /v1/systemone answers into a Guidance via pure mechanical rules — no
+        // game knowledge here, just "which score is highest". The task is the argmax over the task
+        // questions (that score is the confidence); the blocker is the highest-scoring blocker
+        // question that crossed its bar; below the task bar, no task was recognised → null so the
+        // loop keeps prior guidance. The game-dependent task→next-tool mapping lives in
+        // NPCInstance.DecideNextTool, so this stays unit-testable without the mod.
+        //
+        //   answers  — { "questionKey": { "noul": 0.0..1.0 } } from /v1/systemone
+        //   taskPairs  — {(questionKey, taskId)} for each task question
+        //   blockPairs — {(questionKey, blockerLabel)} for each blocker question
+        //   taskConf / blockConf — argmax thresholds (pass 0 for a per-call tweak)
+        internal static Guidance SystemoneAnswers(
+            Dictionary<string, object> answers,
+            (string, string)[] taskPairs,
+            (string, string)[] blockPairs,
+            double taskConf = 0.35,
+            double blockConf = 0.4)
+        {
+            if (answers == null) return null;
+
+            double maxTask = 0; string task = "";
+            foreach (var pair in taskPairs)
+            {
+                double s = Noul(answers, pair.Item1);
+                if (s > maxTask) { maxTask = s; task = pair.Item2; }
+            }
+            if (task.Length == 0 || maxTask < taskConf) return null; // no clear task
+
+            double maxBlock = 0; string blocker = "none";
+            foreach (var pair in blockPairs)
+            {
+                double s = Noul(answers, pair.Item1);
+                if (s > maxBlock) { maxBlock = s; blocker = pair.Item2; }
+            }
+            bool isBlocked = maxBlock >= blockConf;
+            // Guidance.Blocked holds the blocker label or "none" — a downstream caller checks
+            // `blocker != "none"` to know it's blocked.
+            string blocked = isBlocked ? blocker : "none";
+
+            return new Guidance
+            {
+                Task = task,
+                Blocked = blocked,
+                Confidence = Clamp((float)maxTask),
+                Rationale = "recognised " + task + " at " + (int)Math.Round(maxTask * 100f) + "%" +
+                    (isBlocked ? " — " + blocker + " at " + (int)Math.Round(maxBlock * 100f) + "%" : ""),
+            };
+        }
+
+        // Read one noul score (answers[key].noul) as a 0..1 double; 0 if absent/unparseable.
+        private static double Noul(Dictionary<string, object> answers, string key)
+        {
+            if (!answers.TryGetValue(key, out var v)) return 0;
+            if (v is Dictionary<string, object> q && q.TryGetValue("noul", out var nv) && nv != null)
+            {
+                if (nv is double d) return Clamp01(d);
+                if (nv is long l) return Clamp01((double)l);
+                if (nv is int i) return Clamp01((double)i);
+                if (double.TryParse(nv.ToString(), System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var p))
+                    return Clamp01(p);
+            }
+            return 0;
+        }
+
+        private static double Clamp01(double d) { return d < 0 ? 0 : d > 1 ? 1 : d; }
 
         // Get one field as a cleaned string, or null if absent/blank. Centralised so a missing
         // key is "no value" everywhere, not a throw — the guard above depends on that contract.

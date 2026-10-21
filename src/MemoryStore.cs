@@ -21,6 +21,11 @@ namespace KKLLMNPC
             public string Name;      // the NPC's chosen name at save time
             public string Persona;   // the persona line the identity built
             public List<string> Facts;
+            // Wall-clock unix seconds per fact (parallel to Facts; 0 = unknown age).
+            // Without this, every restore re-stamped facts as brand-new and nothing
+            // ever aged out across sessions. Old saves without fact_utc fall back to
+            // the record's saved_utc stamp.
+            public List<long> FactUtc;
             public string Goal;      // may be null/empty
             public string Pronouns;  // the NPC's declared pronouns (set_pronouns); null = body default
             public List<string> Skills; // "name|step;step" lines
@@ -31,6 +36,11 @@ namespace KKLLMNPC
             // spawned 'Kobold(Clone)' did) can no longer wake up as each other.
             public string BodyFp;    // short hash of the body's gene fingerprint, may be null (legacy)
             public string Species;   // the body's prefab/species name, may be null (legacy)
+            // VoreControls: the agent's own vore target/fate picks ("mouth"/"anal"/…,
+            // "egg"/"bellyegg"/"grow"/"destroy"; null = no override). Ride the saved
+            // life + the rebirth copy so a reborn person keeps their own way of eating.
+            public string VoreTarget; // may be null
+            public string VoreMode;   // may be null
         }
 
         private static readonly object _lock = new object();
@@ -77,7 +87,8 @@ namespace KKLLMNPC
         // name); validated at Load time by the claim path so a body can never wake
         // up as a stranger who happened to share its serialized object name.
         internal static void Save(string bodyKey, string name, string persona, List<string> facts, string goal, string pronouns,
-            List<string> skills = null, string bodyFp = null, string species = null)
+            List<string> skills = null, string bodyFp = null, string species = null,
+            string voreTarget = null, string voreMode = null, List<long> factUtc = null)
         {
             try
             {
@@ -89,6 +100,14 @@ namespace KKLLMNPC
                 var fs = new List<object>();
                 if (facts != null) foreach (var f in facts) if (!string.IsNullOrEmpty(f)) fs.Add(f);
                 d["facts"] = fs.ToArray();
+                // Per-fact wall-clock ages, stored as invariant strings so no JSON
+                // number-typing ambiguity survives the round trip.
+                if (factUtc != null && facts != null && factUtc.Count == facts.Count)
+                {
+                    var us = new List<object>();
+                    foreach (var u in factUtc) us.Add(u.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    d["fact_utc"] = us.ToArray();
+                }
                 d["goal"] = goal ?? "";
                 if (!string.IsNullOrEmpty(pronouns)) d["pronouns"] = pronouns;
                 if (skills != null && skills.Count > 0)
@@ -99,6 +118,8 @@ namespace KKLLMNPC
                 }
                 if (!string.IsNullOrEmpty(bodyFp)) d["body_fp"] = bodyFp;
                 if (!string.IsNullOrEmpty(species)) d["species"] = species;
+                if (!string.IsNullOrEmpty(voreTarget)) d["vore_target"] = voreTarget;
+                if (!string.IsNullOrEmpty(voreMode)) d["vore_mode"] = voreMode;
                 d["saved_utc"] = System.DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
                 lock (_lock)
                 {
@@ -182,6 +203,8 @@ namespace KKLLMNPC
                 rec.SavedUtc = raw.GetValueOrDefault("saved_utc") as string;
                 rec.BodyFp = raw.GetValueOrDefault("body_fp") as string;
                 rec.Species = raw.GetValueOrDefault("species") as string;
+                rec.VoreTarget = raw.GetValueOrDefault("vore_target") as string;
+                rec.VoreMode = raw.GetValueOrDefault("vore_mode") as string;
                 if (raw.TryGetValue("skills", out var skObj) && skObj is List<object> skl)
                 {
                     rec.Skills = new List<string>();
@@ -193,10 +216,44 @@ namespace KKLLMNPC
                     foreach (var o in fl) { string s = o as string; if (!string.IsNullOrEmpty(s)) rec.Facts.Add(s); }
                 }
                 if (rec.Facts == null) rec.Facts = new List<string>();
+                if (raw.TryGetValue("fact_utc", out var utcObj) && utcObj is List<object> ul)
+                {
+                    rec.FactUtc = new List<long>();
+                    foreach (var o in ul)
+                    {
+                        long v = 0;
+                        long.TryParse(o as string ?? "", System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out v);
+                        rec.FactUtc.Add(v);
+                    }
+                }
                 if (string.IsNullOrEmpty(rec.Name) || string.IsNullOrEmpty(rec.Persona)) return null;
                 return rec;
             }
             catch (Exception) { return null; }
+        }
+
+        // Unix seconds now (epoch arithmetic — no DateTimeOffset dependency games).
+        internal static long UtcNow()
+        {
+            return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        }
+
+        // Best-effort parse of a record's "yyyy-MM-dd HH:mm:ss UTC" stamp to unix
+        // seconds; falls back to NOW so unknown age is treated as fresh, not ancient.
+        internal static long UtcSecondsFrom(string savedUtc)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(savedUtc)) return UtcNow();
+                string s = savedUtc.Replace(" UTC", "").Trim();
+                DateTime dt;
+                if (DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out dt))
+                    return (long)(dt.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+            }
+            catch (Exception) { }
+            return UtcNow();
         }
     }
 }

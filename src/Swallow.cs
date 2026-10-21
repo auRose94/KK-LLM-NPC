@@ -46,18 +46,6 @@ using Photon.Pun;
 
 namespace KKLLMNPC
 {
-    // What a consumed kobold becomes at the end of the digestion (config
-    // [LittleTreats] SwallowEffect). The swallow/digest experience is identical for
-    // every mode; only the completion differs.
-    public enum SwallowEffect
-    {
-        Egg = 0,     // an egg pops out at the player's feet (replantable → rebirth)
-        BellyEgg = 1, // 'Egg' reagent + the victim's genes ride in the player's belly;
-                     // sit on a nest to lay (vanilla oviposition flow) — the person is in THAT egg
-        Grow = 2,    // no egg — the player absorbs them: bigger, stronger and/or curvier
-        Destroy = 3, // no egg — they are simply gone
-    }
-
     // ------------------------------------------------------------------
     // Runtime manager: the TryDrop interception, the swallow sessions and
     // the egg→rebirth registry. All main-thread (Update tick + Harmony
@@ -137,6 +125,22 @@ namespace KKLLMNPC
             // (it can feel sexual, in context). Destroyed with every session end.
             public GameObject VirtualPen;
             public float BodyScale = -1f;   // girth source (captured once at Begin)
+            // Vore-pen hardening: the victim's own Penetrators captured inert for
+            // the session (AutoSeek restored on every release path).
+            public List<DisarmedPen> DisarmedPens;
+            // Launch brake: the pred's previous altitude + tick time; consecutive
+            // jettison-rate ticks end the session before PlayAreaEnforcer deletes
+            // the pair out of the world.
+            public float LastWatchY;
+            public float LastWatchT;
+            public int LaunchTicks;
+        }
+
+        // A victim-owned Penetrator captured inert for the duration of the swallow.
+        internal sealed class DisarmedPen
+        {
+            public PenetrationTech.Penetrator Pen;
+            public object OldMode;
         }
 
         internal static void Ensure(LLMNPCPlugin plugin)
@@ -191,7 +195,7 @@ namespace KKLLMNPC
                     }
                     float left = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - elapsed);
                     string fate;
-                    switch (Effect())
+                    switch (EffectAt(st))
                     {
                         case SwallowEffect.BellyEgg: fate = "they become egg reagent + genes in you; a nest lay brings them back"; break;
                         case SwallowEffect.Grow: fate = "their body (size, curves, groin) and memories absorb into you"; break;
@@ -220,6 +224,62 @@ namespace KKLLMNPC
             var cfg = Plugin != null ? Plugin._cfgSwallowEffect : null;
             if (cfg == null) return SwallowEffect.Egg;
             return cfg.Value;
+        }
+
+        // --------------------------
+        // PER-AGENT VORE SETTINGS — the ACTOR decides target + fate. Each agent's
+        // mind can set its own route (`vore_target`) and fate mode (`vore_mode`);
+        // they persist with the body's memory. The OPERATOR's globals
+        // (F7 destination / F8 fate / WebUI) stay the PLAYER's separate control and
+        // the default: a player actor (or an agent that never set an override)
+        // follows them. One master switch remains above everybody:
+        // [LittleTreats] SwallowEnabled — off = nobody eats anybody, overrides
+        // included. SwallowDestination=OFF disarms GESTURE (release-triggered)
+        // swallows for actors without an explicit personal pick — an agent's own
+        // deliberate override bypasses that accident-gate, because setting it IS
+        // the deliberate act.
+        // --------------------------
+        internal static SwallowDestination DestinationFor(Kobold actor)
+        {
+            var enabled = Plugin != null ? Plugin._cfgSwallowEnabled : null;
+            if (enabled == null || !enabled.Value) return SwallowDestination.Off;
+            try
+            {
+                if (actor != null && !NPCInstance.IsPlayerKobold(actor))
+                {
+                    var npc = Plugin.InstanceForBody(actor);
+                    string t = npc != null ? npc.VoreTargetOverride : null;
+                    if (!string.IsNullOrEmpty(t)) return SwallowLogic.ParseDestination(t);
+                }
+            }
+            catch (Exception) { }
+            return Destination();
+        }
+
+        internal static SwallowEffect EffectFor(Kobold actor)
+        {
+            try
+            {
+                if (actor != null && !NPCInstance.IsPlayerKobold(actor))
+                {
+                    var npc = Plugin.InstanceForBody(actor);
+                    string m = npc != null ? npc.VoreModeOverride : null;
+                    if (!string.IsNullOrEmpty(m))
+                    {
+                        SwallowEffect parsed;
+                        bool clear, bad;
+                        if (SwallowLogic.TryParseEffect(m, out parsed, out clear, out bad) && !clear) return parsed;
+                    }
+                }
+            }
+            catch (Exception) { }
+            return Effect();
+        }
+
+        // The fate a SESSION follows: the initiating actor's setting, else the eater.
+        internal static SwallowEffect EffectAt(SwallowState st)
+        {
+            return EffectFor(st != null && st.Actor != null ? st.Actor : (st != null ? st.Eater : null));
         }
 
         internal static float GrowPercentFraction()
@@ -263,23 +323,27 @@ namespace KKLLMNPC
                 if (Plugin == null) return true;
                 var cfgEnabled = Plugin._cfgSwallowEnabled;
                 // Double gate: SwallowEnabled AND a destination picked. Destination OFF
-                // (the default, F7/WebUI controllable) deliberately disarms every
-                // release-triggered swallow — the accidental "PrecisionGrabber bumped
-                // a head and the swallow started on release" failure can't happen when
-                // nothing is armed.
+                // (the operator's default, F7/WebUI controllable) deliberately
+                // disarms every release-triggered swallow — the accidental
+                // "PrecisionGrabber bumped a head and the swallow started on release"
+                // failure can't happen when nothing is armed. EXCEPT: an agent with
+                // their OWN vore target set is acting deliberately (setting it is the
+                // decision) — their override arms their own release-gesture swallow
+                // even while the operator's destination is OFF. Everyone else (the
+                // player, agents that never picked) follows the global.
                 if (cfgEnabled == null || !cfgEnabled.Value)
                 {
                     MaybeHintDestination();
                     return true;
                 }
-                if (Destination() == SwallowDestination.Off)
+                Kobold dropper = null;
+                try { dropper = __instance.GetComponentInParent<Kobold>(); } catch (Exception) { }
+                if (DestinationFor(dropper) == SwallowDestination.Off)
                 {
                     MaybeHintDestination();
                     return true;
                 }
 
-                Kobold dropper = null;
-                try { dropper = __instance.GetComponentInParent<Kobold>(); } catch (Exception) { }
                 if (dropper == null) return true;
 
                 var held = NPCInstance.HeldScanFor(dropper);
@@ -351,6 +415,25 @@ namespace KKLLMNPC
             var cfg = Plugin != null ? Plugin._cfgSwallowDestination : null;
             if (cfg == null) return SwallowDestination.Off;
             return cfg.Value;
+        }
+
+        // The armed-vore readout for the small HUD line (SpectateHudUI): the
+        // PLAYER's current settings, shown only while swallows can actually happen.
+        // Everything disarmed → null (quiet). Agents' own picks live with the
+        // agents (their vore tools + saved memory), not here.
+        internal static string ArmedHudLine()
+        {
+            try
+            {
+                var pl = Plugin; if (pl == null) return null;
+                if (pl._cfgSwallowEnabled == null || !pl._cfgSwallowEnabled.Value) return null;
+                var dest = Destination();
+                if (dest == SwallowDestination.Off) return null;
+                return "vore: target " + SwallowLogic.DestinationLabel(dest)
+                    + " · fate " + SwallowLogic.EffectLabel(Effect())
+                    + " — F7 target · F8 fate (each agent picks their own via vore_target/vore_mode)";
+            }
+            catch (Exception) { return null; }
         }
 
         // One-line hint (throttled) when vore is ENABLED but the destination is OFF —
@@ -431,6 +514,7 @@ namespace KKLLMNPC
             try
             {
                 var v = st.Victim;
+                RestoreVictimEquipment(st);
                 var at = st.Eater != null
                     ? st.Eater.transform.position + st.Eater.transform.forward * 1.2f
                     : v.transform.position;
@@ -708,9 +792,10 @@ namespace KKLLMNPC
         }
 
         // What the egg modes promise for a swallowed PLAYER (null = no hatch).
-        private static string PlayerFateHint()
+        // The EATER (the acting agent) sets the fate; their override rides here.
+        private static string PlayerFateHint(Kobold eater)
         {
-            switch (Effect())
+            switch (EffectFor(eater))
             {
                 case SwallowEffect.BellyEgg: return "the egg reagent around them waits in your belly — nest-lay them and plant the egg";
                 case SwallowEffect.Grow:
@@ -720,9 +805,9 @@ namespace KKLLMNPC
         }
 
         // The LLM-facing outcome summary for a successful eat_player result.
-        internal static string PlayerOutcomeNote()
+        internal static string PlayerOutcomeNote(Kobold eater)
         {
-            switch (Effect())
+            switch (EffectFor(eater))
             {
                 case SwallowEffect.BellyEgg: return "the conversion turns them into egg reagent + genes in YOUR belly — nest-lay them, then plant the egg to hatch them out (a nest lay needs energy >1 as well as the egg — eat before sitting if you're low)";
                 case SwallowEffect.Grow: return "the conversion absorbs them into your body — their genes (size, strength, curves) and memories pour into yours (no egg, no hatch — their escape is the swallow-abort chat command)";
@@ -771,7 +856,7 @@ namespace KKLLMNPC
             string who = BodyLabel(actor);
             string eaterLabel = BodyLabel(eater);
             bool selfEat = actor == eater;
-            var holeDest = Destination();
+            var holeDest = DestinationFor(actor); // per-agent override wins; global = player control
             string hole = SwallowLogic.DestinationLabel(holeDest).ToLowerInvariant();
             string entryVerb = SwallowLogic.EntryVerb(holeDest);
 
@@ -825,6 +910,7 @@ namespace KKLLMNPC
                 Milestone = -1,
             };
             lock (_lock) _active.Add(st);
+            DisarmVictimPenetrators(st);
             SpawnVirtualPen(st);
             // MOD EVENT CHANNEL (multiplayer): a remote victim's mod learns of the
             // swallow (begin + digest lines + end) and can abort from THEIR machine.
@@ -846,7 +932,7 @@ namespace KKLLMNPC
                 try
                 {
                     npc.Swallowed = true;
-                    npc.PushWorldEvent(BeginPromiseText(eaterLabel, holeDest) + (selfEat ? "" : " (" + who + " did the feeding)"));
+                    npc.PushWorldEvent(BeginPromiseText(eaterLabel, holeDest, EffectFor(actor)) + (selfEat ? "" : " (" + who + " did the feeding)"));
                     npc.PersistLifeForSwallow(); // snapshot BEFORE any end-of-digest destroy
                 }
                 catch (Exception) { }
@@ -865,13 +951,13 @@ namespace KKLLMNPC
                             + " is inside your " + SwallowLogic.InsideNoun(holeDest) + " now via your " + holeLabelFor(hole)
                             + " (a meal-like conversion, NOT sex): their camera is gone, they WATCH everything through your body's eyes and CANNOT act (about "
                             + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
-                            + "s to conversion). " + PlayerFateHint() + " Keep living your ordinary life — go to work, play, talk — and speak to them whenever; they hear you. They are a person in your care: never sell, abandon or hurt them.");
+                            + "s to conversion). " + PlayerFateHint(eater) + " Keep living your ordinary life — go to work, play, talk — and speak to them whenever; they hear you. They are a person in your care: never sell, abandon or hurt them.");
                     }
                     catch (Exception) { }
                 }
                 try { Plugin.FanoutWorldEventExcept("you watch " + eaterLabel + " " + entryVerb + " the PLAYER WHOLE — the player is inside them now, watching through their body's eyes.", st.EaterNpc, null); } catch (Exception) { }
                 // (the shared tail below bubbles the eater's "You swallow …" line)
-                try { SpectateManager.BeginForPlayer(victim, eater, eaterLabel, PlayerFateHint()); } catch (Exception) { }
+                try { SpectateManager.BeginForPlayer(victim, eater, eaterLabel, PlayerFateHint(eater)); } catch (Exception) { }
             }
             else if (selfEat)
             {
@@ -967,13 +1053,16 @@ namespace KKLLMNPC
         // What the swallowed one is told happens to them — honest per mode, and
         // naming who did it. Grow and Destroy deliberately do NOT promise a rebirth
         // (there isn't one). Grow names what is actually taken (the gain toggles).
-        private static string BeginPromiseText(string who, SwallowDestination holeDest)
+        private static string BeginPromiseText(string who, SwallowDestination holeDest, SwallowEffect mode)
         {
             string noun = SwallowLogic.InsideNoun(holeDest);
+            // Second-person throughout: this text is the VICTIM's own promise — the
+            // old "they went in through X's mouth" let 'they' read as the eater, so
+            // victims mis-narrated who did what to whom.
             string via = holeDest == SwallowDestination.Mouth
-                ? " — they went in through " + who + "'s mouth"
-                : " — taken in through " + who + "'s " + holeLabelFor(SwallowLogic.DestinationLabel(holeDest).ToLowerInvariant());
-            switch (Effect())
+                ? " — you went in through " + who + "'s mouth"
+                : " — you were taken in through " + who + "'s " + holeLabelFor(SwallowLogic.DestinationLabel(holeDest).ToLowerInvariant());
+            switch (mode)
             {
                 case SwallowEffect.BellyEgg:
                     return who + " swallowed you WHOLE — you are deep inside their " + noun + " now"
@@ -1136,8 +1225,322 @@ namespace KKLLMNPC
                 pen.transform.localScale = Vector3.one; // parent (the victim root) carries the body scale
                 st.VirtualPen = pen;
                 try { LLMNPCPlugin.Log.LogInfo("vore-pen: virtual penetrator spawned for '" + st.Name + "' (cached body scale " + st.BodyScale.ToString("0.###", CultureInfo.InvariantCulture) + ") — the pred's orifice widens via PenetrationTech"); } catch (Exception) { }
+                HardenPen(st, pen);
             }
             catch (Exception) { }
+        }
+
+        // PEN HARDENING — the "fed the person they were eating, then both got
+        // launched into the sky" glitch. The PenisDatabase prefabs (vanilla and
+        // modded alike) ship `autoPenetrate = AutoSeek|AutoDecouple` with an EMPTY
+        // ignorePenetrables list: the vanilla equip flow (DickDescriptor.AttachTo)
+        // fills the owner's own holes in at runtime, which a raw instantiate never
+        // does. With a BODY-scale shaft the AutoSeek sphere covers the pred's whole
+        // upper body, so the shaft locks whatever hole it "touches just right" —
+        // the pred's other orifices, the victim's own, a bystander's — and every
+        // lock is a REAL Penetrate(): genuine second-holes for the victim-as-shaft,
+        // re-lock/decouple loops fighting the per-tick pull pin. The pair jettisons
+        // and PlayAreaEnforcer (5s cadence) PhotonNetwork.Destroys every own-View
+        // body once it leaves the map bounds — "moved up into space and deleted".
+        //
+        // The hardened shaft is a SOLO penetrator: seek off, the ONE intended hole
+        // forced via Penetrate(), everything else in reach on the ignore list, and
+        // any item machinery (modded pens can be physics items) stripped. Main
+        // thread only (Begin guarantees it).
+        private static void HardenPen(SwallowState st, GameObject pen)
+        {
+            if (pen == null) return;
+            var pens = new List<PenetrationTech.Penetrator>();
+            try { foreach (var pr in pen.GetComponentsInChildren<PenetrationTech.Penetrator>(true)) if (pr != null) pens.Add(pr); }
+            catch (Exception) { }
+            StripPenItemMachinery(pen);
+            foreach (var pr in pens) SetPenAutoMode(pr, 0); // PenetrationTech AutoPenetrateMode.None
+            var intended = IntendedVoreHole(st);
+            if (intended != null)
+            {
+                FillVorePenIgnores(st, pens, intended);
+                foreach (var pr in pens)
+                {
+                    try { pr.Penetrate(intended); }
+                    catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("vore-pen force-insert: " + e.Message); } catch (Exception) { } }
+                }
+            }
+            else
+            {
+                // No matching body hole (the DICK route — no urethral Penetrable
+                // exists anywhere): the shaft stays UNINSERTED — pure geometry at
+                // the pred's own groin, narrated by the intake lines. That route
+                // previously had to autoseek "whatever it touched", which WAS the
+                // misfire.
+                try { LLMNPCPlugin.Log.LogInfo("vore-pen: no matching body hole for route '" + st.Hole + "' — shaft left uninserted (narration-only)"); } catch (Exception) { }
+            }
+        }
+
+        // Penetrator.autoPenetrate is a private flags enum (None=0, AutoSeek=1,
+        // AutoDecouple=2). False (renamed/missing field) = leave everything as
+        // shipped; the ignore-fill in HardenPen is the fallback restraint.
+        private static FieldInfo _penAutoField;
+        private static bool SetPenAutoMode(PenetrationTech.Penetrator pr, int mode)
+        {
+            try
+            {
+                if (pr == null) return false;
+                if (_penAutoField == null)
+                    _penAutoField = typeof(PenetrationTech.Penetrator).GetField("autoPenetrate", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (_penAutoField == null) return false;
+                _penAutoField.SetValue(pr, Enum.ToObject(_penAutoField.FieldType, mode));
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+        private static bool SetPenAutoModeValue(PenetrationTech.Penetrator pr, object value)
+        {
+            try
+            {
+                if (pr == null || value == null) return false;
+                if (_penAutoField == null)
+                    _penAutoField = typeof(PenetrationTech.Penetrator).GetField("autoPenetrate", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (_penAutoField == null) return false;
+                _penAutoField.SetValue(pr, value);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+        private static object PenAutoModeOf(PenetrationTech.Penetrator pr)
+        {
+            try
+            {
+                if (pr == null) return null;
+                if (_penAutoField == null)
+                    _penAutoField = typeof(PenetrationTech.Penetrator).GetField("autoPenetrate", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (_penAutoField == null) return null;
+                return _penAutoField.GetValue(pr);
+            }
+            catch (Exception) { return null; }
+        }
+
+        // Modded PenisDatabase entries may be full physics items (rigidbody,
+        // colliders, photon views) — vanilla entries are static. Inside a pinned,
+        // per-tick-teleported body, live physics items fight the pin and their own
+        // rig: the jettison engine. The shaft needs only its deform machinery, so
+        // joints go, photon plumbing goes, colliders go, and any rigidbody is
+        // frozen (its listener forces are no-ops on a kinematic body).
+        private static void StripPenItemMachinery(GameObject pen)
+        {
+            try
+            {
+                foreach (var j in pen.GetComponentsInChildren<Joint>(true)) UnityEngine.Object.Destroy(j);
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (var pv in pen.GetComponentsInChildren<PhotonView>(true)) UnityEngine.Object.Destroy(pv);
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (var s in pen.GetComponentsInChildren<SmoothRigidbodyPhoton>(true)) UnityEngine.Object.Destroy(s);
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (var h in pen.GetComponentsInChildren<PenetratorPhotonHelper>(true)) UnityEngine.Object.Destroy(h);
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (var rb in pen.GetComponentsInChildren<Rigidbody>(true))
+                {
+                    if (rb == null) continue;
+                    try { rb.velocity = Vector3.zero; rb.angularVelocity = Vector3.zero; rb.detectCollisions = false; rb.useGravity = false; rb.isKinematic = true; }
+                    catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (var c in pen.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.Destroy(c);
+            }
+            catch (Exception) { }
+            // Force-aim listeners drive the rigidbody toward the hole; their body is
+            // inert now. Drop them so their FixedUpdate can't fight the pin.
+            try
+            {
+                foreach (var pr in pen.GetComponentsInChildren<PenetrationTech.Penetrator>(true))
+                {
+                    if (pr == null || pr.listeners == null) continue;
+                    for (int i = pr.listeners.Count - 1; i >= 0; i--)
+                    {
+                        var l = pr.listeners[i];
+                        if (l == null) continue;
+                        if (l is PenetrationTech.PenetratorRigidbodyListener || l is PenetrationTech.PenetratorNoCollideListener)
+                            pr.listeners.RemoveAt(i);
+                    }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // The ONE hole the shaft may live in: the pred's own penetrable matching the
+        // route label (mouth/anal/pussy/nipple). The DICK route returns null — no
+        // urethral body hole exists in the game, so nothing is inserted.
+        private static PenetrationTech.Penetrable IntendedVoreHole(SwallowState st)
+        {
+            string want;
+            string hole = st != null ? st.Hole : null;
+            if (hole == "mouth") want = "mouth";
+            else if (hole == "anal") want = "ass";
+            else if (hole == "pussy") want = "vagina";
+            else if (hole == "nipple") want = "chest";
+            else return null;
+            try
+            {
+                var eater = st.Eater;
+                if (eater == null) return null;
+                foreach (var p in eater.GetComponentsInChildren<PenetrationTech.Penetrable>(true))
+                {
+                    if (p == null) continue;
+                    bool active = true;
+                    try { active = p.gameObject != null && p.gameObject.activeInHierarchy; } catch (Exception) { }
+                    if (!active) continue;
+                    if (PenetrableHoleWord(p) == want) return p;
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        // Same word rules as the body classifier (hole labels the narration uses).
+        private static string PenetrableHoleWord(PenetrationTech.Penetrable pen)
+        {
+            try
+            {
+                string n = (pen.gameObject != null ? pen.gameObject.name : "").ToLowerInvariant();
+                if (n.Contains("mouth") || n.Contains("face") || n.Contains("head")) return "mouth";
+                if (n.Contains("vag") || n.Contains("crotch")) return "vagina";
+                if (n.Contains("anus") || n.Contains("ass") || n.Contains("butt") || n.Contains("rear")) return "ass";
+                if (n.Contains("breast") || n.Contains("chest")) return "chest";
+                return n.Length > 0 ? n : "hole";
+            }
+            catch (Exception) { return "hole"; }
+        }
+
+        // The meal's own holes and the pred's remaining ones can never be seeked by
+        // the vore shaft, plus everything else AutoSeek could see in reach
+        // (bystanders, stuffing stations) — the same layer scan the seek itself uses.
+        private static readonly Collider[] _penScan = new Collider[64];
+        private static void FillVorePenIgnores(SwallowState st, List<PenetrationTech.Penetrator> pens, PenetrationTech.Penetrable intended)
+        {
+            if (pens == null || pens.Count == 0) return;
+            try
+            {
+                if (st.Victim != null)
+                    foreach (var p in st.Victim.GetComponentsInChildren<PenetrationTech.Penetrable>(true))
+                    {
+                        if (p == null) continue;
+                        foreach (var pr in pens) try { pr.AddIgnorePenetrable(p); } catch (Exception) { }
+                    }
+            }
+            catch (Exception) { }
+            try
+            {
+                if (st.Eater != null)
+                    foreach (var p in st.Eater.GetComponentsInChildren<PenetrationTech.Penetrable>(true))
+                    {
+                        if (p == null || p == intended) continue;
+                        foreach (var pr in pens) try { pr.AddIgnorePenetrable(p); } catch (Exception) { }
+                    }
+            }
+            catch (Exception) { }
+            try
+            {
+                Vector3 at = pens[0].transform != null ? pens[0].transform.position : (st.Victim != null ? st.Victim.transform.position : Vector3.zero);
+                int hits = Physics.OverlapSphereNonAlloc(at, 8f, _penScan, PenetrationTech.PenetrationTechTools.GetPenetrableMask(), QueryTriggerInteraction.Collide);
+                for (int i = 0; i < hits; i++)
+                {
+                    var col = _penScan[i];
+                    if (col == null) continue;
+                    PenetrationTech.Penetrable p = null;
+                    try
+                    {
+                        var po = col.GetComponent<PenetrationTech.PenetrableOwner>();
+                        if (po != null) p = po.owner;
+                    }
+                    catch (Exception) { }
+                    if (p == null)
+                    {
+                        try { p = col.GetComponentInParent<PenetrationTech.Penetrable>(); } catch (Exception) { p = null; }
+                    }
+                    if (p == null || p == intended) continue;
+                    foreach (var pr in pens)
+                        try { pr.AddIgnorePenetrable(p); } catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // The VICTIM'S OWN equipment rides along: live AutoSeek'd penetrators right
+        // at the pred — their real part autolocking the pred's other holes "just
+        // right" mid-pull was the classic misfire (PenetrationTech machinery ran
+        // even where our narration gate kept quiet). Inert for the session; every
+        // release path restores them.
+        private static void DisarmVictimPenetrators(SwallowState st)
+        {
+            try
+            {
+                Kobold victim = st != null ? st.Victim : null;
+                if (victim == null) return;
+                foreach (var pr in victim.GetComponentsInChildren<PenetrationTech.Penetrator>(true))
+                {
+                    if (pr == null) continue;
+                    try
+                    {
+                        object old = PenAutoModeOf(pr);
+                        if (st.DisarmedPens == null) st.DisarmedPens = new List<DisarmedPen>();
+                        st.DisarmedPens.Add(new DisarmedPen { Pen = pr, OldMode = old });
+                        SetPenAutoMode(pr, 0);
+                        pr.Penetrate(null); // drop any current lock; the meal is coming out of every hole
+                    }
+                    catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // Restore the values captured by DisarmVictimPenetrators (release paths).
+        private static void RestoreVictimEquipment(SwallowState st)
+        {
+            try
+            {
+                if (st == null || st.DisarmedPens == null) return;
+                foreach (var d in st.DisarmedPens)
+                {
+                    if (d == null || d.Pen == null) continue;
+                    try { SetPenAutoModeValue(d.Pen, d.OldMode); } catch (Exception) { }
+                }
+                st.DisarmedPens.Clear();
+            }
+            catch (Exception) { }
+        }
+
+        // True when this "vore:"-named shaft is precisely THIS body's own swallow
+        // (the pred). Everything else it touches — another hole, another body — is
+        // meal machinery that must never register as a partner.
+        internal static bool IsVoreInsertFor(Kobold eater, string penGoName)
+        {
+            if (eater == null || penGoName == null) return false;
+            lock (_lock)
+            {
+                for (int i = 0; i < _active.Count; i++)
+                {
+                    var s = _active[i];
+                    if (s == null || s.Eater != eater || s.VirtualPen == null) continue;
+                    string nm = null;
+                    try { nm = s.VirtualPen != null ? s.VirtualPen.name : null; } catch (Exception) { nm = null; }
+                    if (nm != null && nm == penGoName) return true;
+                }
+            }
+            return false;
         }
 
         private static void DestroyVirtualPen(SwallowState st)
@@ -1310,6 +1713,48 @@ namespace KKLLMNPC
             int phase = SwallowLogic.PhaseFor(SwallowLogic.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
             float phaseT = SwallowLogic.PhaseT(SwallowLogic.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
 
+            // LAUNCH BRAKE: nothing in the pin/pull escalates vertically, so a fast,
+            // sustained climb of the pred is a physics/animation break carrying the
+            // pair out of the world. End the session NOW and put the victim back
+            // down — PlayAreaEnforcer would otherwise PhotonNetwork.Destroy both
+            // bodies once they clear the map bounds ("deleted once reaching a
+            // certain point"). Two-plus m/s of climbing sustained a quarter second
+            // trips it; walking up terrain and single hops decay back out.
+            bool launched = false;
+            try
+            {
+                float ey = st.Eater != null ? st.Eater.transform.position.y : 0f;
+                float nt = Time.unscaledTime;
+                if (st.LastWatchT > 0f && nt - st.LastWatchT > 0.01f)
+                {
+                    float upRate = (ey - st.LastWatchY) / (nt - st.LastWatchT);
+                    if (upRate > 2.5f) st.LaunchTicks++;
+                    else st.LaunchTicks = Mathf.Max(0, st.LaunchTicks - 2);
+                    if (st.LaunchTicks >= 15) launched = true;
+                }
+                st.LastWatchY = ey;
+                st.LastWatchT = nt;
+            }
+            catch (Exception) { }
+            if (launched)
+            {
+                try { LLMNPCPlugin.Log.LogWarning("swallow launch brake: pair climbing out of the world — session '" + st.Name + "' released"); } catch (Exception) { }
+                try { if (st.Npc != null) st.Npc.PushWorldEvent("the swallow came apart: the two of you were being flung through the world together. You were put down before it could carry you both away."); } catch (Exception) { }
+                try { if (st.EaterNpc != null) st.EaterNpc.PushWorldEvent("the vore went wrong — you and " + st.Name + " were being flung out of the world together. You dropped them at once; nothing more was swallowed."); } catch (Exception) { }
+                DestroyVirtualPen(st);
+                RestoreVictimEquipment(st);
+                try
+                {
+                    var eb = st.Eater != null ? st.Eater.body : null;
+                    if (eb != null && !eb.isKinematic) { eb.velocity = Vector3.zero; eb.angularVelocity = Vector3.zero; }
+                }
+                catch (Exception) { }
+                try { RestoreVictimBody(st.Victim, st.Eater != null ? st.Eater.transform.position : st.Victim.transform.position); } catch (Exception) { }
+                if (st.Npc != null) try { st.Npc.Swallowed = false; } catch (Exception) { }
+                _active.RemoveAt(index);
+                return;
+            }
+
             PinVictim(st);
             HideOnceSwallowed(st, phase);
 
@@ -1400,7 +1845,7 @@ namespace KKLLMNPC
                                 st.Npc.PushWorldEvent("the walls knead you steadily — your shape is starting to change, limbs going soft and smooth");
                             else if (mark == SwallowLogic.MarkEggForming)
                             {
-                                SwallowEffect mode = Effect();
+                                SwallowEffect mode = EffectAt(st);
                                 if (mode == SwallowEffect.Grow)
                                     st.Npc.PushWorldEvent("you are fading — " + BodyLabel(st.Eater) + " body is absorbing you completely. Almost over.");
                                 else if (mode == SwallowEffect.Destroy)
@@ -1432,8 +1877,8 @@ namespace KKLLMNPC
             st.LastPhase = phase;
             if (phase >= 0) return;
 
-            // Done converting: apply the configured effect, then remove the body.
-            if (Consume(st))
+            // Done converting: apply the chosen effect, then remove the body.
+            if (Consume(st, EffectAt(st)))
             {
                 st.EggSpawned = true; // "handled" — remove the session
                 DestroyVirtualPen(st);
@@ -1642,6 +2087,7 @@ namespace KKLLMNPC
         // what we changed ourselves).
         private static void ReleaseSwallowed(SwallowState st)
         {
+            RestoreVictimEquipment(st);
             var v = st.Victim;
             if (!SafeAlive(v))
             {
@@ -1687,12 +2133,13 @@ namespace KKLLMNPC
         }
 
         // ------------------------------------------------------------------
-        // Completion dispatch: apply the configured effect to the fully-digested
-        // victim. Every mode ends by destroying the victim body (the swallow
-        // snapshotted their persona at Begin AND again here-before-destroy).
+        // Completion dispatch: apply the CHOSEN effect (the actor's per-agent
+        // setting, else the operator's global) to the fully-digested victim. Every
+        // mode ends by destroying the victim body (the swallow snapshotted their
+        // persona at Begin AND again here-before-destroy).
         // Returning false keeps the victim pinned for a retry tick.
         // ------------------------------------------------------------------
-        private static bool Consume(SwallowState st)
+        private static bool Consume(SwallowState st, SwallowEffect mode)
         {
             // A real swallow is the only sating event for the vore drive.
             try
@@ -1701,7 +2148,7 @@ namespace KKLLMNPC
                 if (eatNpc != null) eatNpc.VoreAppetiteSated();
             }
             catch (Exception) { }
-            switch (Effect())
+            switch (mode)
             {
                 case SwallowEffect.BellyEgg: return PourIntoBelly(st);
                 case SwallowEffect.Grow: return AbsorbIntoEater(st);
@@ -1789,7 +2236,9 @@ namespace KKLLMNPC
                     var ownFacts = eatRec != null && eatRec.Facts != null ? eatRec.Facts : new List<string>();
                     var merged = MemoryCompaction.MergeLife(ownFacts, st.Name, facts);
                     if (eatRec != null)
-                        MemoryStore.Save(eaterKey, eaterName ?? eatRec.Name, eatRec.Persona, merged, eatRec.Goal, eatRec.Pronouns);
+                        MemoryStore.Save(eaterKey, eaterName ?? eatRec.Name, eatRec.Persona, merged, eatRec.Goal, eatRec.Pronouns,
+                            skills: eatRec.Skills, bodyFp: eatRec.BodyFp, species: eatRec.Species,
+                            voreTarget: eatRec.VoreTarget, voreMode: eatRec.VoreMode); // keep the eater's whole record shape (prefs+skills+identity included)
                     else
                         MemoryStore.Save(eaterKey, NPCInstance.CleanName(st.Eater.name), null, merged, null, null);
                 }
@@ -2297,7 +2746,8 @@ namespace KKLLMNPC
                         + "; hatched back in a NEW body with MIXED genes (the carrier's genes and theirs blended). You are the same person.";
                     var facts = MemoryCompaction.MergeRebirth(rec.Facts, link != null ? link.EaterLabel : null, eaterFacts, hatchLine);
                     MemoryStore.Save(newKey, rec.Name, rec.Persona, facts, rec.Goal, rec.Pronouns, rec.Skills,
-                        bodyFp: NPCInstance.BodyFullFp(k), species: NPCInstance.CleanName(k.name)); // the CHILD egg inherits the skills
+                        bodyFp: NPCInstance.BodyFullFp(k), species: NPCInstance.CleanName(k.name),
+                        voreTarget: rec.VoreTarget, voreMode: rec.VoreMode); // the CHILD egg inherits the skills + vore preferences
                     try
                     {
                         LLMNPCPlugin.Log.LogInfo("swallow: rebirth — '" + (rec.Name ?? "?") + "' hatched from an egg"
@@ -2428,7 +2878,7 @@ namespace KKLLMNPC
                 var pv = st.Victim.photonView;
                 if (pv == null) return;
                 BroadcastLine("swallow|begin|" + pv.ViewID + "|" + (st.Name ?? "?") + "|"
-                    + Effect().ToString() + "|" + Math.Round(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    + EffectAt(st).ToString() + "|" + Math.Round(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             catch (Exception) { }
         }

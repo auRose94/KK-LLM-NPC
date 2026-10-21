@@ -5,6 +5,355 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Added (2026-10-14 — behavior-hardening round)
+
+- **Quest lifecycle is closed out.** QuestSense now tracks the objective OBJECT
+  (not just the title string), so `autoAdvance` chain quests — which used to
+  read as "objective progress" for the next letter forever — are announced as
+  `OBJECTIVE COMPLETED` the moment the scroll hands off; scene teardown can no
+  longer masquerade as a completion (error-streak guard + scene-stability
+  window). A completion fanout sheds quest-scoped facts from every instance and
+  auto-retires a goal that was that quest (recorded as `game-cleared` in the
+  goal history). `cat quest` now answers with the quest scroll (it used to open
+  the plan display).
+- **Facts finally age in wall-clock time.** `FactRec` carries a UTC stamp that
+  survives save/restore (`fact_utc` per record; old saves fall back to the
+  record's save stamp), so ancient notes stop waking up brand-new at every
+  session. `[Memory] FactMaxAgeHours` (default 72h, 0=off) prunes facts not
+  re-remembered in that window — during the prompt render AND before every
+  save. Identity notes (`me:`/`name:`) and the latest `player_wants:` are
+  exempt; compaction-3 merges carry the newest member's age instead of
+  resurrecting old lines as fresh.
+- **Agent↔agent chat is named as such.** An addressed sibling line reaches the
+  addressee as `X (another AI kobold) said TO YOU: …` (players stay
+  `player: …`), and the prompt surfaces (builtin + console/default files, in
+  sync) now teach that a named-sender line is another agent to answer by
+  name+comma — agents had been taught that every `[chat]` is the player. The
+  victim's swallow-begin promise text is second-person throughout ("you went
+  in through X's mouth"), removing the eater/victim pronoun blur.
+- **The body-swap machine rebind works again** (regression fix). The machine
+  re-fires `bodySwapped` from stale pod timers with both bodies control-flagged
+  mid hand-off; those re-fires used to hit silent early-returns in
+  `RebindAfterSwap`, leaving two minds driving one body and the AI "never
+  swapping". Every guard exit now logs with its reason; a STALE claim on the
+  incoming body (no live sibling instance behind it) is cleared and the
+  machine's hand-off taken; a LIVE sibling claim keeps the normal both-minds-
+  move resolution; and a 12s swap-grace keeps the reconcile claim race out of
+  the hand-off window.
+- **Wall-through interaction is gated three ways.** `interact` requires
+  proximity (InteractRange+1.2m; the id-route used to fire from 14m away) and
+  a clear body→target line (`wall_between` teach-on-refusal otherwise), the
+  touch-bubble selector ignores usables on the far side of a thin wall, route
+  arrival requires clear sight of the original goal on the final leg
+  (throttled replan — "arrived outside the building, interacted in" is over),
+  and both path pipelines end a SNAPPED goal at the landing CELL instead of
+  re-pinning the raw goal X/Z through the wall.
+- **Movement lost the fly act.** Arrival braking was a `Mathf.Max` (could only
+  raise the throttle — bodies charged every waypoint at full speed, overshot,
+  tripped the bump-breaker); it's a cap now. `go_to` no longer snaps the yaw
+  (a model re-issuing it every think-tick whipped the ragdoll 90–180° per
+  tick) and its results stop telling the model to "re-issue go_to" — the
+  route course-corrects itself; only new destinations need a call.
+- **Glued echo tails run.** `echo I will go check cat quest` speaks "I will go
+  check" and EXECUTES `cat quest` (it used to speak the whole line; the model
+  believed it had checked and asked again). Deliberately narrow with
+  false-positive guards (articles before `cat` refuse the split; pipes/quotes
+  stay the payload rule's business) + prompt teaching + unit tests.
+- **The empty mailbox stops reading as busy.** A mailbox `CanUse=false` now
+  returns `mail_empty` with "no mail inside right now — come back when the
+  space-beam glows" instead of the generic "maybe busy/occupied" hint that
+  had agents camping an empty box.
+- **WebUI settings page is organized.** `/api/config` sorts by canonical
+  section order (LLM→Vision→…→Debug) then key and dedupes ids; the accordion
+  groups by a keyed map instead of section-change detection (one drawer per
+  category — interleaved reflection order used to spawn duplicate LLM/Vision/
+  General drawers), and drawer open-state survives filter reshuffles by
+  summary text instead of index.
+
+### Changed (2026-10-14 — repo layout: training + serving split out)
+
+- **Training lives outside the mod repo now** — the whole `training/` tree
+  (pipeline code + 85 GB of checkpoints/datasets) moved to
+  `Work/KK-Training`. The MiMo fine-tune run was stopped mid-flight and the
+  MiMo track dropped (safety-RL base + thin data; see `KK-Training/
+  PLAN-PASS2.md`): pass-1 audited with the new `curate.py` (coverage holes +
+  zero think traces + 8 raw-think-tag episodes, since stripped to
+  `episodes.curated.jsonl`), and pass-2 records with thinking ON from the
+  current build for the new event vocabulary.
+- **The python AI server moved to its own `kk-serve` branch** — `serve/` (the
+  OpenAI-compatible torch server + fetch assets + python contract tests)
+  rides there for separate refinement; master keeps the mod-side launcher,
+  which degrades to external-endpoint adoption when the python dir is absent.
+  `build.sh` and the test runner skip the serve steps cleanly either way.
+
+### Fixed (kk-serve live-debug: hybrid-model serving on the 15.5 GB card)
+
+- **The first real console-scale serving run found three serving bugs**, all fixed and
+  verified at scale (9,480-token prompt + streaming, memory stable):
+  1. **Thread-local autograd leak** — `torch.set_grad_enabled(False)` is main-thread
+     only; the HTTP handler threads generated with autograd ON, retaining a full
+     graph per request (~7 GB on a 2k segment). Generation now runs under
+     `torch.inference_mode()` (thread-safe).
+  2. **Full-sequence logits** — every forward computed the whole [seq × 248k-vocab]
+     matrix; now `logits_to_keep=1` (tail logits only — the same fix training's
+     rebuild already knew about) → the 16-token prefill's phantom 7.9 GB is gone.
+  3. **The hybrid's fused kernels were silently absent** — transformers' kernel
+     resolver only walks EAGER package attributes; the modern `fla-core` layout is
+     lazy, so it quietly used the pure-torch chunk fallback (giant intermediates).
+     kk_serve re-attaches fla's eager layout at boot; `fla-core` + `causal-conv1d`
+     are now in requirements.txt.
+  Plus: **segmented ~2k prefill** (per-chunk intermediates no longer scale with the
+  whole prompt), `PYTORCH_CUDA_ALLOC_CONF=expandable_segments` at boot, and
+  OOM recovery that actually frees (gc.collect before empty_cache — the raised
+  exception held its whole stack alive).
+
+### Added (tonight's hardening round)
+
+- **Vore controls get a path that always works.** F7/F8 kept going dead: function keys
+  get intercepted by desktops and Steam (the Proton case field-report: both keys did
+  nothing), and an unfocused game window receives them not at all. The same cycle/set
+  operations are now **game-chat commands**: `vore arm <mouth|anal|pussy|dick|nipple|off>`
+  / `vore arm` (cycle) / `vore fate <mode|off>` (cycle) / `vore state` — consumed by the
+  mod like the `swallow abort` words so agents never hear them; announce + config persist
+  identical to the hotkeys. Config descriptions + docs updated to steer players there.
+- **Naming for think-happy models** (the qwen "Thinking Process:" opener got name
+  attempts rejected fast): the name call now ships the thinking-off payload fields
+  (kk-serve honors them → the answer starts immediately; servers that ignore the knobs
+  keep the ladder), and every rejected attempt's reasoning is **carried abridged into
+  the next attempt's prompt** — "its reasoning was: …; use that conclusion, end with
+  the lone final line Name: <one name>" — so a re-roll corrects instead of re-deriving
+  the same monologue into the same truncation. Cleared on every success path.
+- **Nav outcome events**: walks are asynchronous (a go_to starts in one turn and its
+  result lands minutes later outside any tool result) — the body now EVENTs what
+  happened: `arrival: you reached <X>`; a route that keeps grinding an obstacle gets
+  "replanned a different way (N legs)"; when NO alternative route exists →
+  **closest-approach wording** ("no other route was found — you may already be at your
+  closest approach; try a different target or go around", once per goal); and at plan
+  time, when every planner refused with the full-scene map ready →
+  "no path to X exists in the maps — steering by hand from here". Queued as
+  `[nav]` events into the console drain + history + log, rate-gated (12s) and
+  once-per-goal so a bumpy route doesn't spam.
+- **Stutter while playing**: the pass-1 training run has held its GPU at 100% / ~72°C
+  for two days; the game (Proton) renders on the OTHER card only if forced — verify
+  with `DXVK_FILTER_DEVICE_NAME` / `proton-cachyos` launch env when the training and
+  the play collide.
+
+### Added (kk-serve serving companion)
+
+- **`serve/` — a numpy + torch OpenAI-compatible model server built for this mod.** LM Studio
+  pays for convenience: GGUF re-quantization of the fine-tuned artifacts from `training/`,
+  no way to warm the long repeated console prefixes across turns. kk-serve loads the
+  artifact as trained (bf16 + LoRA merge on load), and after each generation parks the
+  finished KV cache in a small LRU keyed by exact token prefix — the next request that
+  prefix-extends it (the appends-only conversation shape) continues prefill from there,
+  with a load-time self-test (split vs fresh prefill, argmax + drift) that disables
+  reuse per-model on any disagreement. Contract fidelity is the second pillar: stream
+  `tool_calls` arrive complete in ONE delta (name + full arguments as a JSON string — the
+  console path reads args from the same chunk as the name), `finish_reason` is honest
+  (`length` drives the name ladder), error messages route the 400 degradation ladder
+  ("context length exceeded" / "image" / "no models loaded…wait-and-retry"), and
+  `response_format`/`tools` are accepted silently so no cooldown ever trips.
+  `[LLM] Thinking off` flows through `chat_template_kwargs {enable_thinking: false}`,
+  with any reasoning that leaks routed to `reasoning_content` and a client-parity
+  think-strip before the model's JSON parsers. Ships with 45 tests — the tool-markup
+  parser and the streaming text pipeline (reasoning split, markup hold-back, stop
+  strings across chunk boundaries) are torch-free, and an end-to-end REST suite runs
+  against a synthetic tiny model. No C# changes: it's an endpoint drop-in
+  (`http://127.0.0.1:8339/v1/chat/completions`).
+
+- **The mod launches and manages it.** `[Serve] Enabled` spawns `kk_serve.py` at game
+  launch and supervises it (health-watched /health polls, spawn backoff, killed with the
+  game so no orphan holds the GPU); a new WebUI sidebar tab **AI server** carries the
+  operating surface: status/health, restart/start/stop, the discovery scan with a model
+  picker (recommendation = fine-tune artifact > serving-family bonus > VRAM fit gate >
+  smaller same-family model — unfit models listed with their reason), `Apply` hot-swaps
+  the live server via `POST /serve/load` with restart fallback, scan-locations editor,
+  an opt-in `AutoEndpoint` traffic switch (healthy companion takes over NPC POSTs without
+  rewriting `[LLM].Endpoint`), and the companion's own stdout tail with the same
+  hold-at-scroll-up log discipline. kk-serve gained `--model auto`, repeatable
+  `--scan-dir` (+ hub-cache layout), `/serve/models` + `/serve/load` endpoints and richer
+  `/health`. Endpoint resolution funnels through one `Endpoint()` helper on the instance.
+  19 suites now (`serve` joins the headless set — pure `ServeArgs.cs` is suite-testable).
+
+- **A serving model ships itself.** `serve/fetch_assets.py` downloads a compatible model
+  from HuggingFace into `<game root>/kk-llm-models/` (next to the game — deleting the
+  game deletes the models), with a recommendation contract: the fine-tune's base
+  (`training/train_lora.py` targets Qwen3.5-9B) wins when it fits the VRAM budget,
+  otherwise the largest Qwen3.5-family sibling does — on the 15.6 GB card that is
+  **Qwen3.5-4B** (~9.5 GB, and it is a multimodal composite, which surfaced three
+  serving fixes: nested `text_config` ctx/eos reads in both the engine and discovery,
+  plus an `AutoModelForImageTextToLanguage` loader fallback). `--bepinex` stages the
+  newest stable BepInEx 5.4.x binaries from the GitHub releases API into the game root
+  (variant flag, draft/prerelease/rc-exclusion rules, zip-slip guard) so a fresh
+  machine becomes one `build.sh` away from playing. `build.sh` runs
+  `fetch_assets.py --ensure-model` post-deploy (first build downloads, later builds
+  no-op; `KKLLM_SKIP_MODEL_FETCH=1` skips); the launcher scans the game models dir
+  implicitly (`ServeArgs.MergeLocations`), so the whole chain is zero-config:
+  build → model next to the game → game launch → kk-serve auto-loads it → NPCs talk.
+
+- **The game install ships its own companion copy.** `build.sh` copies `serve/*.py`
+  into `BepInEx/plugins/serve/` beside the dll (prompt-files pattern) — the WebUI
+  fetch/launcher works with `[Serve].ServeDir` EMPTY, and the error messages now name
+  the actual remedy (run build.sh vs set ServeDir) instead of assuming the repo exists
+  somewhere the game process can see.
+- **Steam Proton support.** Three pieces: (1) wine-host detection — the game's mono
+  reports Windows inside Proton but `/bin/sh` is real, so the launcher classifies the
+  host (windows / wine / unix), resolves python **through the wine host shell**
+  (`command -v`), and spawns ELF interpreters **by absolute path only** with unix
+  workdirs suppressed (wine's `lpCurrentDirectory` wants windows paths) — `detect
+  pythons` enumerates through `/bin/sh` under Proton; (2) the
+  `serve/proton-launch.sh` Steam launch-options route: the script starts kk-serve
+  OUTSIDE Proton (native python; `KKLLM_SERVE_PYTHON`/`KKLLM_SERVE_PORT` overrides,
+  log beside the script) then execs the game, and the mod **adopts the answering
+  server** (no spawn-war; panel shows "adopted external server"; a new loopback
+  `/serve/shutdown` endpoint lets restart/stop replace an external launch cleanly);
+  (3) `HostKind` + the candidate ladder are headless-tested pure logic. The
+  mcs-compiler lesson from the round: the game profile rejects C#7 local functions
+  entirely (CS1547) — the candidate ladder stays plain.
+- **Device selection + in-browser model fetch.** `GET /serve/devices` reports the torch
+  build's vendor (hip→rocm / cuda), every card with name + live free/total VRAM, and `cpu`.
+  The WebUI AI-server tab grows a **processing device** dropdown (auto / cpu / each card)
+  — applying restarts the companion with `--device` under the vendor-matched python
+  (`[Serve].PythonCuda / PythonRocm / PythonCpu`; a mixed CPU+iGPU + ROCm + CUDA box has
+  one torch build per vendor and no single python sees all three, so the launcher
+  resolves per device with a fallback). The **model fetch** box runs `fetch_assets.py`
+  in-browser: catalog scan with recommendation + reasons, per-candidate download buttons,
+  BepInEx staging, and a live progress-tailed fetch log; a finished download triggers the
+  model-list rescan automatically. New headless tests cover `PythonForDevice`,
+  the fetch command line, and device arg threading. On **Windows**, the first spawn's
+  `python3 … Native error= File not found` is explained and fixed by a candidate walk
+  (PythonBin → `python` → `py`): every failed start is tried against the next
+  interpreter, the final status name lists all attempts, and the remedy (absolute
+  venv `python.exe` in `[Serve].PythonBin`) is in the message — the walk covers the
+  companion spawn, the fetch, and the catalog scan alike. The AI-server tab gains a
+  **python interpreter** section: in-place `PythonBin` entry (+set+restart), a
+  **detect pythons** pass (PATH + common install roots; each candidate verified by a
+  real `-c run — version probe, then a torch probe — so Store stubs and broken PATH
+  entries are filtered and interpreters are tagged torch/no), a detected-picker, and
+  the per-device python map saved from the same box; `find_pythons` / `select_python`
+  / `set_python_map` POST actions; PATH parsing is a headless-tested pure helper.
+
+### Added (wave 4)
+
+- **The console speaks bash now: real pipes, sequencing, and ENTER = next frame.** Models with shell
+  training kept writing real shells at the terminal (`ps | grep k | head -n 5`, `cd kitchen && ls`)
+  and got an "unknown command" every time. A quote-aware line splitter now explodes such lines into
+  their stages in `ParseReply` and the turn executor wires each stage's output into the next as pipe
+  input: new stream filters **grep** (`-i` / `-v` / `-c`), **head/tail** (`-n N`), **wc**
+  (`-w`/`-c`/lines default), **sort** (`-r`), **uniq** (`-c`) — each unit-tested in a new
+  `consolepipe` suite (stage splitting, explosion rules, filter semantics). Sequencing (`;`, `&&`,
+  `||`) just runs all stages in order. The splitter is deliberately picky so nothing regresses:
+  payload commands (`echo`/`remember`/`goal`/`plan`/`skill`/`report`) keep their legacy
+  single-line behavior — their `;` and `|` are DATA (skill steps are `name | step;step`) — every
+  stage's first word must be a known command, and the reader-commands' line-oriented outputs (ps/ls/
+  status/whoami/cat*) pipe cleanly through them. Filters spend **no command budget**; a bare filter
+  (no pipe input) answers with the correct shape instead of failing. And the big behavioral
+  unlock: **an empty reply is no longer a failure** — it's ENTER, and the console now serves a
+  fresh frame (events drained since the turn began + the live state anchor) instead of the old
+  "Empty reply" nudge — two presses are honored per turn, then the backoff kicks in; a
+  `"$"`/`">"`-only reply is the same gesture and gets the same frame.
+
+- **The WebUI got organized.** The debug page is now a sidebar-plus-main-pane layout instead of
+  one stacked column: a fixed left rail (status card with main/phase/idle plus the armed vore
+  line with BOTH settings, a three-item nav — kobolds / settings / logs & reports — and the live
+  agent list) and a single view switched by the nav (nothing piles below the fold anymore). The
+  agent panel de-cluttered into drawers (facts stay open, history/terminal/full-stats collapse,
+  open-state survives rebuilds); per-agent vore preferences show on the agent chip and the
+  identity card ("my vore: anal / grow — operator globals: MOUTH / EGG — yours override them for
+  the swallows you start"); `/api/state` now carries the fate mode plus per-instance
+  `vore_target`/`vore_mode`; the settings tab gained a **search field** (narrow the accordion as
+  you type) with the refresh button in its header, and the saved-memories panel moved into the
+  settings view next to ops. All render discipline is preserved (diff-skipped rewrites, frozen
+  log when scrolled up, pause button). Verified in a real browser against a mock API.
+
+- **The AI kobolds pick their own vore route and fate.** Two new agent tools — `vore_target`
+  (mouth / anal / pussy / dick / nipple — the entry hole for swallows they start) and `vore_mode`
+  (egg / bellyegg / grow / destroy — the fate of their meals). Both persist with the body's saved
+  memory (wake + rebirth copy carry them), calling either with no argument asks for the current
+  state (their pick + the operator's global + whether vore is armed), and `'off'`/`'global'` clears
+  back to operator control. Resolution is on the ACTING side: a swallow's route/fate = the initiator's
+  pick, global when they never set one, so the player keeps their **own separate controls** — F7
+  (destination, existing) plus a new **F8** (fate cycle egg→belly-egg→grow→destroy, same
+  announce-and-persist as F7), the WebUI settings tab, and `SwallowEffect` config. The two master
+  gates stay above both: `SwallowEnabled` off means nobody eats anybody (agent overrides included),
+  and `SwallowDestination=Off` still disarms *accidental* release-triggered swallows — an agent's own
+  deliberate pick bypasses the accident-gate (setting it is the decision), nothing else does. While
+  vore is armed a quiet **HUD line** shows the armed target and fate ("vore: target MOUTH · fate EGG —
+  F7 target · F8 fate"); a new `prompt_extras/vore.txt` module file teaches the tools (the module
+  extras path, not the shared prompt files).
+
+### Fixed (wave 4)
+
+- **Vore inserts can no longer feed the wrong body — or throw the pair out of the world.** The
+  real-penetrator insert ("victim as a large penis") spawned the PenisDatabase prefab raw: those
+  prefabs ship `autoPenetrate = AutoSeek|AutoDecouple` with an **empty ignore list** — the vanilla
+  equip flow fills the owner's own holes in at runtime (`DickDescriptor.AttachTo`), which a raw
+  instantiate never does. With a body-scale shaft, the AutoSeek sphere (up to a couple of metres
+  around the tip) covered the pred's whole upper body, so the shaft locked whatever penetrable it
+  brushed just right — the pred's *other* orifices, the victim's own holes, a bystander's — and
+  every lock was a genuine `Penetrate()`. The body-side even narrated those misfires, its vore-insert
+  exemption skipping the self/digesting gates. Re-lock/decouple churn inside a pinned, per-tick
+  teleported compound jettisons both bodies, and once they clear the map bounds `PlayAreaEnforcer`
+  (5 s cadence) `PhotonNetwork.Destroy`es each own-view body — the "launched into space and deleted"
+  endgame. The shaft is now a SOLO penetrator: AutoPenetrate forced to `None` (reflection, with the
+  public ignore list as fallback), the route's matching body hole forced via `Penetrate()` (anal →
+  ButtPenetrable-class, pussy → Vag* classes, nipple → chest/breast classes, mouth; the **dick route
+  inserts nothing** — no urethral body hole exists in the game, so that route was forced to autoseek
+  whatever it touched and is now narration-only), everything else in an 8 m scan of the exact layer
+  AutoSeek uses added to the ignore list, and any item machinery a custom-content pen carries
+  (rigidbodies, colliders, joints, photon views, force-aim listeners) stripped — modded pens are
+  arbitrary prefabs, and live physics items inside a pinned compound are the jettison engine. The
+  **victim's own equipment is disarmed for the session** (their real part autolocking the pred's
+  other holes mid-pull was the classic misfire; restore on every release path) and the narration
+  exemption is **scoped**: a `vore:`-labeled shaft reaching any body that is not that insert's own
+  pred is dropped before it can read as penetration. As a last line of defence, a **launch brake**
+  in the swallow tick watches the pred's altitude: a sustained ≥2.5 m/s climb (single hops and hill
+  walking decay back out) ends the session and puts the victim down at the pred — before
+  PlayAreaEnforcer ever sees the pair leave the world.
+
+### Fixed (wave 3)
+
+- **eat_player no longer takes the game down with it.** The act ran its whole flow — Photon
+  ownership transfer + RPC, grabber/Rigidbody release, the player input-lock and camera
+  takeover — raw on the agent's background thread; the first real invocation killed the
+  process mid-call (the turn log ends on the `eat_player` line). It now marshals the entire
+  gate + takeover through RunOnMainThread like every other body-mutating act (the in-body
+  verbs already did; eat_player was the last one left).
+
+- **Naming lets reasoning families think.** The name prompt told models not to think aloud,
+  which field runs showed is unwinnable for unmarked-CoT families ("Thinking Process:" walls
+  burned two whole budgets and shipped fallback names). The prompt now gives explicit
+  permission to reason and requires only the final `Name: <the name>` line — which the
+  validator and end-anchored salvage already mine — and the think-family base budget rises
+  320 → 512 so the first attempt can actually finish. Both surfaces updated in sync (built-in
+  + `system_prompt_name.txt`).
+
+### Added (wave 3)
+
+- **The mod can record its own fine-tuning data — images included.** `[DataRecord] Enabled` (off by default)
+  appends every LLM round-trip to `BepInEx/config/kkllmnpc_turns.jsonl`: the exact conversation the model saw
+  (system prompts deduped by reference hash) and the console tools vocabulary once per session, plus the response
+  with its `tool_calls`. First-person frames travel with the turns: each data-URI image is materialized once per
+  unique content (hash-deduped, so a frame repeated inside the rolling history is stored a single time) to
+  `BepInEx/config/kkllmnpc_turns_media/` and referenced from the record as `img_ref` — a multimodal fine-tune then
+  trains on the actual pixels the NPC looked at when it decided. Records carry the mode (console/act/name/vision),
+  the call's wall-time, the naming attempt, and a `salvage` marker when a reply needed recovery (markup/name-CoT
+  recovery, junk carving) — that counter doubles as a per-model quality metric for the `docs/MODELS.md` benchmark
+  plan. `MaxMb` (default 400) caps the JSONL and media combined. The training pipeline that consumes the files
+  (extract incl. multimodal assembly -> eval -> dual-track Qwen/Gemma4-QAT LoRA with a vision stage) is specced in
+  `training/README.md`.
+
+- **Game-tailored Jinja chat templates for llama.cpp-class serving.** `templates/chat/` ships two serve-side
+  fix-ups for models whose embedded templates choke on the mod's payloads: `chat-kk-chatml.jinja` (generic
+  ChatML/pipe-special families — parts-array vision turns collapsed to text + an `[image]` marker, replayed
+  tool_calls with dict/string/double-encoded arguments, `role:"tool"` flattened to user, a tools section only
+  when NativeTools sends one, and the `enable_thinking:false` empty-reasoning block that `Thinking=off` requests)
+  and `chat-mimo-7b.jinja` (MiMo-7B-RL, byte-faithful to its stock tokenizer_config template plus the
+  string-arguments tolerance — stock crashes on parts arrays with a TypeError and re-quotes string arguments).
+  Both are written to the llama.cpp minja subset and render-tested through game-shaped payloads (string/dict/
+  double-encoded arguments, parts arrays, tool role, tools present/absent, thinking on/off). Per-server install
+  (llama.cpp flags, LM Studio's Prompt Template panel) is documented in the templates' README and `docs/MODELS.md`.
+
 ### Added (wave 2)
 
 - **Digestion narrates the ROUTE, not just the stomach.** A swallowed person rides "deep in their

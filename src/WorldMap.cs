@@ -654,6 +654,7 @@ namespace KKLLMNPC
             }
 
             int gl = grid.LayerNear(gCi, goal.y);
+            bool nearMiss = false;
             if (gl < 0)
             {
                 // Near-miss ring: land at the nearest passable cell (the goal may sit
@@ -671,6 +672,7 @@ namespace KKLLMNPC
                     });
                 if (bestCi < 0) return null;
                 gCi = bestCi; gl = bestL;
+                nearMiss = true;
             }
 
             var a = new Astar(b.Cols, b.Rows, gCi, gl, grid);
@@ -685,6 +687,12 @@ namespace KKLLMNPC
                 for (int i = 1; i < nodes.Length; i++)
                     way.Add(grid.CellPos(nodes[i] / grid.MaxLayerCount(), nodes[i] % grid.MaxLayerCount()));
                 if (way.Count == 1) way.Add(goal);
+                else if (nearMiss)
+                    // The raw goal X/Z sits in something solid — end at the landing
+                    // CELL (a walkable spot) instead of pinning the final waypoint
+                    // back onto the raw X/Z, which drove the last leg through the
+                    // wall the resolver just walked around.
+                    way[way.Count - 1] = grid.CellPos(gCi, gl);
                 else way[way.Count - 1] = new Vector3(goal.x, grid.H(gCi, gl), goal.z);
                 return way.Count >= 2 ? way : null;
             }

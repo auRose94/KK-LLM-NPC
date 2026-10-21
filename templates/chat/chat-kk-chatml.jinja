@@ -1,0 +1,107 @@
+{#- KK-LLM-NPC game-tailored ChatML template (llama.cpp minja subset). Handles the game's exact payload shapes: plain-string turns, parts arrays collapsed to "[image]", assistant history with tool_calls (id ignored; arguments as JSON string or object), role "tool" flattened to user, tools section only when tools are sent. enable_thinking:false adds the empty reasoning block; absent keeps thinking-on behavior. For STOCK models only - fine-tuned bases must keep their own embedded template. Specials appear verbatim by design (&lt;|im_start|&gt; family). -#}
+{%- if tools %}
+    {{- '<|im_start|>system\n' }}
+    {%- if messages[0]['role'] == 'system' %}
+        {%- if messages[0].content is string %}
+            {{- messages[0].content }}
+        {%- elif messages[0].content is mapping or messages[0].content is sequence %}
+            {%- for part in messages[0].content %}
+                {%- if part is string %}
+                    {{- part }}
+                {%- elif part is mapping and part.type is defined and part.type == 'text' %}
+                    {{- part.text }}
+                {%- else %}
+                    {{- '[image]' }}
+                {%- endif %}
+            {%- endfor %}
+        {%- endif %}
+    {%- else %}
+        {{- 'You are a helpful assistant.' }}
+    {%- endif %}
+    {{- "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+    {%- for tool in tools %}
+        {{- "\n" }}
+        {{- tool | tojson }}
+    {%- endfor %}
+    {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n\nYou may write several such objects in one reply; each one is executed right away and its result comes back as a new message.\n<|im_end|>\n" }}
+{%- else %}
+    {%- if messages[0]['role'] == 'system' %}
+        {{- '<|im_start|>system\n' }}
+        {%- if messages[0].content is string %}
+            {{- messages[0].content }}
+        {%- elif messages[0].content is mapping or messages[0].content is sequence %}
+            {%- for part in messages[0].content %}
+                {%- if part is string %}
+                    {{- part }}
+                {%- elif part is mapping and part.type is defined and part.type == 'text' %}
+                    {{- part.text }}
+                {%- else %}
+                    {{- '[image]' }}
+                {%- endif %}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- else %}
+        {{- '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}
+    {%- endif %}
+{%- endif %}
+{%- for message in messages %}
+    {%- if (message.role == 'user') or (message.role == 'system' and not loop.first) or (message.role == 'tool') %}
+        {{- '<|im_start|>user\n' }}
+        {%- if message.content is string %}
+            {{- message.content }}
+        {%- elif message.content is mapping or message.content is sequence %}
+            {%- for part in message.content %}
+                {%- if part is string %}
+                    {{- part }}
+                {%- elif part is mapping and part.type is defined and part.type == 'text' %}
+                    {{- part.text }}
+                {%- else %}
+                    {{- '[image]' }}
+                {%- endif %}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- elif message.role == 'assistant' %}
+        {{- '<|im_start|>assistant' }}
+        {%- if message.content %}
+            {{- '\n' }}
+            {%- if message.content is string %}
+                {{- message.content }}
+            {%- elif message.content is mapping or message.content is sequence %}
+                {%- for part in message.content %}
+                    {%- if part is string %}
+                        {{- part }}
+                    {%- elif part is mapping and part.type is defined and part.type == 'text' %}
+                        {{- part.text }}
+                    {%- else %}
+                        {{- '[image]' }}
+                    {%- endif %}
+                {%- endfor %}
+            {%- endif %}
+        {%- endif %}
+        {%- if message.tool_calls is defined and message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {%- if tool_call.function is defined %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '\n<tool_call>\n{"name": "' }}
+                {{- tool_call.name }}
+                {{- '", "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+                {{- '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and not enable_thinking %}
+        {{- '<think>\n\n</think>\n\n' }}
+    {%- endif -%}
+{%- endif -%}

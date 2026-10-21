@@ -116,6 +116,45 @@ namespace KKLLMNPC
 
         private static string F2(float f) { return f.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture); }
 
+        // ------------------------------------------------------------------
+        // nav outcome events — the model learns ASYNCHRONOUS routing results it
+        // otherwise never sees: a walk starts in one turn ("walking…") and
+        // finishes/collides/aborts minutes later, outside any tool result.
+        // [event]-queued (the console drains deliver them) + history + log.
+        // Deduped: same-text events within 12s collapse, and no-route outcomes
+        // report once per goal.
+        // ------------------------------------------------------------------
+        private float _lastNavEventTime;
+        private Vector3 _lastNoRouteGoal;
+        private bool _noRouteReportedForGoal;
+        private float _lastFinalLegReplan = -99f;
+
+        private void NavOutcome(string line)
+        {
+            try
+            {
+                if (Time.unscaledTime - _lastNavEventTime < 12f) return;
+                _lastNavEventTime = Time.unscaledTime;
+                PushWorldEvent("[nav] " + line);
+                try { PushHistory("nav", line.Length > 60 ? line.Substring(0, 60) : line); } catch (Exception) { }
+                try { Logger.LogInfo("[" + MyName() + "] nav: " + line); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
+        private bool NoRouteNotYetReported(Vector3 goal)
+        {
+            try
+            {
+                Vector3 g = SetYFlat(goal);
+                bool fresh = !_noRouteReportedForGoal || Vector3.Distance(g, _lastNoRouteGoal) > 2f;
+                _lastNoRouteGoal = g;
+                _noRouteReportedForGoal = true;
+                return fresh;
+            }
+            catch (Exception) { return false; }
+        }
+
         // Third-strike unstick: re-plan the route around the fixed spot the body
         // keeps grinding. Falls back to the local grid when the world map has no
         // answer. Main thread (FixedUpdate) — planners here are physics-safe.
@@ -141,15 +180,33 @@ namespace KKLLMNPC
                     try { np = FindPath(_kobold.transform.position, new Vector3(goal.x, _kobold.transform.position.y, goal.z)); }
                     catch (Exception) { }
                 }
-                if (np == null || np.Count < 2) return;
+                if (np == null || np.Count < 2)
+                {
+                    // No alternative route: the body stands grinding this path —
+                    // say so ONCE per goal (closest-point-achieved): the model can
+                    // pick a different target instead of re-issuing the same go_to.
+                    if (_pathGoalSet)
+                    {
+                        float dist;
+                        lock (_stateLock) { dist = Vector3.Distance(_kobold.transform.position, _pathGoal); }
+                        if (NoRouteNotYetReported(_pathGoal))
+                            NavOutcome("the way to "
+                                + (_navTargetName != null ? _navTargetName : "your goal")
+                                + " is blocked for " + F2(dist) + "m and no other route was found — you may already be at your closest approach; try a different target or go around");
+                    }
+                    return;
+                }
                 lock (_stateLock)
                 {
                     _path = np;
                     _pathIdx = 0;
                     _navTarget = np[0];
                     _trailJumps = null;
+                    _noRouteReportedForGoal = false;  // fresh route — outcomes reportable again
                 }
                 Logger.LogInfo("movement: stuck-breaker re-planned the route (" + (np.Count - 1) + " legs)");
+                NavOutcome("the route kept hitting the same obstacle — replanned a different way ("
+                    + (np.Count - 1) + " legs)");
             }
             catch (Exception e) { try { Logger.LogWarning("repath: " + e.Message); } catch (Exception) { } }
         }
@@ -599,12 +656,45 @@ namespace KKLLMNPC
                     }
                     else
                     {
-                        _navTarget = null;
-                        _path = null;
-                        _pathIdx = 0;
-                        _pathGoalSet = false;
-                        StopMove();
-                        _blockedInfo = "arrived" + (_navTargetName != null ? " at " + _navTargetName : "");
+                        // FINAL-LEG LOS: distance says "arrived" even when a wall is
+                        // still between body and the real goal (the classic case: the
+                        // route ended at a landing cell just outside a building, and
+                        // the next `interact` fired through the wall). If the ORIGINAL
+                        // goal is not in clear sight from here, it isn't reached —
+                        // replan around instead of declaring arrival (throttled, so a
+                        // genuinely unreachable goal says so once instead of churning A*).
+                        Vector3 goalPt;
+                        bool goalSet;
+                        lock (_stateLock) { goalPt = _pathGoal; goalSet = _pathGoalSet; }
+                        bool finalLegClear = true;
+                        if (goalSet && _path != null && _pathIdx >= _path.Count - 1)
+                        {
+                            try
+                            {
+                                finalLegClear = WorldMap.SegmentClear(goalPt, _kobold.transform.position,
+                                    c => c != null && c.GetComponentInParent<Kobold>() != null, WorldMap.BodyHalfWidthM);
+                            }
+                            catch (Exception) { finalLegClear = true; }
+                        }
+                        if (!finalLegClear && Time.unscaledTime - _lastFinalLegReplan > 2.5f)
+                        {
+                            _lastFinalLegReplan = Time.unscaledTime;
+                            TryRepathPastStuck();
+                            if (_navTarget.HasValue) // replan found a way around — keep driving it
+                                NavOutcome("close to " + (_navTargetName ?? "the destination")
+                                    + " but something solid still separates us (a wall?) — steering around it");
+                        }
+                        if (finalLegClear)
+                        {
+                            _navTarget = null;
+                            _path = null;
+                            _pathIdx = 0;
+                            _pathGoalSet = false;
+                            StopMove();
+                            _blockedInfo = "arrived" + (_navTargetName != null ? " at " + _navTargetName : "");
+                            NavOutcome("arrival: you reached "
+                                + (_navTargetName != null ? _navTargetName : "your destination") + ".");
+                        }
                     }
                 }
                 if (_navTarget.HasValue)
@@ -646,10 +736,14 @@ namespace KKLLMNPC
                         float yaw = Mathf.Atan2(toAim.x, toAim.z) * Consts.Rad2Deg;
                         _yawDeg = MoveAngleTowards(_yawDeg, yaw, turnRate * dt);
                     }
-                    // Arrival braking: slow down as we approach.
+                    // Arrival braking: CAP the drive as we approach. This was
+                    // Mathf.Max — with an active go_to burst it could only RAISE the
+                    // throttle, never lower it, so bodies charged every waypoint at
+                    // full speed, overshot into walls, tripped the bump breaker and
+                    // read as a fly crashing around. Min() makes the brake real.
                     float speedScale = Mathf.Clamp01(dist / brakeDist);
-                    lock (_stateLock) { _moveTargetZ = Mathf.Max(_moveTargetZ, speedScale); }
-                    fwd = Mathf.Max(fwd, speedScale);
+                    lock (_stateLock) { _moveTargetZ = Mathf.Min(_moveTargetZ, speedScale); }
+                    fwd = Mathf.Min(fwd, speedScale);
                 }
             }
 

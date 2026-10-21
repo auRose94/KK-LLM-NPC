@@ -10,7 +10,10 @@ and reacts to the world continuously, as if a player was at the wheel.
 
 - **BepInEx 5.4x** in the game install.
 - **An OpenAI-compatible chat-completions server** — LM Studio, Ollama, llama.cpp,
-  KoboldCpp, vLLM — serving whatever LLM should play the NPC. Where it runs is your
+  KoboldCpp, vLLM — serving whatever LLM should play the NPC. This repo also ships
+  its own numpy+torch server built around the mod's request shapes, the fine-tuned
+  artifacts from `training/`, and long repeated console histories (prefix-KV
+  reuse): see [serve/README.md](serve/README.md). Where it runs is your
   call, three good options:
   - **A second GPU in the same machine** — the game and the server each get one.
   - **A second machine on your network** with a GPU — point `[LLM] Endpoint` at it
@@ -259,6 +262,51 @@ Or from source: `./build.sh` compiles against your game install and deploys
 builds the per-platform release zips + release notes into `dist/`.
 First launch writes `BepInEx/config/com.kk.llmnpc.cfg`.
 
+`build.sh` also ships the companion python (`serve/*.py` → `BepInEx/plugins/serve/`)
+and, when no serving model exists yet, downloads one (`serve/fetch_assets.py
+--ensure-model`; skip a single build with `KKLLM_SKIP_MODEL_FETCH=1`).
+
+## The AI server (kk-serve)
+
+This repo ships its own numpy+torch OpenAI-compatible model server — the serving
+companion ([serve/README.md](serve/README.md) for flags and internals). It exists
+because the fine-tuned artifacts from `training/` are bf16 + LoRA (GGUF servers
+re-quantize them), and because the mod's every tick re-sends the same long console
+history — kk-serve reuses prefix KV between those turns, the single biggest latency
+lever for the mod's workload. Error wording, `finish_reason`, and stream tool-call
+shape are matched to what the mod's parsers expect.
+
+**Three-command bring-up on a fresh machine:**
+
+```bash
+python3 serve/fetch_assets.py          # recommended model -> <game root>/kk-llm-models/
+python3 serve/fetch_assets.py --bepinex   # optional: BepInEx 5.4.x binaries into the game root
+./build.sh                             # dll + serve/ next to the game; enables [Serve] in the WebUI
+```
+
+After that, everything lives in the WebUI's **AI server** tab (http://127.0.0.1:8338):
+the companion is spawned at game launch and supervised (restart / start / stop, health
+watched); the **model picker** lists the discovery scan — `auto` re-picks the best fit
+each start (a fine-tuned artifact wins when it fits, then the largest Qwen3.5-family
+sibling within free VRAM; unfit models stay listed with their reason) — and **hot-swaps**
+the live server on Apply; the **processing device** dropdown lists every card (name +
+free VRAM) and restarts the companion under the vendor-matched python
+(`PythonCuda`/`PythonRocm`/`PythonCpu` — on a mixed CPU+iGPU + ROCm + CUDA box, one
+torch build per vendor); the **python interpreter** section detects + verifies
+installed interpreters (torch-aware) or takes an absolute venv path; **model fetch**
+scans the catalog and downloads models + BepInEx in-browser with a live progress log.
+
+Point `[LLM].Endpoint` at `http://127.0.0.1:8339/v1/chat/completions`, or flip
+`[Serve].AutoEndpoint` and the healthy companion takes the traffic without config edits.
+
+**Steam Proton**: two routes, both supported — mod-spawned (wine-host detection,
+absolute-path python resolution through the host shell, `detect pythons` walks `/bin/sh`)
+or the bulletproof launch-options route:
+`"/PATH/TO/KoboldKare/BepInEx/plugins/serve/proton-launch.sh" %command%` starts the
+server outside Proton with the native python; the mod adopts the answering server
+and restart/stop replace it cleanly (`/serve/shutdown`). Windows-native boxes walk
+`[Serve].PythonBin` → `python` → `py` and report every attempt.
+
 ## Config (per instance)
 
 ### `[LLM]` — the planner
@@ -492,4 +540,6 @@ MIT — see [LICENSE.txt](LICENSE.txt).
 - [VORE.md](docs/VORE.md) — The full swallow-vore / spectate mechanics (opt-in, all OFF by default)
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Architecture overview
 - [MODELS.md](docs/MODELS.md) — Ranked model compatibility list + benchmark plan
+- [MODELS.md](docs/MODELS.md) — Ranked model compatibility list + benchmark plan
+- [training/README.md](training/README.md) — Fine-tune a game-native model: record your own sessions (`[DataRecord]`), extract the dataset, eval + train (Qwen / Gemma4-QAT dual-track)
 - [CHANGELOG.md](CHANGELOG.md) — Release history

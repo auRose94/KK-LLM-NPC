@@ -97,6 +97,7 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgNameSelection;
         internal ConfigEntry<string> _cfgNamePromptFile;
         internal ConfigEntry<int> _cfgFactDecay;
+        internal ConfigEntry<float> _cfgFactMaxAge;
         internal ConfigEntry<int> _cfgFactCap;
         internal ConfigEntry<string> _cfgDefaultFacts;
         internal ConfigEntry<float> _cfgIdleInitiative;
@@ -108,6 +109,12 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgFarmScanRadius;
         internal ConfigEntry<bool> _cfgWateringAssist;
         internal ConfigEntry<int> _cfgFarmScanMax;
+        // ---- decision model (Wave 1 POC) ----
+        internal ConfigEntry<bool> _cfgDecisionEnabled;
+        internal ConfigEntry<string> _cfgDecisionModel;
+        internal ConfigEntry<string> _cfgDecisionEndpoint;
+        internal ConfigEntry<string> _cfgDecisionApiKey;
+        internal ConfigEntry<int> _cfgDecisionMinIntervalSec;
         // ---- console (bash-like REPL) mode ----
         internal ConfigEntry<bool> _cfgConsoleEnabled;
         internal ConfigEntry<int> _cfgConsoleMaxRounds;
@@ -229,6 +236,15 @@ namespace KKLLMNPC
         // Structural reply failure signal (empty/plain-text/unknown tool in legacy
         // mode); volatile so ResetMind's cross-thread null write is safe too.
         private volatile string _modelError;
+        // Wave 1 POC: the last decision-model (clef-flash) recognition result. Written by
+        // the decision pass, read by QueryLLM (injects guidance) and the act path (telemetry).
+        private volatile Guidance _lastDecision;
+        // Last time (in unscaled seconds) a decision pass actually fired — used to rate-limit
+        // the extra calls to roughly once every [Decision].MinIntervalSec.
+        private float _lastDecisionTime;
+        // The perception dict the loop built this turn — passed to the decision pass as the
+        // slice source. Only the legacy path builds one; console mode has no JSON perception.
+        private object _lastDecisionSource;
 
         // ---- endpoint circuit breaker (loop-level, outside SafeHttp's in-query
         // retries) ---- // consecutive failed chat queries; 0 = healthy. Written on
@@ -301,7 +317,7 @@ namespace KKLLMNPC
         // decay stale ones — the "forgetting" half of memory. Re-remembering a fact
         // (same category prefix) refreshes its age, so important facts the model keeps
         // asserting naturally outlive scratch notes.
-        private sealed class FactRec { public string Text; public int Tick; }
+        private sealed class FactRec { public string Text; public int Tick; public long Utc; }
         private readonly List<FactRec> _facts = new List<FactRec>();
         // Seed-fact sentinel tick: seeded facts are disposable boot knowledge —
         // a restored body swaps them out for its saved life, the restore-refusal
@@ -670,6 +686,7 @@ namespace KKLLMNPC
             _cfgNameSelection = plugin._cfgNameSelection;
             _cfgNamePromptFile = plugin._cfgNamePromptFile;
             _cfgFactDecay = plugin._cfgFactDecay;
+            _cfgFactMaxAge = plugin._cfgFactMaxAge;
             _cfgFactCap = plugin._cfgFactCap;
             _cfgDefaultFacts = plugin._cfgDefaultFacts;
             _cfgIdleInitiative = plugin._cfgIdleInitiative;
@@ -688,6 +705,11 @@ namespace KKLLMNPC
             _cfgConsoleNativeTools = plugin._cfgConsoleNativeTools;
             _cfgConsolePromptFile = plugin._cfgConsolePromptFile;
             _cfgConsoleAutoShot = plugin._cfgConsoleAutoShot;
+            _cfgDecisionEnabled = plugin._cfgDecisionEnabled;
+            _cfgDecisionModel = plugin._cfgDecisionModel;
+            _cfgDecisionEndpoint = plugin._cfgDecisionEndpoint;
+            _cfgDecisionApiKey = plugin._cfgDecisionApiKey;
+            _cfgDecisionMinIntervalSec = plugin._cfgDecisionMinIntervalSec;
         }
 
         // ------------------------------------------------------------------
@@ -926,17 +948,23 @@ namespace KKLLMNPC
             try { HandleChat(text, "player", true); } catch (Exception) { }
         }
 
-        internal void HandleChat(string msg, string senderName, bool isLocal)
+        internal void HandleChat(string msg, string senderName, bool isLocal, bool fromAgent = false)
         {
             // The game's chat can carry CRLF (Windows); trailing \r corrupts exact
             // compares (stay/leave detection) and pollutes the transcript feed.
             msg = (msg ?? "").Replace("\r", "").Trim();
-            string heard = (isLocal ? "player" : (senderName ?? "someone")) + ": " + msg;
+            // Agent speech names ITSELF so the recipient knows a sibling agent is
+            // talking to THEM and can answer by name ("X (another AI kobold) said
+            // TO YOU: ..."); player lines stay "player: ..." — the persona teaches
+            // both shapes, since agents used to read every [chat] as the player.
+            string heard = fromAgent
+                ? (senderName ?? "another kobold") + " (another AI kobold) said TO YOU: " + msg
+                : (isLocal ? "player" : (senderName ?? "someone")) + ": " + msg;
             _playerChat = heard;
             _playerChatTime = Time.unscaledTime;
             WakeFromSleep(); // being addressed ends `sleep <secs>` early
             Logger.LogInfo("heard chat: " + heard);
-            RecordChatEntry(isLocal ? "player" : (senderName ?? "someone"), msg);
+            RecordChatEntry(fromAgent ? "kobold:" + (senderName ?? "someone") : (isLocal ? "player" : (senderName ?? "someone")), msg);
 
             // The player's current objective is ONLY ever in their chat (the game has
             // no quest/task system — verified in the game source) and the raw line
@@ -1156,6 +1184,21 @@ namespace KKLLMNPC
             return string.IsNullOrWhiteSpace(e.Value) ? (string)e.DefaultValue : e.Value;
         }
 
+        // One resolution point for every LLM POST: when the kk-serve companion
+        // is managed ([Serve] AutoEndpoint on) and confirmed healthy, traffic
+        // flows to it without rewriting [LLM].Endpoint under the user. Off or
+        // unhealthy → the configured endpoint, exactly as before.
+        private string Endpoint()
+        {
+            // Hand-off servers win over the configured endpoint when opted-in.
+            // Ollama is checked first (newer host), then kk-serve; either way an
+            // unadopted host returns null and we fall through to the configured
+            // endpoint exactly as before.
+            string s = Ollama.EndpointOverride();
+            if (s == null) s = KKServe.EndpointOverride();
+            return s ?? Val(_cfgEndpoint);
+        }
+
         private string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
         private static bool IsAlive(UnityEngine.Object o) => o != null;
@@ -1328,11 +1371,37 @@ namespace KKLLMNPC
             }
         }
 
+        // Cross-session wall-clock age ([Memory] FactMaxAgeHours, 0 = off): facts
+        // not re-remembered within this many REAL hours drop no matter how the
+        // per-session tick stamps line up — this is the pass that makes really old
+        // carried items disappear. Identity notes (me:/name:/the latest
+        // player_wants) are exempt; unknown-age facts (0) are kept. Shared by the
+        // prompt render and the save path, so disk snapshots never preserve dead items.
+        private void PruneStaleFacts()
+        {
+            float maxAgeHours = _cfgFactMaxAge != null ? _cfgFactMaxAge.Value : 0f;
+            if (maxAgeHours <= 0) return;
+            long maxAgeSec = (long)(maxAgeHours * 3600.0);
+            long nowUtc = MemoryStore.UtcNow();
+            lock (_facts)
+            {
+                for (int i = _facts.Count - 1; i >= 0; i--)
+                {
+                    FactRec f = _facts[i];
+                    if (f.Utc <= 0) continue;
+                    string prefix = f.Text != null ? f.Text.Split(':')[0].ToLowerInvariant() : "";
+                    if (prefix == "me" || prefix == "name" || prefix == "player_wants") continue;
+                    if (nowUtc - f.Utc > maxAgeSec) _facts.RemoveAt(i);
+                }
+            }
+        }
+
         private string FactsJson()
         {
             // Decay window in ticks (0 = off). Stale facts that the model hasn't
             // re-asserted fall out of context, so finished business stops lingering.
             int decay = _cfgFactDecay != null ? _cfgFactDecay.Value : 0;
+            PruneStaleFacts();
             lock (_facts)
             {
                 // Age out stale facts first (forgetting), then cap by recency.
@@ -1348,9 +1417,22 @@ namespace KKLLMNPC
                 if (_ctxMgr != null && _ctxMgr.CompactionLevel >= 3)
                 {
                     var mergedTexts = ContextCompaction.MergeFacts(_facts.ConvertAll(f => f.Text));
+                    // MergeFacts collapses by prefix — carry the NEWEST member's age so
+                    // a merge can't resurrect an ancient line as fresh forever.
+                    var newestUtc = new Dictionary<string, long>();
+                    foreach (var f in _facts)
+                    {
+                        string p = f.Text != null ? f.Text.Split(':')[0] : "";
+                        long u; bool have = newestUtc.TryGetValue(p, out u);
+                        if (!have || f.Utc > u) newestUtc[p] = f.Utc;
+                    }
                     source = new List<FactRec>();
                     for (int i = 0; i < mergedTexts.Count; i++)
-                        source.Add(new FactRec { Text = mergedTexts[i], Tick = _tick });
+                    {
+                        string p = mergedTexts[i] != null ? mergedTexts[i].Split(':')[0] : "";
+                        long u; newestUtc.TryGetValue(p, out u);
+                        source.Add(new FactRec { Text = mergedTexts[i], Tick = _tick, Utc = u });
+                    }
                 }
                 // Most recent first, take `cap`.
                 var ordered = new List<FactRec>(source);
@@ -1387,12 +1469,14 @@ namespace KKLLMNPC
             lock (_facts)
             {
                 // Deduplicate: replace if same prefix (category) already known, and
-                // refresh its age so an actively-used fact doesn't decay out.
+                // refresh its age (both the per-session tick and the wall clock) so
+                // an actively-used fact doesn't decay out.
                 string prefix = f.Split(':')[0];
+                long utc = MemoryStore.UtcNow();
                 for (int i = 0; i < _facts.Count; i++)
                     if (_facts[i].Text.Split(':')[0] == prefix)
-                    { _facts[i].Text = f; _facts[i].Tick = _tick; return; }
-                _facts.Add(new FactRec { Text = f, Tick = _tick });
+                    { _facts[i].Text = f; _facts[i].Tick = _tick; _facts[i].Utc = utc; return; }
+                _facts.Add(new FactRec { Text = f, Tick = _tick, Utc = utc });
                 // Hard cap — evict the OLDEST (by age) so recents survive.
                 while (_facts.Count > FactCap)
                 {
@@ -1402,6 +1486,35 @@ namespace KKLLMNPC
                     _facts.RemoveAt(oldest);
                 }
             }
+        }
+
+        // The game objective '<questTitle>' completed (QuestSense → FanoutQuestFinished).
+        // Agents used to keep grinding a finished quest forever: they only ever saw
+        // new letters, never closures, so quest facts and quest-goals lingered. This
+        // is the per-instance closure: shed quest-scoped facts, retire a matching goal.
+        internal void OnQuestFinished(string questTitle)
+        {
+            if (string.IsNullOrEmpty(questTitle)) return;
+            try
+            {
+                var qWords = SignificantWords("quest objective mail done " + questTitle);
+                lock (_facts)
+                {
+                    for (int i = _facts.Count - 1; i >= 0; i--)
+                    {
+                        string f = _facts[i].Text;
+                        if (string.IsNullOrEmpty(f)) continue;
+                        string prefix = f.Split(':')[0].ToLowerInvariant();
+                        bool questScoped = prefix == "quest" || prefix == "objective" || prefix == "mail";
+                        // ≥2 shared significant words (counting 'quest' itself) means the
+                        // note is about this quest even under an odd category prefix.
+                        if (!questScoped && SharedWordCount("quest " + f, qWords) < 2) continue;
+                        _facts.RemoveAt(i);
+                    }
+                }
+            }
+            catch (Exception) { }
+            try { QuestGoalAutoClear(questTitle); } catch (Exception) { }
         }
 
         // ------------------------------------------------------------------

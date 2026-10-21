@@ -88,6 +88,17 @@ if [ "$COMPILER" = "mcs" ]; then
       mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
       cp -f prompt_extras/*.txt "$KDIR/BepInEx/plugins/prompt_extras/"
     fi
+    # Ship the KK-Serve companion (python) next to the DLL — same pattern as
+    # the prompt files: the game install becomes self-contained, the launcher
+    # finds PluginDir/serve/kk_serve.py with no [Serve].ServeDir at all.
+    # The python server lives on the kk-serve branch — skip cleanly when it
+    # is not checked out (master builds fine; launcher adopts external APIs).
+    if [ -d serve ]; then
+      mkdir -p "$KDIR/BepInEx/plugins/serve"
+      cp -f serve/*.py serve/requirements.txt "$KDIR/BepInEx/plugins/serve/"
+      cp -f serve/proton-launch.sh "$KDIR/BepInEx/plugins/serve/"
+      chmod +x "$KDIR/BepInEx/plugins/serve/proton-launch.sh"
+    fi
     printf 'Built with mcs and deployed %s\n' "$KDIR/BepInEx/plugins/KKLLMNPC.dll"
 elif [ "$COMPILER" = "dotnet" ]; then
     # .NET SDK path — requires a .csproj (create one if missing)
@@ -148,4 +159,22 @@ PROJ
 else
     echo "ERROR: Unknown compiler '$COMPILER'" >&2
     exit 1
+fi
+
+# ---- companion model: make sure the install is serving-ready ----------------
+# Downloads a compatible model (the fine-tune's base, or the largest
+# serving-family sibling that fits the VRAM) into <game root>/kk-llm-models —
+# next to the game, so deleting the game removes it too. kk-serve's `auto`
+# scans this folder. Skip a build-time fetch with KKLLM_SKIP_MODEL_FETCH=1
+# (e.g. while the pass-1 training run owns the GPU's disk budget) and run
+# python3 serve/fetch_assets.py manually later.
+# fetch_assets.py rides the kk-serve branch — with it absent this is a no-op.
+if [ ! -f serve/fetch_assets.py ]; then
+  :
+elif [ "${KKLLM_SKIP_MODEL_FETCH:-0}" = "1" ]; then
+  echo "(model fetch skipped: KKLLM_SKIP_MODEL_FETCH=1)"
+elif command -v python3 >/dev/null 2>&1; then
+  python3 serve/fetch_assets.py --ensure-model || echo "(model fetch failed — run: python3 serve/fetch_assets.py)" >&2
+else
+  echo "(model fetch skipped: no python3 — run serve/fetch_assets.py to get a serving model)" >&2
 fi

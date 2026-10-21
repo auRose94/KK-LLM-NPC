@@ -590,7 +590,29 @@ namespace KKLLMNPC
         // SwallowAgentEat; adjacency checked against SwallowAgentEatRange. The
         // spectate takeover starts inside Begin() and lasts until the egg's
         // hatch or the swallow-abort chat command.
+        //
+        // CRASH FIX: everything below is MAIN-THREAD work — Photon ownership
+        // + RPCs, grabber/Rigidbody surgery, the player input-lock and body
+        // parking. The tool used to run it all raw on the agent thread (the
+        // in-body verbs kick/cum/surrender marshal; eat_player was the last
+        // act left) and the first real invocation killed the process — Photon
+        // + Unity component APIs are main-thread-only (the wave-41 lesson).
+        // The whole flow now marshals like every other mutating act.
         internal object ToolEatPlayer(JsonObj p)
+        {
+            try
+            {
+                return RunOnMainThread(() => (object)EatPlayerOnMain(), 10000)
+                    ?? (object)new { ok = false, reason = "main_thread_busy", note = "the main thread did not answer in 10s — try again next turn" };
+            }
+            catch (Exception e)
+            {
+                return new { ok = false, reason = "main_thread_failed", note = Shorten(e.Message, 160) };
+            }
+        }
+
+        // The eat_player gates + takeover, guaranteed to run on the main thread.
+        private object EatPlayerOnMain()
         {
             var plugin = SwallowManager.Plugin;
             if (plugin == null) return new { ok = false, reason = "no_plugin" };
@@ -622,7 +644,7 @@ namespace KKLLMNPC
             {
                 ok = true,
                 note = "you swallowed the player WHOLE — they are inside you now, watching everything through your body's eyes and unable to act. "
-                     + SwallowManager.PlayerOutcomeNote(),
+                     + SwallowManager.PlayerOutcomeNote(_kobold),
             };
         }
     }

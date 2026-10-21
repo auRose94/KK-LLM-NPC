@@ -163,6 +163,26 @@ namespace KKLLMNPC
             return null;
         }
 
+        // Training-data recorder file ([DataRecord].Enabled) — same idiom/fallback
+        // as ReportFilePath; null when no path could be derived (recording stays off).
+        internal static string TurnLogFilePath()
+        {
+            try
+            {
+                string data = Application.dataPath;
+                if (!string.IsNullOrEmpty(data))
+                    return System.IO.Path.Combine(System.IO.Path.GetDirectoryName(data), "BepInEx", "config", "kkllmnpc_turns.jsonl");
+            }
+            catch (Exception) { }
+            try
+            {
+                string asm = System.IO.Path.GetDirectoryName(typeof(NPCInstance).Assembly.Location);
+                if (!string.IsNullOrEmpty(asm)) return System.IO.Path.Combine(asm, "kkllmnpc_turns.jsonl");
+            }
+            catch (Exception) { }
+            return null;
+        }
+
         // Write one report block. Returns false when the debug option is off (or the
         // write failed); the message still reaches the BepInEx log above.
         internal bool LogAIReport(string msg)
@@ -517,8 +537,10 @@ namespace KKLLMNPC
                     return new { ok = false, reason = "out_of_energy", name = _navTargetName, id = hasId ? p.S("id") : (object)null, dist = F(fullDist), eggs = F(vol), note = "you carry " + F(vol) + "ml egg — that IS enough — but your ENERGY is " + F(lay) + " and a nest lays only above 1: eat food (or bed-rest) first, then return. Nothing else raises energy — stimulation and sitting in stations don't, ever" };
             }
             float stopAt = Mathf.Max(0f, fullDist - at);
-            float yaw = Mathf.Atan2(to.x, to.z) * Consts.Rad2Deg;
-            lock (_stateLock) { _yawDeg = yaw; }
+            // No instant yaw snap here: it wrote the facing directly, and a model
+            // re-issuing go_to every think tick whipped the whole ragdoll 90-180°
+            // per tick ("movement like a fly bumping into things"). Waypoint
+            // pursuit turns the body toward the route smoothly on its own.
             if (fullDist > at + 0.1f)
             {
                 var arrive = _kobold.transform.position + to.normalized * stopAt;
@@ -546,7 +568,7 @@ namespace KKLLMNPC
                             _pathLastPlanTime = Time.unscaledTime;
                         }
                         SetMove(1f, 0f, false, 0f, Mathf.Clamp(stopAt / 2f, 0.3f, 12f), p.B("run", false));
-                        return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "continuing path; re-issue go_to to replan" };
+                        return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "continuing the current route — it course-corrects on its own as it walks; no need to re-issue go_to" };
                     }
                     // 1) Shared full-scene map: routes the WHOLE scene (stairs, ramps,
                     //    stacked floors, any distance in bounds) — the fix for stations
@@ -609,15 +631,19 @@ namespace KKLLMNPC
                     string dnote = _pathDoorBlocked ? " (a CLOSED door is on the way — the body will open it when it gets there, or use interact on it)" : "";
                     string kind = trailRoute ? "player-trail route (their walked path — flagged posts are hopped)"
                                              : "a* path (" + (path.Count - 2) + " posts)";
-                    return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = kind + dnote + "; re-issue go_to to replan" };
+                    return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = kind + dnote + "; go_to keeps walking and course-corrects on its own — only re-issue it for a NEW destination" };
                 }
                 // Fallback: direct steering toward the arrive point (previous behavior).
                 lock (_stateLock) { _path = null; _pathIdx = 0; _pathGoalSet = false; _trailJumps = null; }
                 _navTarget = new Vector3(arrive.x, 0, arrive.z);
                 SetMove(1f, 0f, false, 0f, Mathf.Clamp(stopAt / 2f, 0.3f, 12f), p.B("run", false));
+                if (mapCovers && NoRouteNotYetReported(arrive))
+                    NavOutcome("no path to "
+                        + (_navTargetName != null ? _navTargetName : "that place")
+                        + " exists in the maps — steering by hand from here");
             }
             else { _navTarget = null; _path = null; _pathIdx = 0; _pathGoalSet = false; StopMove(); _blockedInfo = "already at " + name; }
-            return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "walking with obstacle steering; re-issue go_to to update heading" };
+            return new { ok = true, to = _navTargetName ?? "position", id = hasId ? p.S("id") : (object)null, dist = F(fullDist), at = F(at), note = "walking with obstacle steering; go_to course-corrects on its own — only re-issue it for a NEW destination" };
         }
 
         // Resolve a human-ish name ("bed", "toilet", "player", "door") to a world
@@ -1037,6 +1063,21 @@ namespace KKLLMNPC
                 }
                 if (!target.CanUse(_kobold))
                 {
+                    // MAILBOX FIRST: CanUse=false on a mailbox means the box is EMPTY
+                    // (no mail inside) — it is never busy or occupied. The generic
+                    // "maybe busy" hint had agents camping an empty mailbox forever.
+                    if (target is MailboxUsable)
+                    {
+                        string mailnote;
+                        try
+                        {
+                            mailnote = ObjectiveManager.HasMail() && ObjectiveManager.GetCurrentObjective() == null
+                                ? "the box is ready — mail IS waiting; if this keeps failing, step closer and try again"
+                                : "the mailbox is EMPTY — no mail inside right now. That's what CanUse=false means here; it is never busy. Nothing to fetch: when the next letter arrives the space-beam above it glows and 'quest' shows mail waiting — come back then.";
+                        }
+                        catch (Exception) { mailnote = "the mailbox has no mail to collect right now — that is what CanUse=false means here; it is never busy"; }
+                        return new { ok = false, reason = "mail_empty", name = CleanName(target.name), dist = F(dist), note = mailnote };
+                    }
                     // cannot_use now explains WHY — the model used to read the station's
                     // own ":busy" (its own body inside) as "the station is full" and
                     // leave, or get silently refused on empty energy.
@@ -1068,6 +1109,39 @@ namespace KKLLMNPC
                     catch (Exception) { hint = "maybe busy/occupied or wrong state"; }
                     return new { ok = false, reason = reason, name = CleanName(target.name), hint = hint, dist = F(dist) };
                 }
+                // REACHED-AND-SEEN gate: interact only when actually near enough AND
+                // with a clear line from the body. Pathfinding used to declare arrival
+                // adjacent THROUGH a wall and the game's mount animation then dragged
+                // the body through the building — the "noclip lerp".
+                if (dist > InteractRange + 1.2f)
+                    return new { ok = false, reason = "too_far", name = CleanName(target.name), dist = F(dist),
+                        note = "that target is " + F(dist) + "m away — far past interaction reach: go_to (cd " + CleanName(target.name) + " or cd id:N from 'nearby') to approach it, then use again" };
+                bool clear_;
+                try
+                {
+                    // Bodies never block (the ray's own parent chain includes ours);
+                    // the target's own machine colliders are rejected so "can I see it"
+                    // isn't answered by "yes, I'm touching it".
+                    Transform atf = target.transform;
+                    clear_ = WorldMap.SegmentClear(target.transform.position, _kobold.transform.position,
+                        c =>
+                        {
+                            if (c == null) return true;
+                            try
+                            {
+                                if (c.GetComponentInParent<Kobold>() != null) return true;
+                                Transform t = c.transform;
+                                for (int i = 0; t != null && i < 3; i++)
+                                { if (t == atf) return true; t = t.parent; }
+                            }
+                            catch (Exception) { return true; }
+                            return false;
+                        }, WorldMap.BodyHalfWidthM);
+                }
+                catch (Exception) { clear_ = true; } // LOS utility unavailable — never block use on it
+                if (!clear_)
+                    return new { ok = false, reason = "wall_between", name = CleanName(target.name), dist = F(dist),
+                        note = "something SOLID sits between you and it (a wall or closed door?) — you can't use it from here; walk around to its side first: cd to it and follow the route, or step until you can see it in your view. Never use things through walls" };
                 try { target.LocalUse(_kobold); }
                 catch (Exception e) { Logger.LogWarning("use: " + e.Message); return new { ok = false, reason = "use_failed", name = CleanName(target.name) }; }
                 // The machine/station is what we just climbed onto — this is the
@@ -1125,6 +1199,30 @@ namespace KKLLMNPC
                         try { if (!u2.CanUse(_kobold)) continue; } catch (Exception) { continue; }
                         Vector3 d = u2.transform.position - pos;
                         float m = d.magnitude;
+                        // Touch-bubble LOS: a usable on the far side of a thin wall is
+                        // inside the 2.6m bubble but NOT usable — selecting it used to
+                        // let the mount animation drag the body through the wall.
+                        Transform atf2 = u2.transform;
+                        bool seesIt;
+                        try
+                        {
+                            seesIt = WorldMap.SegmentClear(u2.transform.position, pos,
+                                cc =>
+                                {
+                                    if (cc == null) return true;
+                                    try
+                                    {
+                                        if (cc.GetComponentInParent<Kobold>() != null) return true;
+                                        Transform t = cc.transform;
+                                        for (int i = 0; t != null && i < 3; i++)
+                                        { if (t == atf2) return true; t = t.parent; }
+                                    }
+                                    catch (Exception) { return true; }
+                                    return false;
+                                }, WorldMap.BodyHalfWidthM);
+                        }
+                        catch (Exception) { seesIt = true; }
+                        if (!seesIt) continue;
                         float facing = Vector3.Dot(d.normalized, fwd);
                         float score = m * (facing > -0.2f ? 1f : 2.5f);
                         if (score < bestScore) { bestScore = score; dist = m; best = u2; }

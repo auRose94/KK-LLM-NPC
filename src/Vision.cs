@@ -196,7 +196,7 @@ namespace KKLLMNPC
             try
             {
                 string model = !string.IsNullOrWhiteSpace(_cfgVisModel.Value) ? _cfgVisModel.Value.Trim() : Val(_cfgModel);
-                string endpoint = !string.IsNullOrWhiteSpace(_cfgVisEndpoint.Value) ? _cfgVisEndpoint.Value.Trim() : Val(_cfgEndpoint);
+                string endpoint = !string.IsNullOrWhiteSpace(_cfgVisEndpoint.Value) ? _cfgVisEndpoint.Value.Trim() : Endpoint();
                 string apiKey = !string.IsNullOrWhiteSpace(_cfgVisApiKey.Value) ? _cfgVisApiKey.Value : Val(_cfgApiKey);
 
                 // Give the vision model its own prior caption as context so it can
@@ -237,9 +237,11 @@ namespace KKLLMNPC
                 // stays inside the 120s envelope the single-attempt version had. The
                 // vision worker is gated by _visionBusy, so a 4-minute stall here
                 // would leave steering permanently stale.
+                var visSw = System.Diagnostics.Stopwatch.StartNew();
                 string json = SafeHttp.Post(endpoint, body, apiKey,
                     retries: 2, timeout: TimeSpan.FromSeconds(60), maxResponseBytes: 1024 * 1024,
                     onError: e => Logger.LogWarning("Vision endpoint: " + e));
+                try { RecordVisionTurn(payload, json, visSw.ElapsedMilliseconds); } catch (Exception) { }
                 if (json == null) return null;
                 {
                     var root = Json.Parse(json) as Dictionary<string, object>;
@@ -251,6 +253,36 @@ namespace KKLLMNPC
                 }
             }
             catch (Exception e) { Logger.LogWarning("vision endpoint: " + e.Message); return null; }
+        }
+
+        // Vision round-trips post directly (not through PostChatPayload), so they
+        // record themselves — same file contract as RecordTurn. RecordableMessages
+        // strips the image parts to {"omit":"binary"}; the raw frames live in the
+        // separate [Vision] DebugDumpFrames folder if a training pass needs them.
+        private void RecordVisionTurn(Dictionary<string, object> payload, string rawResponse, long ms)
+        {
+            if (!DataRecord.Enabled) return;
+            object modelBoxed;
+            var rec = new Dictionary<string, object>
+            {
+                ["mode"] = "vision",
+                ["npc"] = MyName(),
+                ["ms"] = ms,
+                ["ok"] = rawResponse != null ? 1 : 0,
+            };
+            rec["model"] = payload.TryGetValue("model", out modelBoxed) && modelBoxed != null ? modelBoxed.ToString() : "";
+            object msgsBoxed;
+            payload.TryGetValue("messages", out msgsBoxed);
+            rec["msgs"] = DataRecord.RecordableMessages(msgsBoxed);
+            if (rawResponse != null)
+            {
+                string content = ExtractRespContent(rawResponse);
+                var resp = new Dictionary<string, object>();
+                if (content != null) resp["content"] = content;
+                else resp["raw"] = rawResponse.Length > 4096 ? rawResponse.Substring(0, 4096) : rawResponse;
+                rec["resp"] = resp;
+            }
+            DataRecord.Turn(rec);
         }
     }
 }

@@ -137,15 +137,97 @@ internal static class TestDecisionParse
         Assert(Parse(raw) == null, "unparseable confidence rejected");
     }
 
-    // A stringified-but-valid float still works.
-    private static void TestStringFloat()
-    {
-        string raw = "{\"task\":\"visit-station\",\"blocker\":\"locked_or_unreachable\",\"next_tool\":\"walk\",\"confidence\":\"0.314\",\"rationale\":\"\"}";
-        var d = Parse(raw);
-        Assert(d != null && d.Blocked == "locked_or_unreachable", "stringified confidence + blocker recovered");
-    }
+        // A stringified-but-valid float still works.
+        private static void TestStringFloat()
+        {
+            string raw = "{\"task\":\"visit-station\",\"blocker\":\"locked_or_unreachable\",\"next_tool\":\"walk\",\"confidence\":\"0.314\",\"rationale\":\"\"}";
+            var d = Parse(raw);
+            Assert(d != null && d.Blocked == "locked_or_unreachable", "stringified confidence + blocker recovered");
+        }
 
-    internal static int Run()
+        // --- /v1/systemone noul-answer recognition ---
+
+        // The task question set used by the mod (questionKey -> task id).
+        private static readonly (string, string)[] TASKS =
+        {
+            ("task_follow", "follow-player"), ("task_talk", "talk-to-player"),
+            ("task_station", "visit-station"), ("task_nest", "nest-eggs"),
+            ("task_gather", "gather"), ("task_idle", "idle"),
+        };
+        private static readonly (string, string)[] BLOCKERS =
+        {
+            ("block_moved", "locked_or_unreachable"), ("block_busy", "busy"),
+            ("block_locked", "locked_or_unreachable"), ("block_needs_buy", "needs_buy"),
+        };
+
+        private static Dictionary<string, object> Answers(params (string, double)[] qs)
+        {
+            var a = new Dictionary<string, object>();
+            foreach (var kv in qs)
+                a[kv.Item1] = new Dictionary<string, object> { ["noul"] = kv.Item2 };
+            return a;
+        }
+
+        // The recognised task is the argmax of the task-question scores.
+        private static void TestArgmaxTask()
+        {
+            var a = Answers(("task_follow", 0.3), ("task_gather", 0.62), ("task_idle", 0.2));
+            var g = DecisionParse.SystemoneAnswers(a, TASKS, BLOCKERS);
+            Assert(g != null && g.Task == "gather", "noul: argmax task selected");
+            Assert(g != null && System.Math.Abs(g.Confidence - 0.62f) < 0.001f, "noul: confidence = argmax");
+        }
+
+        // Below the task bar the recognizer didn't recognise a task → null (keep prior guidance).
+        private static void TestBelowTaskBar()
+        {
+            var a = Answers(("task_follow", 0.2), ("task_gather", 0.18), ("task_idle", 0.3));
+            Assert(DecisionParse.SystemoneAnswers(a, TASKS, BLOCKERS) == null, "noul: below bar -> no task");
+        }
+
+        // All questions scoring near zero is a "I don't know" → null.
+        private static void TestAllZero()
+        {
+            var a = Answers(("task_follow", 0.0), ("task_gather", 0.0));
+            Assert(DecisionParse.SystemoneAnswers(a, TASKS, BLOCKERS) == null, "noul: all-zero -> no task");
+        }
+
+        // The blocker is the highest blocker question; the label is recorded, not "blocked".
+        private static void TestBlockerLabel()
+        {
+            var a = Answers(("task_gather", 0.7), ("block_busy", 0.71), ("block_moved", 0.2));
+            var g = DecisionParse.SystemoneAnswers(a, TASKS, BLOCKERS);
+            Assert(g != null && g.Blocked == "busy", "noul: blocked label is busy");
+            Assert(g != null && g.Rationale.Length > 0, "noul: rationale mentions blocker");
+        }
+
+        // Nothing crossing the blocker bar → blocker is "none", but the task still counts.
+        private static void TestNoBlocker()
+        {
+            var a = Answers(("task_gather", 0.7), ("block_busy", 0.3), ("block_moved", 0.2));
+            var g = DecisionParse.SystemoneAnswers(a, TASKS, BLOCKERS);
+            Assert(g != null && g.Blocked == "none", "noul: no blocker -> none");
+        }
+
+        // A noul value sent as a string is still parsed.
+        private static void TestNoulStringValue()
+        {
+            var a = new Dictionary<string, object>
+            {
+                ["task_gather"] = new Dictionary<string, object> { ["noul"] = "0.77" },
+            };
+            var g = DecisionParse.SystemoneAnswers(a, TASKS, BLOCKERS);
+            Assert(g != null && System.Math.Abs(g.Confidence - 0.77f) < 0.001f, "noul: stringified score parsed");
+        }
+
+        // Null answers / absent keys never throw.
+        private static void TestNoulRobust()
+        {
+            Assert(DecisionParse.SystemoneAnswers((Dictionary<string, object>)null, TASKS, BLOCKERS) == null, "noul: null answers -> null");
+            var a = new Dictionary<string, object>();
+            Assert(DecisionParse.SystemoneAnswers(a, TASKS, BLOCKERS) == null, "noul: empty answers -> null");
+        }
+
+        internal static int Run()
     {
         TestClean();
         TestFenced();
@@ -160,6 +242,13 @@ internal static class TestDecisionParse
         TestGarbage();
         TestUnparseableConfidence();
         TestStringFloat();
+        TestArgmaxTask();
+        TestBelowTaskBar();
+        TestAllZero();
+        TestBlockerLabel();
+        TestNoBlocker();
+        TestNoulStringValue();
+        TestNoulRobust();
         if (_failed > 0)
         {
             System.Console.WriteLine("decisionparse: " + _failed + " assertion(s) failed");

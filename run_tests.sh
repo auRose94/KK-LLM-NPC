@@ -95,6 +95,8 @@ run_headless_suites() {
   run_suite safehttp    tests/test_safehttp.cs -- src/SafeHttp.cs
   run_suite modelfamilies tests/test_modelfamilies.cs -- src/ModelFamilies.cs
   run_suite memory_compaction tests/test_memory_compaction.cs -- src/MemoryCompaction.cs src/TextUtil.cs
+  run_suite truncatedargs tests/test_truncated_args.cs -- src/TruncatedArgs.cs src/Json.cs
+  run_suite ollama tests/test_ollama.cs -- src/OllamaArgs.cs src/Json.cs
   run_suite serve      tests/test_serve.cs -- src/ServeArgs.cs
 }
 

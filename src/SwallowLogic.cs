@@ -26,6 +26,20 @@ namespace KKLLMNPC
         Dick = 5,    // urethral entry — the eater's own groin (cock vore)
     }
 
+    // What a consumed kobold becomes at the end of the digestion (config
+    // [LittleTreats] SwallowEffect, cycled by the player's F8, overridable
+    // per-agent by `vore_mode`). The swallow/digest experience is identical for
+    // every mode; only the completion differs. In the PURE file — the fate
+    // parser/labels are unit-tested.
+    public enum SwallowEffect
+    {
+        Egg = 0,     // an egg pops out at the player's feet (replantable → rebirth)
+        BellyEgg = 1, // 'Egg' reagent + the victim's genes ride in the player's belly;
+                     // sit on a nest to lay (vanilla oviposition flow) — the person is in THAT egg
+        Grow = 2,    // no egg — the player absorbs them: bigger, stronger and/or curvier
+        Destroy = 3, // no egg — they are simply gone
+    }
+
     internal static class SwallowLogic
     {
         // Camera-forward.y above this counts as "looking up" for the swallow trigger.
@@ -273,6 +287,110 @@ namespace KKLLMNPC
         public static string InsideNoun(SwallowDestination d)
         {
             return d == SwallowDestination.Mouth ? "stomach" : "body";
+        }
+
+        // ------------------------------------------------------------------
+        // FATE mode (enum SwallowEffect) — the F8/WebUI cycle + labels, and the
+        // per-agent word parsers for `vore_target` / `vore_mode`. Pure.
+        // ------------------------------------------------------------------
+        // Cycle: egg -> bellyegg -> grow -> destroy -> egg.
+        public static SwallowEffect NextEffect(SwallowEffect m)
+        {
+            switch (m)
+            {
+                case SwallowEffect.Egg: return SwallowEffect.BellyEgg;
+                case SwallowEffect.BellyEgg: return SwallowEffect.Grow;
+                case SwallowEffect.Grow: return SwallowEffect.Destroy;
+                default: return SwallowEffect.Egg;
+            }
+        }
+
+        public static string EffectLabel(SwallowEffect m)
+        {
+            switch (m)
+            {
+                case SwallowEffect.BellyEgg: return "BELLY-EGG";
+                case SwallowEffect.Grow: return "GROW";
+                case SwallowEffect.Destroy: return "DESTROY";
+                default: return "EGG";
+            }
+        }
+
+        // Words that mean "clear my personal preference, follow the operator's
+        // global setting" for both knobs (case-insensitive).
+        public static bool IsPreferenceClearWord(string word)
+        {
+            if (string.IsNullOrEmpty(word)) return false;
+            word = word.ToLowerInvariant();
+            return word == "off" || word == "global" || word == "default"
+                || word == "clear" || word == "operator" || word == "unset"
+                || word == "none" || word == "human";
+        }
+
+        // Parse a destination word (agent's `vore_target`). Accepts the canonical
+        // labels and the common synonyms (ass→anal, vagina→pussy, cock→dick,
+        // breast→nipple). Null = did not understand. Pure.
+        public static SwallowDestination ParseDestination(string word)
+        {
+            if (string.IsNullOrEmpty(word)) return SwallowDestination.Off;
+            word = NormalizeLetters(word);
+            switch (word)
+            {
+                case "off": case "global": case "default": case "clear":
+                case "operator": case "unset": case "none": case "human":
+                    return SwallowDestination.Off;
+                case "mouth": case "maw": case "throat":
+                    return SwallowDestination.Mouth;
+                case "anal": case "ass": case "butt": case "rear":
+                    return SwallowDestination.Anal;
+                case "pussy": case "vagina": case "unbirth": case "womb":
+                    return SwallowDestination.Pussy;
+                case "nipple": case "breasts": case "breast": case "boob": case "boobs": case "tit": case "tits":
+                    return SwallowDestination.Nipple;
+                case "dick": case "cock": case "urethra": case "urethral":
+                    return SwallowDestination.Dick;
+                default: return SwallowDestination.Off; // unknown words: never guess a hole
+            }
+        }
+
+        // Same word list the manager uses to spot "clear the override" in a raw
+        // tool call, separate from the numeric parse (an unknown HOLE word falling
+        // back to Off would silently disarm an agent's route — callers distinguish
+        // "understood, meaning off" from "not understood" with this + the return
+        // path below). Unknown hole words for real picks come from TryParse.
+        public static bool TryParseDestination(string word, out SwallowDestination d, out bool clear, out bool bad)
+        {
+            clear = false; bad = false;
+            if (string.IsNullOrEmpty(word)) { bad = true; d = SwallowDestination.Off; return false; }
+            var n = NormalizeLetters(word);
+            if (IsPreferenceClearWord(n)) { clear = true; d = SwallowDestination.Off; return true; }
+            d = ParseDestination(n);
+            if (d == SwallowDestination.Off && !IsPreferenceClearWord(n)) { bad = true; return false; }
+            return true;
+        }
+
+        // Parse a fate word (agent's `vore_mode`). Null-able enum style: bool +
+        // out param + flags for clear/unknown. Pure.
+        public static bool TryParseEffect(string word, out SwallowEffect m, out bool clear, out bool bad)
+        {
+            clear = false; bad = false;
+            m = SwallowEffect.Egg;
+            if (string.IsNullOrEmpty(word)) { bad = true; return false; }
+            var n = NormalizeLetters(word);
+            if (IsPreferenceClearWord(n)) { clear = true; return true; }
+            switch (n)
+            {
+                case "egg": case "rebirth": case "reborn": case "hatch":
+                    m = SwallowEffect.Egg; return true;
+                case "bellyegg": case "belly": case "nestlay": case "nestegg":
+                    m = SwallowEffect.BellyEgg; return true;
+                case "grow": case "absorb": case "absorption": case "gain":
+                    m = SwallowEffect.Grow; return true;
+                case "destroy": case "kill": case "erased": case "erase": case "goneforever":
+                    m = SwallowEffect.Destroy; return true;
+                default:
+                    bad = true; return false;
+            }
         }
 
         // Intake progress wording for the virtual-insertion narration (0..1).

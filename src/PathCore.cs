@@ -484,6 +484,11 @@ namespace KKLLMNPC
             public int Cell;      // cell index
             public int Layer;     // layer index within the cell
             public float Height;  // floor height of that layer
+            // True when the requested cell itself was NOT walkable and the resolver
+            // landed on a NEIGHBORING cell. Callers use this to END THE ROUTE at the
+            // landing cell — re-pinning the raw goal X/Z on top drives the final leg
+            // straight through the wall the resolver just walked around.
+            public bool Snapped;
         }
 
         /// <summary>
@@ -539,6 +544,7 @@ namespace KKLLMNPC
             result.Cell = bestCell;
             result.Layer = bestLayer;
             result.Height = grid.H(bestCell, bestLayer);
+            result.Snapped = true;
             return result;
         }
 

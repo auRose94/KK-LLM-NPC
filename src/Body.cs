@@ -152,6 +152,10 @@ namespace KKLLMNPC
                     total++;
                     int id = k.GetInstanceID();
                     if (LLMNPCPlugin.IsClaimedByAnyLLM(id)) { claimed++; continue; }
+                    // BRAIN-SWAP GRACE: a body mid machine hand-off (flags flipped,
+                    // bodySwapped not yet rebound) is temporarily unowned-looking —
+                    // claiming it here steals the swap's incoming body.
+                    if (InSwapGrace(id)) continue;
                     // REBIRTH HOLD: a body that will hatch into a swallowed person
                     // belongs to the hatch flow, not the claim race.
                     try { if (SwallowManager.IsAwaitingRebirth(k)) continue; } catch (Exception) { }
@@ -451,12 +455,15 @@ namespace KKLLMNPC
                 string goal; lock (_goalLock) { goal = _goal; }
                 // Save even with zero facts if a persona exists — a returned body at
                 // least wakes up as the same person, not a renamed stranger.
+                PruneStaleFacts(); // age sweep so the disk snapshot never preserves dead items
                 var facts = new List<string>();
-                lock (_facts) foreach (var f in _facts) facts.Add(f.Text);
+                var factUtc = new List<long>();
+                lock (_facts) foreach (var f in _facts) { facts.Add(f.Text); factUtc.Add(f.Utc); }
                 string fp = _boundBodyFp;
                 if (string.IsNullOrEmpty(fp)) fp = BodyFullFp(_kobold);
                 MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal, _pronounsOverride, SkillsSnapshotLines(),
-                    bodyFp: fp, species: BodySpecies(_kobold));
+                    bodyFp: fp, species: BodySpecies(_kobold),
+                    voreTarget: VoreTargetOverride, voreMode: VoreModeOverride, factUtc: factUtc);
                 try { Logger.LogInfo("KKLLMNPC: saved '" + _npcName + "' — " + facts.Count + " facts keyed to body '" + bodyKey + "'"); } catch (Exception) { }
             }
             catch (Exception) { }
@@ -513,11 +520,24 @@ namespace KKLLMNPC
                 _pronounsOverride = string.IsNullOrEmpty(rec.Pronouns) ? null : rec.Pronouns;
                 lock (_facts)
                 {
-                    foreach (var t in rec.Facts) _facts.Add(new FactRec { Text = t, Tick = _tick });
+                    // Restore keeps each fact's TRUE wall-clock age (MemoryStore's
+                    // fact_utc, falling back to the record's save stamp). The old
+                    // behavior re-stamped every fact with the current tick, so
+                    // ancient notes came back brand-new and nothing ever aged out.
+                    long fallbackUtc = MemoryStore.UtcSecondsFrom(rec.SavedUtc);
+                    for (int i = 0; i < rec.Facts.Count; i++)
+                    {
+                        long utc = rec.FactUtc != null && i < rec.FactUtc.Count && rec.FactUtc[i] > 0
+                            ? rec.FactUtc[i] : fallbackUtc;
+                        _facts.Add(new FactRec { Text = rec.Facts[i], Tick = _tick, Utc = utc });
+                    }
                     while (_facts.Count > FactCap) _facts.RemoveAt(0);
                 }
                 if (!string.IsNullOrEmpty(rec.Goal)) lock (_goalLock) { _goal = rec.Goal; _goalTick = _tick; }
                 SkillsLoadFrom(rec.Skills); // learned procedures come back with the body
+                // VoreControls: the person's own vore preferences wake with them.
+                _voreTargetOverride = string.IsNullOrEmpty(rec.VoreTarget) ? null : rec.VoreTarget;
+                _voreModeOverride = string.IsNullOrEmpty(rec.VoreMode) ? null : rec.VoreMode;
                 _identityFinalized = true; // name already chosen — skip the LLM re-pick
                 // Identity bot may be needed again for chat attribution.
                 RunOnMainThreadAsync(() => { try { EnsureIdentityBot(); } catch (Exception) { } });
@@ -586,12 +606,23 @@ namespace KKLLMNPC
         // The Kobold objects don't move — the machine hands control of the other
         // body to whoever its flags say. Rebinding keeps our NPCInstance pointed at
         // the body it now inhabits, with name + persona intact.
+        //
+        // REGRESSION NOTE (fixed here): the machine starts a fresh SwapAfterTime
+        // timer on EVERY LocalUse and re-fires the event with the pod pair even
+        // after the swap — those re-fires used to hit RebindAfterSwap's silent
+        // early-returns (a stale claim from nobody, or a guard tripped quietly),
+        // leaving two minds fighting over one body and the AI "never swapping".
         private void OnBodySwap(Kobold a, Kobold b)
         {
             Kobold next = null;
             if (a == _kobold) next = b;
             else if (b == _kobold) next = a;
-            if (next == null || _kobold == null) return;
+            MarkSwapGrace(a, b); // claim race stays out of a hand-off's window
+            if (next == null || _kobold == null)
+            {
+                if (next == null) Logger.LogDebug("bodySwapped fired — this instance is not in either pod (normal for spectators)");
+                return;
+            }
             string prevName = PickName(_kobold);
             string newName = PickName(next);
             Logger.LogInfo("KKLLMNPC: '" + (_npcName ?? "?") + "' body-swapping " + prevName + " -> " + newName);
@@ -607,15 +638,41 @@ namespace KKLLMNPC
 
         private void RebindAfterSwap(Kobold next)
         {
-            if (next == null || !IsAlive(next) || _kobold == next) return;
+            if (next == null) return;
+            if (_kobold == next)
+            {
+                Logger.LogDebug("body-swap rebind: machine re-asserted the body we already hold — nothing to do");
+                return;
+            }
+            if (!IsAlive(next))
+            {
+                // Machine handed us a body that's already gone — keeping our current
+                // body is the only sane move; don't retire for this.
+                Logger.LogWarning("KKLLMNPC: body-swap rebind skipped — incoming body '" + SafeKoboldName(next) + "' is not alive; keeping '" + (_npcName ?? "?") + "' where it is");
+                return;
+            }
             int oldId = _currentKoboldId;
             int id = next.GetInstanceID();
             // Release the swapped-out body (it's the other party's now) and claim
-            // the incoming one, unless another instance took it first.
+            // the incoming one, unless a LIVE sibling instance took it first (each
+            // mind moves — the sibling rebinding to OUR old body is the normal
+            // resolution). A stale claim from a lost/frozen driver used to no-op
+            // the whole rebind silently; the machine's hand-off wins over that.
             lock (LLMNPCPlugin.ClaimedKobolds)
             {
                 if (oldId >= 0) LLMNPCPlugin.ClaimedKobolds.Remove(oldId);
-                if (LLMNPCPlugin.ClaimedKobolds.Contains(id)) { LLMNPCPlugin.ClaimedKobolds.Add(oldId); return; }
+                if (LLMNPCPlugin.ClaimedKobolds.Contains(id))
+                {
+                    var other = Plugin.FindOtherInstanceHolding(next, this);
+                    if (other != null)
+                    {
+                        if (oldId >= 0) LLMNPCPlugin.ClaimedKobolds.Add(oldId); // keep what we hold
+                        Logger.LogWarning("KKLLMNPC: body-swap rebind lost the race for '" + SafeKoboldName(next) + "' — sibling instance '" + (other._npcName ?? "?") + "' holds it now");
+                        return;
+                    }
+                    Logger.LogWarning("KKLLMNPC: body-swap rebind cleared a STALE claim on '" + SafeKoboldName(next) + "' (no live instance drives it) — taking the machine's hand-off");
+                    LLMNPCPlugin.ClaimedKobolds.Remove(id);
+                }
                 LLMNPCPlugin.ClaimedKobolds.Add(id);
             }
             // BindBody re-subscribes belly + penetration listeners on the new body
@@ -624,6 +681,44 @@ namespace KKLLMNPC
             UnregisterAgentBody(oldId);
             RegisterAgentBody(_currentKoboldId, _npcName); // same mind, new body — keep the sibling registry current
             _persona = BuildPersona(); // physical gender/species changed — rebuild from the new body
+        }
+
+        // Brain-swap grace: while the machine hands control over (it flags BOTH
+        // bodies before raising bodySwapped, and re-fires the event from stale
+        // timers), the claim race must leave those bodies alone — a reconcile that
+        // claims the incoming body mid-hand-off used to break the swap (the AI's
+        // mind never moved). Keyed by body instance id → grace-until time.
+        private const float SwapGraceSec = 12f;
+        private static readonly System.Collections.Generic.Dictionary<int, float> _swapGraceUntil
+            = new System.Collections.Generic.Dictionary<int, float>();
+
+        private static void MarkSwapGrace(Kobold a, Kobold b)
+        {
+            try
+            {
+                if (a != null) _swapGraceUntil[a.GetInstanceID()] = Time.unscaledTime + SwapGraceSec;
+                if (b != null) _swapGraceUntil[b.GetInstanceID()] = Time.unscaledTime + SwapGraceSec;
+            }
+            catch (Exception) { }
+        }
+
+        private static bool InSwapGrace(int bodyId)
+        {
+            try
+            {
+                float until;
+                if (!_swapGraceUntil.TryGetValue(bodyId, out until)) return false;
+                if (Time.unscaledTime > until) { _swapGraceUntil.Remove(bodyId); return false; }
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // PickName throws on destroyed Unity objects under Mono — safe variant.
+        private static string SafeKoboldName(Kobold k)
+        {
+            try { string s = CleanName(k.name); return string.IsNullOrEmpty(s) ? "?" : s; }
+            catch (Exception) { return "(destroyed)"; }
         }
 
         // Follow body-swaps: the machine's AssignKobolds ends by raising the static
@@ -1203,6 +1298,14 @@ namespace KKLLMNPC
                 string penGoName = null;
                 try { penGoName = penetrator.gameObject != null ? penetrator.gameObject.name : null; } catch (Exception) { }
                 bool voreInsert = penGoName != null && penGoName.StartsWith("vore:", StringComparison.Ordinal);
+                // SCOPE: only the swallow session's own PRED may register the labeled
+                // insert. A stray "vore:"-labeled shaft reaching any other body or
+                // hole (stray autoseek in a custom-content pen) is meal machinery,
+                // never a partner — and the exemption below must not resurrect it.
+                if (voreInsert)
+                {
+                    try { if (SwallowManager.IsVoreInsertFor(_kobold, penGoName) == false) return; } catch (Exception) { }
+                }
 
                 // A SWALLOWED person is penetrator machinery: their body (dick
                 // included) passing down the eater's throat registers as a real

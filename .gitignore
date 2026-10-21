@@ -2,3 +2,4 @@ KKLLMNPC.dll
 .vscode
 .vscode/*dist/
 dist/*
+__pycache__/

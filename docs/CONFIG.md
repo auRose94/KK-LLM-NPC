@@ -36,6 +36,49 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 |-----|---------|-------|---------|
 | `ParallelCalls` | `2` | 0–8 | Max simultaneous LLM HTTP calls the whole mod makes toward the endpoint. Local llama.cpp/KoboldCpp/solo-GPU LM Studio servers answer serially — with several NPCs posting at once, burst calls starved into `WebException(Timeout)` warnings (the dominant log noise). Extra calls now QUEUE inside the mod (fail-open after two minutes). `0` = unlimited; raise it for multi-slot servers. |
 
+### kk-serve — the repo's own numpy+torch serving companion
+
+This repo ships `serve/` ([serve/README.md](../serve/README.md)): a small OpenAI-compatible
+server that runs the fine-tuned artifacts from `training/` with plain torch +
+transformers and reuses prefix KV across the mod's long repeated console turns.
+Every `[LLM]` switch behaves the same as with LM Studio/llama.cpp: `Thinking off`
+is honored via `chat_template_kwargs {"enable_thinking": false}` (reasoning that
+still arrives is routed to `reasoning_content` and stripped before JSON parsing),
+`NativeTools` gets real `tool_calls` back (arguments arrive as a JSON string, and
+each complete call lands in one stream delta — the shape the console path needs),
+and image parts to a text-only model return the 400 that trips the mod's `image`
+ladder so vision degrades gracefully. Config is just:
+
+```ini
+[LLM]
+Endpoint = http://127.0.0.1:8339/v1/chat/completions
+Model    = whatever           ; echoed; /v1/models reports the real name
+```
+
+### `[Serve]` — managed kk-serve launcher (WebUI 'AI server' tab)
+
+When enabled, the mod launches `serve/kk_serve.py` itself at game launch and manages it
+(spawn with backoff, health-watch every ~2s, WebUI restart/stop/start, hot-swap models,
+companion log tail). The same panel reports the discovery scan and applies model
+selection: `auto` loads the best fit every start, a pinned entry holds across restarts
+and applies live via the server's hot-swap.
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `Enabled` | `false` | bool | Launch the companion on game start. Off keeps everything manual. |
+| `PythonBin` | `python3` | — | Interpreter to run kk-serve with. A venv path is best (`/srv/kk/serve-venv/bin/python`) — its torch is the serve requirements' install. |
+| `ServeDir` | *(empty)* | — | Folder holding `kk_serve.py` (or the file path itself). Empty = auto-search plugin dir / working dir + their `serve/` subfolders — **`build.sh` ships `serve/` to `BepInEx/plugins/serve/`, so this stays empty on managed installs**; only needed for a manual python-only deploy. |
+| `Port` | `8339` | 1024–65535 | Companion bind port (loopback; pairs with the WebUI's 8338). |
+| `Device` | `auto` | — | Which processor kk-serve loads the model on: `auto` (first torch device), `cpu`, or a specific id from its device list (`cuda:0`…). The WebUI AI-server tab lists every device the companion's torch build can see with live free VRAM; applying a device restarts the companion under the right python (below). On a **mixed-vendor box** remember: a ROCm-built torch only sees the AMD cards (and the iGPU), a CUDA-built one only the NVIDIA. |
+| `PythonCpu` | *(empty)* | — | Python binary for `Device=cpu`. Empty = `PythonBin`. |
+| `PythonCuda` | *(empty)* | — | Python binary with a **CUDA-built torch** — needed for the NVIDIA card. Empty = `PythonBin`. |
+| `PythonRocm` | *(empty)* | — | Python binary with a **ROCm-built torch** — needed for the AMD card(s) + the iGPU. Empty = `PythonBin`. |
+| `AutoEndpoint` | `false` | bool | When the companion is healthy, LLM + vision-fallback POSTs use it automatically (`http://127.0.0.1:<Port>/v1/chat/completions`) regardless of `[LLM].Endpoint` — turn-key after a game restart, and the configured endpoint is untouched/unrestored. Off = your configured endpoint is always the truth. |
+| `SelectedModel` | `auto` | — | What the companion serves: `auto` = scan + best fit (a training/ fine-tuned artifact wins outright; VRAM fit gates everything; smaller same-family models preferred for turn cadence). A discovered name or full path pins it; Apply hot-swaps the live server. |
+| `ModelLocations` | *(empty)* | — | Extra scan roots, `;`- or newline-separated. One level of HF hub-cache layout (`models--org--name/snapshots/<hash>`) is understood. `<game root>/kk-llm-models/` is ALWAYS scanned implicitly — that's where `serve/fetch_assets.py` (and `build.sh` for you) lands a serving model. |
+| `VramLimitGb` | `0` | 0–256 | Cap the free-VRAM budget used in best-fit scoring (0 = trust the driver's free VRAM). |
+| `ExtraArgs` | *(empty)* | — | Extra `kk_serve.py` command line appended verbatim (`--kv-reuse off`, `--dtype float16`, `--chat-template …`). |
+
 ## [Vision] — Background Vision Pass
 
 | Key | Default | Range | Purpose |
@@ -109,6 +152,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
 | `FactDecayTicks` | `900` | 0–… | Ticks before a fact decays out of context if the model hasn't re-asserted it. Re-`remember`ing a fact (same category prefix) refreshes its age, so actively-used facts outlive scratch notes. 0 = facts never decay. |
+| `FactMaxAgeHours` | `72` | 0–8760 | Cross-session age prune in REAL hours: a fact not re-remembered within this window drops from memory even across saves (fact ages are stamped per record now, so old notes from a save-file days back get cleaned up instead of waking brand-new). 0 = off. Exempt from aging: identity notes (`me:`/`name:`) and the latest `player_wants:`. |
 | `FactCap` | `40` | 12–120 | How many facts one NPC keeps — the live ring AND the restore cap for a saved record (was a fixed 24). Facts dedupe one slot per `category:` prefix; beyond the cap the oldest are evicted. |
 | `DefaultFacts` | *(10 seed lines)* | multiline | Facts written into every FRESH NPC mind — the default world knowledge a kobold boots with (one per line, `category: text`; one fact per category prefix). Editable/downsizeable in the config file (or from the WebUI settings tab); a body that RESTORES a saved life loads its own memories instead of these. |
 
@@ -130,7 +174,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | `MaxTokens` | `256` | — | Max tokens per console reply (command lines are short — low is fast). |
 | `HistoryMessages` | `30` | 6–120 | Rolling conversation window (system prompt always kept). When the window trims, the dropped span is replaced by one compact `[session memory]` digest (first/last highlights) instead of vanishing — the story survives context trims. |
 | `NativeTools` | `true` | bool | Declare the console commands as an OpenAI tools array in every console request. Tool-aware servers (llama.cpp --jinja, LM Studio, vLLM, Ollama, KoboldCpp) then return real `tool_calls` — deterministic commands with real arguments, one call per command, a multi-call reply executed as a multi-command turn — instead of garbled `<tool_call>` markup in free text. Servers without tool support ignore the field or are fenced off automatically on the first 400 (300 s pause), with the text parsers + markup salvage as the fallback. Disable if your server errors on unknown payload fields. |
-| `AutoScreenshotTicks` | `6` | 0– | Attach the NPC's first-person view automatically every N turns (vision-capable models, when it actually moved/turned; also right after a stuck streak). |
+| `AutoScreenshotTicks` | `6` | 0– | Attach the NPC's first-person view automatically every N turns (vision-capable models, when it actually moved/turned; also right after a stuck streak). With `[DataRecord] Enabled`, text-only runtime models ALSO capture at this cadence for the training record (`frame_ref` on the turn) — payloads stay text-only. |
 | `SystemPromptFile` | `system_prompt_console.txt` | — | Console-mode persona/world-rules file (relative to game dir). The command list + console protocol are appended automatically. Blank = built-in persona. |
 
 ## [Multiplayer] — NPC Room Identity
@@ -162,12 +206,12 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `SwallowDestination` | `Off` | **WHERE the person goes in — and the master accident switch.** `Off` (the default) disarms ALL release-triggered swallows: a held kobold dropped near another head (precision-grabber bump included) just drops like normal — nothing starts a digestion by accident. Pick `Mouth`/`Anal`/`Pussy`/`Dick`/`Nipple` to arm the trigger and aim the pull at that hole (`Dick` anchors on the EATER's own dick — cock vore/urethral entry — and falls back to a groin point for the dickless); narration names it, the stomach outcome is unchanged. Cycle in-game with **F7** (off→mouth→anal→pussy→dick→nipple→off), announce toasts land in chat; a throttled log hint appears if you leave `SwallowEnabled` on while the destination sits Off. Also settable from the WebUI settings tab. Requires `SwallowEnabled` too. |
+| `SwallowDestination` | `Off` | **WHERE the person goes in — and the master accident switch.** `Off` (the default) disarms ALL release-triggered swallows: a held kobold dropped near another head (precision-grabber bump included) just drops like normal — nothing starts a digestion by accident. Pick `Mouth`/`Anal`/`Pussy`/`Dick`/`Nipple` to arm the trigger and aim the pull at that hole (`Dick` anchors on the EATER's own dick — cock vore/urethral entry — and falls back to a groin point for the dickless); narration names it, the stomach outcome is unchanged. Cycle in-game with **F7**, or — the path that always works, since desktops/Steam intercept function keys (mostly under Proton) — **`vore arm mouth|anal|pussy|dick|nipple|off` / `vore arm` (cycle) / `vore fate <mode>` / `vore state` typed in your game chat**. Announce toasts land in chat; a throttled log hint appears if you leave `SwallowEnabled` on while the destination sits Off. Also settable from the WebUI settings tab. Requires `SwallowEnabled` too. **AGENTS PICK THEIR OWN**: each AI NPC can set their own entry hole with the `vore_target` tool (persisted with their memory; their deliberate pick also arms their own release-gesture swallows while this stays `Off` — `SwallowEnabled` remains the one switch above all). While vore is armed a small HUD line shows your current settings. |
 | `SwallowEnabled` | `false` | Player swallow-vore: releasing a held PERSON (kobold) while looking steeply up swallows them whole instead of dropping. ~2s pull-in (they're hidden once fully swallowed — no stuck-out-of-the-stomach clipping), they digest at your stomach for `SwallowDigestSeconds`, then `SwallowEffect` decides the outcome. Held PLAYER bodies can never be swallowed (grief guard); other things in hand drop normally. The eaten NPC's LLM session survives the whole time (can still speak from inside; steering paused; the digestion is narrated to them), and other NPCs see it as a world event. **Digest abort (no cheats): type "swallow abort"** (or "spit out" / "cough up" / "regurgitate" / "swallow stop" / "abort swallow") **in the game chat** — every in-flight session releases its victims alive and whole in front of you; the line is consumed by the mod, so the NPCs never hear it; works in pull phase and mid-digest, does nothing once an egg was already laid. |
 | `SwallowLookUpDot` | `0.94` | How steeply up the camera must point for the drop to become a swallow: camera-forward y with asin of it = the angle. 0.94 ≈ 70°, 0.97 ≈ 76°, 0.87 ≈ 60°. Default is deliberately near max-up so you can't eat someone by accident; raise toward 0.999 for an even fussier trigger. |
 | `SwallowForceFeeding` | `true` | Force-feeding: ANY kobold's drop (the mod's NPC `drop` tool included) that lands a held PERSON right on/at another kobold's HEAD (within 0.85m, at/above the head bone) makes the RECEIVER swallow them — the receiver then follows `SwallowEffect`'s outcome, the dropped one is narrated honestly (they're told who fed them and their mode's real prospects), and the dropper's `drop` tool result says `force_fed` instead of "dropped". Grief guards: receivers and victims can never be player bodies; an eater already digesting someone refuses another; the player's steep look-up self-swallow still wins when both gestures match. Requires `SwallowEnabled`. |
 | `SwallowDigestSeconds` | `45` | Seconds a swallowed kobold sits in the stomach before the effect applies (clamped 5–600). The full cycle adds ~2s swallow-in and ~6s settle. |
-| `SwallowEffect` | `Egg` | What a fully-digested person becomes: **Egg** — an egg pops out at your feet carrying `KoboldGenes.Mix(your genes, theirs)`; plant it in soil and the hatched body is claimed again with their saved persona/name/facts (genes changed). **BellyEgg** — their `Egg` reagent (20 units; a nest lay needs ≥5) + THEIR genes ride in YOUR belly: sit on a nest and lay them yourself, then plant that egg (the rebirth link follows it). **Grow** — no egg; you absorb them (`SwallowGrowLarger`/`SwallowGrowStrength`/`SwallowGrowSex` choose what, `SwallowGrowPercent` the gain) AND their saved memories pour into you (your identity stays yours; an unclaimed vanilla eater will wake up remembering the person it ate). **Destroy** — nothing gained or laid; they're gone and their saved memories are erased. Narration to the swallowed NPC is honest per mode. |
+| `SwallowEffect` | `Egg` | What a fully-digested person becomes: **Egg** — an egg pops out at your feet carrying `KoboldGenes.Mix(your genes, theirs)`; plant it in soil and the hatched body is claimed again with their saved persona/name/facts (genes changed). **BellyEgg** — their `Egg` reagent (20 units; a nest lay needs ≥5) + THEIR genes ride in YOUR belly: sit on a nest and lay them yourself, then plant that egg (the rebirth link follows it). **Grow** — no egg; you absorb them (`SwallowGrowLarger`/`SwallowGrowStrength`/`SwallowGrowSex` choose what, `SwallowGrowPercent` the gain) AND their saved memories pour into you (your identity stays yours; an unclaimed vanilla eater will wake up remembering the person it ate). **Destroy** — nothing gained or laid; they're gone and their saved memories are erased. Narration to the swallowed NPC is honest per mode. **Who decides**: cycle yours with **F8** (egg→belly-egg→grow→destroy) or the WebUI — that is the player's control. Each AI NPC picks their own fate for THEIR meals with the `vore_mode` tool (also persisted with their memory); the swallow ACTOR's setting wins (a player force-feeding a body into an NPC digests it per the player's global; an NPC that started the meal follows its own pick or, unset, the global). |
 | `SwallowGrowLarger` | `true` | `[SwallowEffect=Grow]` gain the person's size: your `baseSize` gene += `SwallowGrowPercent`% of theirs — you visibly grow. |
 | `SwallowGrowStrength` | `true` | `[SwallowEffect=Grow]` gain strength: +1 grab (carry more at once, cap 8) and `maxEnergy` += `SwallowGrowPercent`% of theirs. |
 | `SwallowGrowSex` | `true` | `[SwallowEffect=Grow]` gain the person's curves: your `breastSize` += `SwallowGrowPercent`% of theirs; a dick you already have grows by the same % (length + thickness together); and if THEY had a dick and you didn't, you gain their whole groin — their equip id plus their dick/ball sizes copied exactly (a fraction of a dick would be invisible, and absorbing someone means owning their groin). Applied live through the game's own `SetGenes`, so new curves or a gained dick show the moment digestion completes — on AI kobolds and on your own body (self-eat) alike. |
@@ -188,3 +232,10 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `AIReportLog` | `true` | AI bug reports. When an NPC calls `report` (console) / `report_issue` (act tool) with a description of what broke or frustrated it, append a block — its message, position, facing, current goal, and its last ~10 tool calls — to `BepInEx/config/kkllmnpc_ai_reports.log`. Read it between sessions: it's the agents telling you which tools lie ("sonar is busted and showing garbage", "go_to kept picking the far blender"). Off = reports only surface in the BepInEx console log (`[AIReport]` lines). |
+
+## [DataRecord] — Training-Data Recorder (off by default)
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `Enabled` | `false` | Record every LLM round-trip to `BepInEx/config/kkllmnpc_turns.jsonl`: the exact messages the model saw (system prompts deduped by reference hash), the console tools vocabulary once per session, the response (content, `tool_calls`), the mode (`console`/`act`/`name`/`vision`), wall-time of the call, and a salvage marker when a reply needed recovery. First-person frame images are materialized once per unique frame (content-hash deduped, so a frame repeated in the rolling history is stored a single time) to `BepInEx/config/kkllmnpc_turns_media/` and referenced from the turn records as `img_ref` — multimodal fine-tuning trains on what the NPC actually saw. When the runtime model is text-only (nothing carried image parts), console mode still captures at the `AutoScreenshotTicks` cadence and files the view as a turn-level `frame_ref`, so a future vision-capable model trains on the pixels its predecessor acted on. This is what fine-tuning runs on: play a few sessions with it on, then point the training pipeline (see `training/README.md` in the repo) at the files. All content stays on this machine. |
+| `MaxMb` | `400` | Stop recording when the JSONL plus its media folder exceed this size combined (a console turn with its full history is roughly 10-30 KB, a frame is roughly 30-100 KB before dedup). `0` = no cap. Delete or move `kkllmnpc_turns.jsonl` and `kkllmnpc_turns_media/` to start a fresh recording; raising the cap resumes. |
