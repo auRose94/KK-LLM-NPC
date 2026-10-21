@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the pure-C# unit test suites. No Unity/BepInEx/game install required.
+# Run the unit test suites: the pure-C# ones (no Unity/BepInEx/game install
+# required), plus the serve/ python contract tests when python3 exists.
 #
 # Usage:
 #   ./run_tests.sh              # run everything
@@ -83,7 +84,10 @@ run_headless_suites() {
   run_suite goalresolver tests/test_goalresolver.cs -- src/PathCore.cs
   run_suite contextcore tests/test_contextcore.cs -- src/ContextCore.cs src/Json.cs src/Constants.cs
   run_suite chat        tests/test_chat_similarity.cs -- src/ChatSimilarity.cs
-  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ChatSimilarity.cs src/Json.cs
+  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ConsolePipe.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs
+  run_suite consolepipe tests/test_consolepipe.cs -- src/ConsolePipe.cs src/ConsoleShell.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs
+  run_suite datarecord  tests/test_datarecord.cs -- src/DataRecord.cs src/Json.cs
+  run_suite decisionparse tests/test_decisionparse.cs -- src/DecisionParse.cs src/Guidance.cs src/Json.cs
   run_suite compass     tests/test_compass.cs -- src/Compass.cs
   run_suite swallow     tests/test_swallow.cs -- src/SwallowLogic.cs
   run_suite spectate    tests/test_spectate.cs -- src/SpectateLogic.cs
@@ -91,6 +95,7 @@ run_headless_suites() {
   run_suite safehttp    tests/test_safehttp.cs -- src/SafeHttp.cs
   run_suite modelfamilies tests/test_modelfamilies.cs -- src/ModelFamilies.cs
   run_suite memory_compaction tests/test_memory_compaction.cs -- src/MemoryCompaction.cs src/TextUtil.cs
+  run_suite serve      tests/test_serve.cs -- src/ServeArgs.cs
 }
 
 # Every *.cs in tests/ must be reachable from a run_suite line above, otherwise a
@@ -112,6 +117,24 @@ audit_coverage() {
 printf 'KK-LLM-NPC unit tests (pure C#)\n'
 run_headless_suites
 audit_coverage
+
+# ---- serve/ python contract tests (KK-Serve) ------------------------------
+# The python server lives on the kk-serve branch — with serve/ absent this
+# block is skipped. unittest exit code carries skip-vs-fail already: without
+# torch the REST suite skips itself and discovery still exits 0.
+if [ -d serve ] && command -v python3 >/dev/null 2>&1; then
+  if ( cd serve && python3 -m unittest discover -s tests >"$OUT/serve-python.log" 2>&1 ); then
+    printf '  [serve] python contract tests: PASS\n'
+    PASSED=$((PASSED+1))
+  else
+    FAILED=$((FAILED+1))
+    FAILED_SUITES+=("serve-python")
+    printf '  [serve] python contract tests: FAIL\n'
+    tail -30 "$OUT/serve-python.log"
+  fi
+else
+  printf '  [serve] python contract tests: skipped (no serve/ dir — lives on the kk-serve branch)\n'
+fi
 
 printf '\n========================================\n'
 if [ $FAILED -eq 0 ]; then
