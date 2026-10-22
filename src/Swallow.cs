@@ -3050,6 +3050,7 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgAgentOverhear;
         internal ConfigEntry<float> _cfgAgentOverhearRadius;
         internal ConfigEntry<int> _cfgAgentChatPerMinute;
+        internal ConfigEntry<float> _cfgSiblingNudgeGap;
         internal ConfigEntry<int> _cfgFactCap;
         internal ConfigEntry<string> _cfgDefaultFacts;
         // Spectate (agent eats the PLAYER) —see src/Spectate.cs.

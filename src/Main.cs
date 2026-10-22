@@ -376,6 +376,8 @@ namespace KKLLMNPC
                 "Earshot radius (m) for agent-to-agent overhearing. Beyond this another agent's speech is not heard by this NPC at all.");
             _cfgAgentChatPerMinute = Config.Bind("Autonomy", "AgentChatPerMinute", 4,
                 "Max agent speech lines one NPC ingests per minute (addressed + overheard combined) — the duet cap that keeps two LLM kobolds from echoing each other forever. Was hardcoded 2.");
+            _cfgSiblingNudgeGap = Config.Bind("Autonomy", "SiblingNudgeGap", 20f,
+                "Seconds between sibling-proximity self-initiative nudges (default 20). Lets two nearby NPCs find each other and cross-talk without waiting for the [LLM] IdleInitiative gap (90s, default), which alone leaves pairs of neighbours silent forever. 0 disables.");
             // ---- memory: facts cap + seed facts ----
             _cfgFactCap = Config.Bind("Memory", "FactCap", 40,
                 "How many facts one NPC keeps (live ring AND the saved-record restore cap; was a fixed 24). Facts dedupe one slot per 'category:' prefix, evicting oldest beyond this.");

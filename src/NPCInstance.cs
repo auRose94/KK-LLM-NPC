@@ -104,6 +104,7 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgAgentOverhear;
         internal ConfigEntry<float> _cfgAgentOverhearRadius;
         internal ConfigEntry<int> _cfgAgentChatPerMinute;
+        internal ConfigEntry<float> _cfgSiblingNudgeGap;
         internal ConfigEntry<bool> _cfgIdentityBot;
         internal ConfigEntry<string> _cfgIdentityAppId;
         internal ConfigEntry<float> _cfgFarmScanRadius;
@@ -709,6 +710,7 @@ namespace KKLLMNPC
             _cfgAgentOverhear = plugin._cfgAgentOverhear;
             _cfgAgentOverhearRadius = plugin._cfgAgentOverhearRadius;
             _cfgAgentChatPerMinute = plugin._cfgAgentChatPerMinute;
+            _cfgSiblingNudgeGap = plugin._cfgSiblingNudgeGap;
             _cfgIdentityBot = plugin._cfgIdentityBot;
             _cfgIdentityAppId = plugin._cfgIdentityAppId;
             _cfgFarmScanRadius = plugin._cfgFarmScanRadius;
@@ -938,6 +940,11 @@ namespace KKLLMNPC
         // last time the idle-initiative cue fired. ConsoleTurn/DrainConsoleEvents write.
         internal float _lastTriggerTime = -999f;
         internal float _lastInitiativeAt = 0f;
+        // Cooldown for the sibling-proximity self-initiative nudge: a short,
+        // independent trigger that lets two idle NPCs find each other without
+        // waiting out the [LLM] IdleInitiative gap (which defaults to 90 s and,
+        // alone, would leave every pair of neighbours silent forever).
+        internal float _lastSiblingNudge = -999f;
 
         // The possessed body, null-safe (for the plugin's overhear distance checks —
         // main thread only, like any transform read).

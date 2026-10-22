@@ -1415,11 +1415,15 @@ namespace KKLLMNPC
                         {
                             var c = hits[i];
                             if (c == null || IsOwnCollider(c)) continue;
+                            // A KOBOLD IS NEVER A GRAB TARGET — player or sibling NPC.
+                            // Grabbing a person is not an item pickup; they can object.
+                            // The model sees them via nearby/people instead. Grab only
+                            // physical items (IGrabbable) from here on.
                             var kb = c.GetComponentInParent<Kobold>();
-                            if (kb != null && kb == _kobold) continue;
+                            if (kb != null && kb != _kobold) continue;
                             Transform tf = c.transform;
                             string nm = CleanName(tf.name);
-                            if (kb != null || c.GetComponentInParent<IGrabbable>() != null)
+                            if (c.GetComponentInParent<IGrabbable>() != null)
                             {
                                 if (!string.IsNullOrEmpty(hint)
                                     && nm.IndexOf(hint, StringComparison.OrdinalIgnoreCase) < 0) continue;

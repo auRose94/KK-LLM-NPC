@@ -586,6 +586,28 @@ namespace KKLLMNPC
                         if (w != null) sb.Append("[event] ").AppendLine(Sanitize(w.ToString()));
             }
             catch (Exception) { }
+            // SIBLING PROXIMITY nudge: a second, short-cooldown trigger alongside
+            // the idle-initiative cue below. Two idle NPCs each waiting on the same
+            // [LLM] IdleInitiative gap (default 90 s) would sit forever; when a
+            // sibling is near, remind the model to say hi so neighbours actually
+            // cross-talk. NearbyAgentsLine() returns null when alone, so this can't
+            // spam. Same [event] shape, so it sets hadTrigger too (unlocks speech).
+            try
+            {
+                float nudgeGap = _cfgSiblingNudgeGap != null ? _cfgSiblingNudgeGap.Value : 20f;
+                float now = Time.unscaledTime;
+                if (now - _lastSiblingNudge >= nudgeGap)
+                {
+                    string sibs = NearbyAgentsLine();
+                    if (sibs != null)
+                    {
+                        _lastSiblingNudge = now;
+                        sb.Append("[event] ").AppendLine(sibs + " — say hi (or respond with echo)");
+                    }
+                }
+            }
+            catch (Exception) { }
+
             // SELF-INITIATIVE ([Autonomy] IdleInitiativeSeconds, default 90): when
             // nothing has addressed this NPC for a while, hand the turn to them with
             // an explicit cue — the reactive-only bias ("wait for the player to talk")
