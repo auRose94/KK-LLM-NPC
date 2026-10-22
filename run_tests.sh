@@ -98,6 +98,7 @@ run_headless_suites() {
   run_suite truncatedargs tests/test_truncated_args.cs -- src/TruncatedArgs.cs src/Json.cs
   run_suite ollama tests/test_ollama.cs -- src/OllamaArgs.cs src/Json.cs
   run_suite serve      tests/test_serve.cs -- src/ServeArgs.cs
+  run_suite consent    tests/test_consent.cs -- src/ConsentDetector.cs
 }
 
 # Every *.cs in tests/ must be reachable from a run_suite line above, otherwise a
