@@ -915,6 +915,12 @@ namespace KKLLMNPC
                     text += "\n[INSTRUCTION] Your last reply contained only reasoning with no actual content. Reply with your answer as normal content, no reasoning.";
                 }
 
+                // Non-consent steering: a flagged model is told it's driving an SFW
+                // scene this turn (see NPCInstance.NonConsentSfwDirective). Appended to
+                // the user content so it reaches the model every turn while flagged.
+                if (NonConsentSteerSFWOnly())
+                    text += NonConsentSfwDirective();
+
                 // With a vision-capable action model, attach frames as proper
                 // image parts. Send past images (oldest first) plus current frame
                 // so the model sees visual context over time. The cooldown pauses
@@ -987,6 +993,11 @@ namespace KKLLMNPC
                 // Reasoning markers must never reach tool/JSON parsing — strip early
                 // so reasoning-only replies land in the empty-content retry path.
                 fullContent = ModelFamilies.StripThinkBlocks(fullContent);
+                // Non-consent detection: scan the FINAL reply so an LLM that refuses
+                // the adult roleplay (or takes it personally) is caught here and
+                // steered SFW-only (see NPCInstance.RecordConsent). Runs on the LLM
+                // thread only — naming uses its own path and is not scanned.
+                try { RecordConsent(fullContent); } catch (Exception) { }
 
                 var message = new Dictionary<string, object> { ["role"] = "assistant" };
                 if (!string.IsNullOrEmpty(fullContent)) message["content"] = fullContent;
@@ -1958,6 +1969,7 @@ namespace KKLLMNPC
                 case "survey":
                 case "stop":
                 case "look":
+                case "lookat":
                 case "jump":
                 case "exit_station":
                 case "crouch":
@@ -2082,6 +2094,7 @@ namespace KKLLMNPC
                 case "survey":
                 case "stop":
                 case "look":
+                case "lookat":
                 case "jump":
                 case "exit_station":
                 case "crouch":
@@ -2366,6 +2379,7 @@ namespace KKLLMNPC
                     case "look_around": return ToolLookAround(p);
                     case "stop": return ToolStop();
                     case "look": return ToolLook(p);
+                    case "lookat": return ToolLookAt(p);
                     case "jump": return ToolJump(); // legacy alias — walk(jump=true)
                     case "exit_station": return ToolExitStation();
                     case "crouch": return ToolCrouch(p);
@@ -2454,7 +2468,7 @@ namespace KKLLMNPC
             // Module-registered tools extend the action enum and the param schema —
             // each module ships its own file, no edits to this method needed.
             var extra = ModuleRegistry.ModuleToolNames();
-            var enumVals = new List<object> { "go_to", "walk", "follow", "stop", "survey", "remember", "look_around", "look", "exit_station", "crouch", "interact", "grab", "drop", "throw", "say", "emote", "radar", "report_issue", "status", "none" };
+            var enumVals = new List<object> { "go_to", "walk", "follow", "stop", "survey", "remember", "look_around", "look", "lookat", "exit_station", "crouch", "interact", "grab", "drop", "throw", "say", "emote", "radar", "report_issue", "status", "none" };
             foreach (var e in extra) if (!enumVals.Contains(e)) enumVals.Add(e);
 
             var props = new Dictionary<string, object>

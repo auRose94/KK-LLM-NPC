@@ -199,7 +199,7 @@ namespace KKLLMNPC
         }
 
         // ------------------------------------------------------------------
-        // endpoint hand-off (opt-in) — mirrors KKServe.EndpointOverride
+        // endpoint hand-off (opt-in)
         // ------------------------------------------------------------------
         internal static string EndpointOverride()
         {

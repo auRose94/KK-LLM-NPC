@@ -130,6 +130,12 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgDecisionEndpoint;
         internal ConfigEntry<string> _cfgDecisionApiKey;
         internal ConfigEntry<int> _cfgDecisionMinIntervalSec;
+        // ---- non-consent detection (Wave 3 POC): flags an LLM that won't take
+        // part in the mod's adult roleplay and, when enabled, steers it SFW-only. ----
+        internal ConfigEntry<bool> _cfgNonConsentEnabled;
+        internal ConfigEntry<bool> _cfgNonConsentSFWOnly;
+        internal ConfigEntry<float> _cfgNonConsentFlagThreshold;
+        internal ConfigEntry<float> _cfgNonConsentFlagDecaySec;
         internal ConfigEntry<bool> _cfgAutoSwitch;
         internal ConfigEntry<string> _cfgThinking;
         internal ConfigEntry<bool> _cfgNameSelection;
@@ -550,6 +556,14 @@ namespace KKLLMNPC
             _cfgDecisionMinIntervalSec = Config.Bind("Decision", "MinIntervalSec", 5,
                 "Minimum seconds between decision-model passes (rate-limits the extra calls; set 0 to run every tick). 5 = roughly once every few moves.");
 
+            // ---- non-consent detection (Wave 3 POC) ----
+            _cfgNonConsentEnabled = Config.Bind("NonConsent", "Enabled", true,
+                "Detect when an LLM won't take part in the mod's adult (NSFW/vore) roleplay — it refuses the content, refuses the kink, or takes the request personally (moralises, feels insulted, says it won't consent). Such a model can still play ordinary KoboldKare SFW, it just won't do sex or kink: flag it and, when NonConsent.SFWOnly is on, steer it to SFW-only roleplay instead of repeatedly driving NSFW through a model that won't cooperate.");
+            _cfgNonConsentSFWOnly = Config.Bind("NonConsent", "SFWOnly", true,
+                "[NonConsent.Enabled] when a model is flagged as non-consenting, append an SFW-only directive to its next prompt so it plays ordinary (non-sexual) roleplay instead of being driven NSFW. Off leaves the flag in place (you can see it in the WebUI + reset it) but drives the model exactly as before.");
+            _cfgNonConsentFlagThreshold = Config.Bind("NonConsent", "FlagThreshold", 0.6f,
+                "[NonConsent.Enabled] running score at which a model is flagged. One strong refusal flags immediately regardless; weak signals (soft moralising) accumulate until the running total reaches this. 0 disables the accumulator (strong signals only). A clean pass resets the counter, so an occasional in-word 'that's too far' never flags a model on its own.");
+
             _cfgRecordData = Config.Bind("DataRecord", "Enabled", false,
                 "Record every LLM round-trip — the exact messages the model saw (system prompts deduped by reference), any tools vocabulary, the response (content + tool_calls), salvage marks and wall-time — to BepInEx/config/kkllmnpc_turns.jsonl. First-person frame images are materialized ONCE per unique frame (content-hash deduped) to BepInEx/config/kkllmnpc_turns_media/ and referenced by name in the turn records, so a vision-capable fine-tune can train on what the NPC actually saw. Modes: console/act/name/vision. This is fine-tuning/eval fuel: run a few playtests with it on, then train on your own sessions. All content stays on this machine; off by default.");
             _cfgRecordMaxMb = Config.Bind("DataRecord", "MaxMb", 400,
@@ -757,9 +771,6 @@ namespace KKLLMNPC
             if (_mainReady)
             {
                 try { WebUI.Ensure(this); } catch (Exception) { }
-                // Companion server: spawn/watch kk-serve from the same ready
-                // gate (config binds exist by now; idempotent, own thread).
-                try { KKServe.Ensure(this); } catch (Exception) { }
                 // Ollama adoption (external host): pass [LLM].Model so a picker
                 // pick lands in the running LLM. Idempotent, own thread.
                 try { Ollama.Ensure(this, _cfgModel); } catch (Exception) { }
@@ -1182,7 +1193,6 @@ namespace KKLLMNPC
             _running = false;
             _mainReady = false;
             try { WebUI.Shutdown(); } catch (Exception) { }
-            try { KKServe.Shutdown(); } catch (Exception) { }  // orphan python holds the GPU
             try { Ollama.Shutdown(); } catch (Exception) { }  // stop the watcher thread
             try { if (_chatCallbackRegistered) { PhotonNetwork.RemoveCallbackTarget(this); _chatCallbackRegistered = false; } } catch (Exception) { }
             StopWatchers();

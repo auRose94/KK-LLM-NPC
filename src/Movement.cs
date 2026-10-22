@@ -478,6 +478,10 @@ namespace KKLLMNPC
             try { PollCarrySense(); } catch (Exception e) { Logger.LogDebug("carry sense: " + e.Message); }
             // What OUR grabber holds (items or people it accidentally grabbed).
             try { PollHoldSense(); } catch (Exception e) { Logger.LogDebug("hold sense: " + e.Message); }
+            // Live sensation: turn the body's arousal/stim/egg signals into
+            // [event] lines on real transitions (deduped per category). Runs after
+            // UpdateHorniness so its baseline is fresh.
+            try { PollSensation(dt); } catch (Exception e) { Logger.LogDebug("sensation sense: " + e.Message); }
             // Route-proofing: this body standing/walking here upgrades stale "wall"
             // verdicts in the shared grid (Destiny-style demonstrated paths, e.g. a
             // room behind a door that was closed when the map baked).

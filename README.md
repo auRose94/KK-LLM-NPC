@@ -10,11 +10,8 @@ and reacts to the world continuously, as if a player was at the wheel.
 
 - **BepInEx 5.4x** in the game install.
 - **An OpenAI-compatible chat-completions server** — LM Studio, Ollama, llama.cpp,
-  KoboldCpp, vLLM — serving whatever LLM should play the NPC. This repo also ships
-  its own numpy+torch server built around the mod's request shapes, the fine-tuned
-  artifacts from `training/`, and long repeated console histories (prefix-KV
-  reuse): see [serve/README.md](serve/README.md). Where it runs is your
-  call, three good options:
+  KoboldCpp, vLLM — serving whatever LLM should play the NPC. Where it runs is
+  your call, three good options:
   - **A second GPU in the same machine** — the game and the server each get one.
   - **A second machine on your network** with a GPU — point `[LLM] Endpoint` at it
     (`http://<its-LAN-address>:<port>/v1/chat/completions`); set `[LLM] ApiKey` if it
@@ -38,7 +35,8 @@ Each possessed kobold becomes an autonomous agent. Every "think" tick it gets:
 
 - **Possession pool** — every AI kobold the world produces gets an agent (a body that appears later, e.g. from a delivery or breeding, is claimed as it shows up). With `SpawnMissingKobolds` on, it can also spawn extra AI kobolds near the player until `MaxNPCs` is met.
 - **Pickup awareness** — knows when its body is grabbed, tracks a position trail while carried, and reports where it was moved (thrown is flagged as startling); it also auto-recovers if ragdolled next to the mail/sell machine and will never interact with that machine, since climbing in starts the sell timer.
-- **Swallow-vore & spectate (opt-in, in [LittleTreats], all OFF by default)** — two opt-in flows, each a complete loop: the player can swallow a kobold whole (digestion narrated to a real mind, ending per `SwallowEffect`: egg / belly-egg / absorb / destroy, with a no-cheat chat abort and force-feeding variant), and an agent can `eat_player` — taking over your camera to spectate its whole game session from inside until you hatch or abort. Grief guards keep player bodies safe everywhere except the explicit spectate act; a swallowed person is always kept alive as a mind and restored on their terms. Swallows are double-gated: **SwallowDestination** (F7 in-game, WebUI settings) picks where a held person goes in — off/mouth/anal/pussy/nipple — and OFF (the default) disarms the release triggers entirely, so a precision-grabber bump mid-walk can never start a digestion by accident. **Full mechanics, config and tests: [docs/VORE.md](docs/VORE.md).**
+  - **Swallow-vore & spectate (opt-in, in [LittleTreats], all OFF by default)** — two opt-in flows, each a complete loop: the player can swallow a kobold whole (digestion narrated to a real mind, ending per `SwallowEffect`: egg / belly-egg / absorb / destroy, with a no-cheat chat abort and force-feeding variant), and an agent can `eat_player` — taking over your camera to spectate its whole game session from inside until you hatch or abort. Grief guards keep player bodies safe everywhere except the explicit spectate act; a swallowed person is always kept alive as a mind and restored on their terms. Swallows are double-gated: **SwallowDestination** (F7 in-game, WebUI settings) picks where a held person goes in — off/mouth/anal/pussy/nipple — and OFF (the default) disarms the release triggers entirely, so a precision-grabber bump mid-walk can never start a digestion by accident. **Full mechanics, config and tests: [docs/VORE.md](docs/VORE.md).**
+- **Adult content by default, consent by choice** — the base prompt asks for nothing beyond the game's own (already adult, already fantastical) content: kobolds hatch as grown adults and the game's other mechanics — fantastical bodies, surviving falls, optional eating and sleeping, unrealistic intimacy systems — read plainly as fantasy with no real-world victim. The default prompt never pushes past that. What the **[NonConsent] system** (below) is for: not every model agrees to play the NSFW/kink content, some refuse it, moralise about it, or take the request personally. The mod *detects* a model declining the adult content, flags it, and — when `NonConsent.SFWOnly` is on — quietly steers it back to ordinary (non-sexual) roleplay instead of repeating an NSFW ask a model has already declined. Respecting a model's refusal is the point; by default a flagged model is simply *observed* in the browser, not changed.
 - **Multiplayer handshake (mod-to-mod)** — with two modded clients in one room, the room's own player properties carry presence + claimed-body lists + beats: the kobold-LLM duty is SHARED (each client claims its share, no doubling), and a frozen peer's bodies become reclaimable by the survivor — the crash mitigation. See [docs/VORE.md](docs/VORE.md) for the multiplayer vore channel the same infrastructure carries.
 - **Station departures are events** — a per-second occupancy watcher narrates "[station] the player left the bed station — you are on it alone now" when a partner walks away from a shared station within perception range, so the one left behind notices without re-diffing slot text.
 
@@ -262,50 +260,40 @@ Or from source: `./build.sh` compiles against your game install and deploys
 builds the per-platform release zips + release notes into `dist/`.
 First launch writes `BepInEx/config/com.kk.llmnpc.cfg`.
 
-`build.sh` also ships the companion python (`serve/*.py` → `BepInEx/plugins/serve/`)
-and, when no serving model exists yet, downloads one (`serve/fetch_assets.py
---ensure-model`; skip a single build with `KKLLM_SKIP_MODEL_FETCH=1`).
+`build.sh` also ships the prompt files (see `system_prompt_*.txt`) into
+`BepInEx/plugins/`. There is no build-time model download — the external host holds
+its own models locally (see below).
 
-## The AI server (kk-serve)
+## The AI server (external host)
 
-This repo ships its own numpy+torch OpenAI-compatible model server — the serving
-companion ([serve/README.md](serve/README.md) for flags and internals). It exists
-because the fine-tuned artifacts from `training/` are bf16 + LoRA (GGUF servers
-re-quantize them), and because the mod's every tick re-sends the same long console
-history — kk-serve reuses prefix KV between those turns, the single biggest latency
-lever for the mod's workload. Error wording, `finish_reason`, and stream tool-call
-shape are matched to what the mod's parsers expect.
+The mod talks to any OpenAI-compatible chat-completions endpoint via `[LLM].Endpoint`
+(see the Requirements list above). For a local box the recommended host is
+**Ollama**, which ships its own model library, an `/api/chat` + `/v1/chat/completions`
+interface, and `--jinja` chat-template support so fine-tuned bases keep their base
+template. The mod can **adopt** the running Ollama as its live endpoint instead of the
+hard-coded `[LLM].Endpoint`, and hot-swap the served model without a config edit.
 
-**Three-command bring-up on a fresh machine:**
+**Bring-up on a fresh machine:**
 
 ```bash
-python3 serve/fetch_assets.py          # recommended model -> <game root>/kk-llm-models/
-python3 serve/fetch_assets.py --bepinex   # optional: BepInEx 5.4.x binaries into the game root
-./build.sh                             # dll + serve/ next to the game; enables [Serve] in the WebUI
+ollama pull tev1:4b             # pull a model (default host picks one)
+ollama run  tev1:4b             # sanity check it runs; Ctrl-D to quit
+./build.sh                      # dll + prompt files into BepInEx/plugins/
 ```
 
-After that, everything lives in the WebUI's **AI server** tab (http://127.0.0.1:8338):
-the companion is spawned at game launch and supervised (restart / start / stop, health
-watched); the **model picker** lists the discovery scan — `auto` re-picks the best fit
-each start (a fine-tuned artifact wins when it fits, then the largest Qwen3.5-family
-sibling within free VRAM; unfit models stay listed with their reason) — and **hot-swaps**
-the live server on Apply; the **processing device** dropdown lists every card (name +
-free VRAM) and restarts the companion under the vendor-matched python
-(`PythonCuda`/`PythonRocm`/`PythonCpu` — on a mixed CPU+iGPU + ROCm + CUDA box, one
-torch build per vendor); the **python interpreter** section detects + verifies
-installed interpreters (torch-aware) or takes an absolute venv path; **model fetch**
-scans the catalog and downloads models + BepInEx in-browser with a live progress log.
+Everything lives in the WebUI's **AI server** tab (http://127.0.0.1:8338): the status
+line shows whether Ollama has been adopted as the live endpoint (and its health,
+context length, current model); **enable adoption** makes the mod use Ollama, **take
+LLM traffic** pins the mod to `[LLM].Endpoint` while Ollama stays running, and
+**refresh models** re-reads what's installed. The **installed models** picker lists
+every local model (`ollama pull` to add one) and **use this model** hot-swaps the live
+served model — it also writes `[LLM].Model`, so it takes effect on the next turn (the
+model must be running in Ollama to serve).
 
-Point `[LLM].Endpoint` at `http://127.0.0.1:8339/v1/chat/completions`, or flip
-`[Serve].AutoEndpoint` and the healthy companion takes the traffic without config edits.
-
-**Steam Proton**: two routes, both supported — mod-spawned (wine-host detection,
-absolute-path python resolution through the host shell, `detect pythons` walks `/bin/sh`)
-or the bulletproof launch-options route:
-`"/PATH/TO/KoboldKare/BepInEx/plugins/serve/proton-launch.sh" %command%` starts the
-server outside Proton with the native python; the mod adopts the answering server
-and restart/stop replace it cleanly (`/serve/shutdown`). Windows-native boxes walk
-`[Serve].PythonBin` → `python` → `py` and report every attempt.
+Adoption is opt-in and reversible: `[LLM].Endpoint` is left untouched, so pointing back
+at any other endpoint is a one-line config change. Steam Proton runs Ollama the same way
+it runs any local server (native python outside Proton, or Wine inside it); the mod
+adopts whatever answers its endpoint.
 
 ## Config (per instance)
 
@@ -453,6 +441,24 @@ benchmark plan — lives in [docs/MODELS.md](docs/MODELS.md).
 | --- | --- | --- |
 | `IdentityBot` | false | Run a second Photon client in the room under the NPC's own name so its chat renders as `KoboldName: text` to everyone. Opt-in. |
 | `IdentityAppId` | blank | Photon AppId for the identity bot. Blank = reuse the game's own AppId (recommended). |
+
+### `[NonConsent]` — flagging models that decline the adult content
+
+Not every model wants to play the NSFW / kink content: some refuse the scene, moralise about it,
+or take the request personally. The mod detects a model declining the adult content and flags it,
+so you aren't left guessing why a model that used to cooperate has suddenly gone stiff. This is a
+detection-and-pipeline feature only — the flag never changes the game, and a flagged model still
+runs. Enabled by default.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `Enabled` | true | Turn the detector on / off. `Enabled=false` skips detection entirely. |
+| `SFWOnly` | true | When a model is flagged, append an SFW-only directive to its next turn so it plays ordinary (non-sexual) roleplay instead of being pushed NSFW again. Off = the flag stays visible but the model is driven as before. |
+| `FlagThreshold` | 0.6 | Score needed before a model is flagged. One strong refusal flags immediately; weaker signals (soft moralising) accumulate to the threshold. Set `0` to flag only on strong signals. |
+
+The flag and its status are surfaced in the browser: a ⚠ badge on each flagged kobold (click to
+reset that model's flag) and the consent card in the settings tab. A model declining is not a bug
+in the mod — it's the model's own line, and the flag simply records it.
 
 ### `[General]` — global
 

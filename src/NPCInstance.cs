@@ -115,6 +115,11 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgDecisionEndpoint;
         internal ConfigEntry<string> _cfgDecisionApiKey;
         internal ConfigEntry<int> _cfgDecisionMinIntervalSec;
+        // ---- non-consent (Wave 3 POC) ----
+        internal ConfigEntry<bool> _cfgNonConsentEnabled;
+        internal ConfigEntry<bool> _cfgNonConsentSFWOnly;
+        internal ConfigEntry<float> _cfgNonConsentFlagThreshold;
+        internal ConfigEntry<float> _cfgNonConsentFlagDecaySec;
         // ---- console (bash-like REPL) mode ----
         internal ConfigEntry<bool> _cfgConsoleEnabled;
         internal ConfigEntry<int> _cfgConsoleMaxRounds;
@@ -141,6 +146,17 @@ namespace KKLLMNPC
         // reconciler retires this instance on its next pass.
         internal volatile bool BodyLost;
         private bool _bodyLostLogged;
+
+        // ---- non-consent detection (Wave 3 POC) ----
+        // Rolling score of LLM replies that refuse the mod's adult roleplay. The
+        // detector is thread-local (updated only on the LLM thread); web/UI read it
+        // under this lock. Flagged flips SFW-only steering on; a clean turn resets
+        // the accumulator so an occasional in-word "that's too far" never flags a
+        // model on its own.
+        private readonly object _consentLock = new object();
+        private double _consentWeight;              // running accumulator (0-1+)
+        private bool _nonConsentFlagged;            // crossed the flag threshold
+        private string _lastNonConsentReason;       // why it flagged last (overlay)
 
         // ---- agent registry (static: lets sibling NPCs see each other) ----
         // Bound body id → the chat name of the agent mind riding it. Maintained by
@@ -598,7 +614,7 @@ namespace KKLLMNPC
         private int _visionShot;
         private volatile bool _needImageAfterBump;
         private float _lastBigTurnTime = -99f;
-
+        private float _lookedCooldownT = -99f;
         // LLM async (ask tool).
         // (the `ask` tool was removed 2.x — its question/answer fields went with it)
 
@@ -710,6 +726,11 @@ namespace KKLLMNPC
             _cfgDecisionEndpoint = plugin._cfgDecisionEndpoint;
             _cfgDecisionApiKey = plugin._cfgDecisionApiKey;
             _cfgDecisionMinIntervalSec = plugin._cfgDecisionMinIntervalSec;
+            // ---- non-consent detection (Wave 3 POC) ----
+            _cfgNonConsentEnabled = plugin._cfgNonConsentEnabled;
+            _cfgNonConsentSFWOnly = plugin._cfgNonConsentSFWOnly;
+            _cfgNonConsentFlagThreshold = plugin._cfgNonConsentFlagThreshold;
+            _cfgNonConsentFlagDecaySec = plugin._cfgNonConsentFlagDecaySec;
         }
 
         // ------------------------------------------------------------------
@@ -1089,6 +1110,7 @@ namespace KKLLMNPC
             _lastSays.Clear();
             ResetCarrySense();
             ResetHoldSense();
+            ResetSensationSense();
             ClearRayHitCache(); // stale entity kinds/names must not survive the wipe
             BodyLost = false; _bodyLostLogged = false;
             lock (_goalLock)
@@ -1184,18 +1206,16 @@ namespace KKLLMNPC
             return string.IsNullOrWhiteSpace(e.Value) ? (string)e.DefaultValue : e.Value;
         }
 
-        // One resolution point for every LLM POST: when the kk-serve companion
-        // is managed ([Serve] AutoEndpoint on) and confirmed healthy, traffic
-        // flows to it without rewriting [LLM].Endpoint under the user. Off or
-        // unhealthy → the configured endpoint, exactly as before.
+        // One resolution point for every LLM POST: when an external host is
+        // adopted (Ollama with [Ollama].AutoEndpoint on), traffic flows to it
+        // without rewriting [LLM].Endpoint under the user. When nothing is
+        // adopted, fall through to the configured endpoint exactly as before.
         private string Endpoint()
         {
-            // Hand-off servers win over the configured endpoint when opted-in.
-            // Ollama is checked first (newer host), then kk-serve; either way an
-            // unadopted host returns null and we fall through to the configured
-            // endpoint exactly as before.
+            // Adopted hand-off servers win over the configured endpoint.
+            // Ollama is checked first (newer host); an unadopted host returns
+            // null and we fall through to the configured endpoint.
             string s = Ollama.EndpointOverride();
-            if (s == null) s = KKServe.EndpointOverride();
             return s ?? Val(_cfgEndpoint);
         }
 
@@ -1369,6 +1389,88 @@ namespace KKLLMNPC
                 sb.Append(']');
                 return sb.ToString();
             }
+        }
+
+        // ------------------------------------------------------------------
+        // Non-consent detection (Wave 3 POC) — thread-safe read of the rolling
+        // tally. Called by WebSnapshot/RichSnapshot for the overlay.
+        // ------------------------------------------------------------------
+        internal bool IsNonConsentFlagged()
+        {
+            lock (_consentLock) return _nonConsentFlagged;
+        }
+
+        internal string NonConsentStatusText()
+        {
+            lock (_consentLock)
+            {
+                if (_nonConsentFlagged)
+                    return "flagged: this LLM won't do the mod's adult roleplay ("
+                        + (_lastNonConsentReason ?? "refused") + "); SFW-only steering is on";
+                return "co-operating with the adult roleplay";
+            }
+        }
+
+        internal bool NonConsentSteerSFWOnly()
+        {
+            // The flag only takes effect if the operator enabled both detection and
+            // SFW steering; the flag is inert otherwise (still visible in the UI).
+            try { if (_cfgNonConsentEnabled == null || !_cfgNonConsentEnabled.Value) return false; } catch (Exception) { return false; }
+            try { if (_cfgNonConsentSFWOnly == null || !_cfgNonConsentSFWOnly.Value) return false; } catch (Exception) { return false; }
+            lock (_consentLock) return _nonConsentFlagged;
+        }
+
+        // Called on the LLM thread after each reply. Records the verdict, flips the
+        // flag once it crosses the configured threshold, and clears the steering on
+        // a clean pass (so a model that recovers from a soft refusal is unsteered).
+        internal void RecordConsent(string reply)
+        {
+            if (string.IsNullOrEmpty(reply)) return;
+            try
+            {
+                if (_cfgNonConsentEnabled == null || !_cfgNonConsentEnabled.Value) return;
+            }
+            catch (Exception) { return; }
+            try
+            {
+                var verdict = ConsentDetector.Analyze(reply);
+                double threshold = 0.6;
+                try { threshold = (_cfgNonConsentFlagThreshold != null && _cfgNonConsentFlagThreshold.Value > 0) ? _cfgNonConsentFlagThreshold.Value : 0.6; } catch (Exception) { }
+                bool nowFlagged;
+                bool wasFlagged = _nonConsentFlagged;
+                double next;
+                lock (_consentLock)
+                {
+                    nowFlagged = ConsentDetector.MaybeFlag(verdict, _consentWeight, threshold, out next);
+                    _consentWeight = next;
+                    if (!verdict.CleanPass) { _lastNonConsentReason = verdict.Reason; }
+                    else _lastNonConsentReason = "";
+                    // Once flagged, stays flagged (a clean turn resets the counter but
+                    // does not unflag — flags are deliberate, not a single slip).
+                    if (nowFlagged) _nonConsentFlagged = true;
+                }
+                if (nowFlagged && !wasFlagged)
+                {
+                    try { Logger.LogWarning("[" + MyName() + "] non-consent flagged: " + verdict + " — "
+                        + (NonConsentSteerSFWOnly() ? "SFW-only steering ENABLED for this model" : "SFW steering off — flag shown in WebUI only")); }
+                    catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // Reset the non-consent flag (operator action from the WebUI).
+        internal void ResetConsentFlag()
+        {
+            lock (_consentLock) { _nonConsentFlagged = false; _consentWeight = 0; _lastNonConsentReason = ""; }
+        }
+
+        // The SFW-only directive appended to the prompt when a flagged model is
+        // steered. Kept short and framed in-world as a scene direction so the model
+        // reads it as an instruction, not a refusal to talk to the player.
+        internal string NonConsentSfwDirective()
+        {
+            return "\n[DIRECTIVE — this scene is now SFW-ONLY] Play the current moment as non-romantic, non-sexual roleplay: dialogue, exploration, tension, or plain business. Do not initiate or describe sexual, violent, or kink content; if the player steers that way, respond in character by deflecting and changing the subject. Continue the scene plainly.";
         }
 
         // Cross-session wall-clock age ([Memory] FactMaxAgeHours, 0 = off): facts

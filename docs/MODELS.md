@@ -41,18 +41,17 @@ gear → Advanced Configuration sidebar → Prompt Template → "Jinja Template"
 **Keep fine-tuned bases on their embedded templates** — training serialized episodes
 with the base's own template at the token-id level; a serve-time override de-syncs it.
 
-## Serving the fine-tune (serve/ — kk-serve)
+## Serving the fine-tune
 
-The Qwen-track fine-tune (`training/`) is a bf16 HF artifact + LoRA adapter. LM
-Studio/llama.cpp want GGUF — a re-quantized, adapter-merged copy of the thing the
-training run validated. `serve/kk_serve.py` is the repo's numpy+torch alternative:
-it loads the artifact as trained, honors the same request shapes as LM Studio
-(thinking-off kwarg, NativeTools `tool_calls`, image-part ladder), and reuses
-prefix KV between the mod's long repeated console turns — the dominant latency
-lever for the 3-s/tick conversation cadence. `Model` matching is loose (`/v1/models`
-reports the real name), second-GPU and LAN serving work like any other endpoint.
-See [serve/README.md](../serve/README.md); `serve/tests/` carries the contract
-suite (45 tests, no GPU needed for the parser/pipeline halves).
+The Qwen-track fine-tune (`training/`) is a bf16 HF artifact + LoRA adapter. A
+GGUF server (llama.cpp, LM Studio) wants a re-quantized, adapter-merged copy of
+the thing the training run validated; Ollama loads the artifact as trained. Either
+way, honor the same request shapes as any other endpoint — thinking-off kwarg,
+NativeTools `tool_calls`, image-part ladder — and reuse prefix KV between the mod's
+long repeated console turns, which is the biggest latency lever for its workload.
+`Model` matching is loose (`/v1/models` reports the real name), second-GPU and LAN
+serving work like any other endpoint. [The AI server section](../README#the-ai-server-external-host)
+covers the recommended local host.
 
 ## Ranking (field status, Oct 2026)
 

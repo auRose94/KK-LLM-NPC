@@ -36,48 +36,35 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 |-----|---------|-------|---------|
 | `ParallelCalls` | `2` | 0–8 | Max simultaneous LLM HTTP calls the whole mod makes toward the endpoint. Local llama.cpp/KoboldCpp/solo-GPU LM Studio servers answer serially — with several NPCs posting at once, burst calls starved into `WebException(Timeout)` warnings (the dominant log noise). Extra calls now QUEUE inside the mod (fail-open after two minutes). `0` = unlimited; raise it for multi-slot servers. |
 
-### kk-serve — the repo's own numpy+torch serving companion
+### External host (Ollama)
 
-This repo ships `serve/` ([serve/README.md](../serve/README.md)): a small OpenAI-compatible
-server that runs the fine-tuned artifacts from `training/` with plain torch +
-transformers and reuses prefix KV across the mod's long repeated console turns.
-Every `[LLM]` switch behaves the same as with LM Studio/llama.cpp: `Thinking off`
-is honored via `chat_template_kwargs {"enable_thinking": false}` (reasoning that
-still arrives is routed to `reasoning_content` and stripped before JSON parsing),
-`NativeTools` gets real `tool_calls` back (arguments arrive as a JSON string, and
-each complete call lands in one stream delta — the shape the console path needs),
-and image parts to a text-only model return the 400 that trips the mod's `image`
-ladder so vision degrades gracefully. Config is just:
+The mod talks to any OpenAI-compatible endpoint via `[LLM].Endpoint` (above). For a local
+box, **Ollama** is the recommended host: it ships its own model library and an OpenAI-compatible
+`/api/chat` interface, and — because the game can't launch a GPU server under Steam Proton —
+the mod can **adopt** an already-running Ollama as its live endpoint instead of the
+hard-coded `[LLM].Endpoint`, and hot-swap the served model without touching config. Enable it
+with the toggle in the WebUI's **AI server** tab, or set `[Ollama].Enabled` here:
 
 ```ini
-[LLM]
-Endpoint = http://127.0.0.1:8339/v1/chat/completions
-Model    = whatever           ; echoed; /v1/models reports the real name
+[Ollama]
+Enabled      = false           ; adopt an externally-running Ollama as the live endpoint
+Endpoint     = http://127.0.0.1:11434
+AutoEndpoint = false           ; route LLM + vision-fallback POSTs to the adopted Ollama
+SelectedModel=                ; what 'Use this model' picked; also writes [LLM].Model
+PollIntervalSec = 10
 ```
-
-### `[Serve]` — managed kk-serve launcher (WebUI 'AI server' tab)
-
-When enabled, the mod launches `serve/kk_serve.py` itself at game launch and manages it
-(spawn with backoff, health-watch every ~2s, WebUI restart/stop/start, hot-swap models,
-companion log tail). The same panel reports the discovery scan and applies model
-selection: `auto` loads the best fit every start, a pinned entry holds across restarts
-and applies live via the server's hot-swap.
 
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
-| `Enabled` | `false` | bool | Launch the companion on game start. Off keeps everything manual. |
-| `PythonBin` | `python3` | — | Interpreter to run kk-serve with. A venv path is best (`/srv/kk/serve-venv/bin/python`) — its torch is the serve requirements' install. |
-| `ServeDir` | *(empty)* | — | Folder holding `kk_serve.py` (or the file path itself). Empty = auto-search plugin dir / working dir + their `serve/` subfolders — **`build.sh` ships `serve/` to `BepInEx/plugins/serve/`, so this stays empty on managed installs**; only needed for a manual python-only deploy. |
-| `Port` | `8339` | 1024–65535 | Companion bind port (loopback; pairs with the WebUI's 8338). |
-| `Device` | `auto` | — | Which processor kk-serve loads the model on: `auto` (first torch device), `cpu`, or a specific id from its device list (`cuda:0`…). The WebUI AI-server tab lists every device the companion's torch build can see with live free VRAM; applying a device restarts the companion under the right python (below). On a **mixed-vendor box** remember: a ROCm-built torch only sees the AMD cards (and the iGPU), a CUDA-built one only the NVIDIA. |
-| `PythonCpu` | *(empty)* | — | Python binary for `Device=cpu`. Empty = `PythonBin`. |
-| `PythonCuda` | *(empty)* | — | Python binary with a **CUDA-built torch** — needed for the NVIDIA card. Empty = `PythonBin`. |
-| `PythonRocm` | *(empty)* | — | Python binary with a **ROCm-built torch** — needed for the AMD card(s) + the iGPU. Empty = `PythonBin`. |
-| `AutoEndpoint` | `false` | bool | When the companion is healthy, LLM + vision-fallback POSTs use it automatically (`http://127.0.0.1:<Port>/v1/chat/completions`) regardless of `[LLM].Endpoint` — turn-key after a game restart, and the configured endpoint is untouched/unrestored. Off = your configured endpoint is always the truth. |
-| `SelectedModel` | `auto` | — | What the companion serves: `auto` = scan + best fit (a training/ fine-tuned artifact wins outright; VRAM fit gates everything; smaller same-family models preferred for turn cadence). A discovered name or full path pins it; Apply hot-swaps the live server. |
-| `ModelLocations` | *(empty)* | — | Extra scan roots, `;`- or newline-separated. One level of HF hub-cache layout (`models--org--name/snapshots/<hash>`) is understood. `<game root>/kk-llm-models/` is ALWAYS scanned implicitly — that's where `serve/fetch_assets.py` (and `build.sh` for you) lands a serving model. |
-| `VramLimitGb` | `0` | 0–256 | Cap the free-VRAM budget used in best-fit scoring (0 = trust the driver's free VRAM). |
-| `ExtraArgs` | *(empty)* | — | Extra `kk_serve.py` command line appended verbatim (`--kv-reuse off`, `--dtype float16`, `--chat-template …`). |
+| `Enabled` | `false` | bool | Adopt an externally-running Ollama. Off = don't touch Ollama; use `[LLM].Endpoint` like any other server. |
+| `Endpoint` | `http://127.0.0.1:11434` | — | Ollama base URL (host:port). A full `/v1/chat/completions` suffix is accepted and stripped. The WebUI tab installs models here with `ollama pull <model>` then `ollama run <model>`. |
+| `AutoEndpoint` | `false` | bool | When an Ollama is adopted + healthy, route LLM + vision-fallback POSTs to it regardless of `[LLM].Endpoint` (hand-off with no config editing after a restart). Off = the configured endpoint stays the truth. |
+| `PollIntervalSec` | `10` | — | How often the watcher probes the Ollama `/api/tags` + `/api/show`. |
+| `SelectedModel` | *(empty)* | — | The Ollama model the WebUI 'Use this model' picked. Writing this also writes `[LLM].Model` so it takes effect on the next chat POST. Empty = use the model Ollama is currently serving. |
+
+The **installed models** picker lists every local model (`ollama pull` to add one); **use this model**
+hot-swaps the served model. Adoption is opt-in and reversible — `[LLM].Endpoint` is left untouched,
+so pointing back at any other endpoint is a one-line config change.
 
 ## [Vision] — Background Vision Pass
 

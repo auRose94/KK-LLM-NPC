@@ -211,10 +211,6 @@ namespace KKLLMNPC
                             body = Encoding.UTF8.GetBytes(DoInstance(payload));
                             mime = "application/json; charset=utf-8";
                             break;
-                        case "/api/serve":
-                            body = Encoding.UTF8.GetBytes(KKServe.HandlePost(payload));
-                            mime = "application/json; charset=utf-8";
-                            break;
                         case "/api/ollama":
                             body = Encoding.UTF8.GetBytes(Ollama.HandlePost(payload));
                             mime = "application/json; charset=utf-8";
@@ -251,11 +247,6 @@ namespace KKLLMNPC
                     body = Encoding.UTF8.GetBytes(MemoriesListJson());
                     mime = "application/json; charset=utf-8";
                 }
-                else if (path == "/api/serve")
-                {
-                    body = Encoding.UTF8.GetBytes(KKServe.SnapshotJson());
-                    mime = "application/json; charset=utf-8";
-                }
                 else if (path == "/api/ollama")
                 {
                     body = Encoding.UTF8.GetBytes(Ollama.SnapshotJson());
@@ -268,7 +259,7 @@ namespace KKLLMNPC
                 }
                 else
                 {
-                    body = Encoding.UTF8.GetBytes("not found — / | /api/state | /api/instances | /api/config | /api/memories | /api/reports | /api/serve");
+                    body = Encoding.UTF8.GetBytes("not found — / | /api/state | /api/instances | /api/config | /api/memories | /api/reports | /api/ollama");
                     mime = "text/plain; charset=utf-8";
                     status = 404;
                 }
@@ -389,7 +380,7 @@ namespace KKLLMNPC
             var order = new List<string> {
                 "LLM", "VisionModel", "Vision", "Senses", "Movement",
                 "General", "Autonomy", "Needs", "Memory", "Multiplayer",
-                "Farming", "Console", "Web", "DataRecord", "LittleTreats", "Debug", "Ollama", "Serve"
+                "Farming", "Console", "Web", "DataRecord", "LittleTreats", "Debug", "Ollama"
             };
             var seen = new HashSet<string>(StringComparer.Ordinal);
             rows.Sort((x, y) =>
@@ -568,6 +559,44 @@ namespace KKLLMNPC
                             try { npc.ForceRestartThread(); } catch (Exception) { }
                         });
                         return Ok("starting " + name);
+                    }
+                    case "vore_target":
+                    case "vore_mode":
+                    {
+                        string field = action == "vore_target" ? "target" : "mode";
+                        string value = d.ContainsKey(field) ? Convert.ToString(d[field]) : "";
+                        if (string.IsNullOrWhiteSpace(value)) return Fail("empty " + field);
+                        string clean = value.Trim().ToLowerInvariant().Trim('"', '\'');
+                        var npc = target;
+                        var args = new Dictionary<string, object> { [field] = clean };
+                        // PersistVorePreferences -> SaveBodyMemory touches game state:
+                        // marshal to the main thread.
+                        Plugin.RunOnMainThreadAsync(() =>
+                        {
+                            try
+                            {
+                                object result;
+                                if (action == "vore_target")
+                                {
+                                    if (npc.VoreTargetOverride == clean) { Ok(action + " already set for " + name + ": " + npc.VoreTargetOverride); return; }
+                                    result = npc.ToolVoreTarget(new JsonObj(args));
+                                }
+                                else
+                                {
+                                    if (npc.VoreModeOverride == clean) { Ok(action + " already set for " + name + ": " + npc.VoreModeOverride); return; }
+                                    result = npc.ToolVoreMode(new JsonObj(args));
+                                }
+                                try { Ok(Json.Write(result)); } catch (Exception) { Ok(action + " done"); }
+                            }
+                            catch (Exception e) { Ok(action + " failed: " + e.Message); }
+                        });
+                        return Ok("queued " + action + " for " + name);
+                    }
+                    case "reset_consent":
+                    {
+                        var npc = target;
+                        npc.ResetConsentFlag();
+                        return Ok("consent flag cleared for " + name);
                     }
                     default:
                         return Fail("unknown instance action '" + action + "'");
@@ -773,6 +802,10 @@ h2{font-size:12px;color:#9fb4d0;margin:16px 0 5px;text-transform:uppercase;lette
 .box{background:#1b1e25;border:1px solid #2a303b;border-radius:8px;padding:9px 12px;margin:8px 0;white-space:pre-wrap;word-break:break-word}
 .err{color:#e88} .warn{color:#da6} .dim{color:#7a8290} .ok{color:#7d7}
 .fact{display:inline-block;background:#232a3a;color:#9fc3e8;padding:1px 6px;margin:2px;border-radius:9px}
+.vorebtns{display:flex;flex-wrap:wrap;gap:3px;margin:3px 0}
+.vorebtn{background:#2a2230;border:1px solid #4a3a55;border-radius:5px;color:#d9c9e6;padding:2px 8px;cursor:pointer;font:11px monospace}
+.vorebtn:hover{background:#3a2f45;border-color:#5a4a66}
+.vorebtn.on{background:#4a3a55;border-color:#8a6ab5;color:#fff;font-weight:bold}
 .chip{font-weight:bold;color:#e8c17a}
 table{border-collapse:collapse;width:100%}td{padding:2px 8px;color:#9fb4d0;vertical-align:top}
 input,select{background:#10131a;color:#cdd3de;border:1px solid #2a303b;border-radius:5px;padding:3px 7px;font:12px monospace;width:200px}
@@ -812,11 +845,8 @@ details.cfgsec[open]{padding-bottom:2px}
 <main>
   <div id='spectate'></div>
   <section id='view_kobolds' class=view><div id='inst'></div></section>
-  <section id='view_settings' class=view style=display:none><div id='settings'></div><div id='memslot'></div><div id='ops'></div></section>
-  <section id='view_serve' class=view style=display:none><div id='serve'></div>
-    <h2>companion log (kk_serve.py stdout)</h2><div id='servelog' class='box dim' style='max-height:30vh;overflow-y:auto'></div>
-    <h2>fetch log (fetch_assets.py)</h2><div id='fetchlog' class='box dim' style='max-height:30vh;overflow-y:auto'></div>
-  </section>
+  <section id='view_settings' class=view style=display:none><div id='settings'></div><div id='memslot'></div><div id='ops'></div><div id='consent'></div><div id='vore'></div></section>
+  <section id='view_serve' class=view style=display:none><div id='serve'></div></section>
   <section id='view_logs' class=view style=display:none>
     <h2>mod log (tail)</h2><div id='log' class='box dim' style='max-height:55vh;overflow-y:auto'></div>
     <h2>AI reports</h2><div id='reports' class='box dim' style='max-height:40vh;overflow-y:auto'></div>
@@ -909,14 +939,53 @@ function togglePause(){ PAUSED=!PAUSED; document.getElementById('pausebtn').text
 // always live; picking one from another view jumps to the kobolds view.
 function renderChips(list){
   var th='';
+  __kkFlagged=[];
   for(var i=0;i<list.length;i++){var ins=list[i];
+    var nc=ins.non_consent||{}; if(nc.flagged)__kkFlagged.push(ins.name||('#'+i));
     var mine=PrefsWord((ins.vore_target||''),(ins.vore_mode||''));
     th+='<div class=\'agt'+(i==sel?' sel':'')+'\' onclick=sel='+i+';setMode(&quot;kobolds&quot;)><b>'+esc(ins.name||('#'+i))+'</b>'
       +(mine?('<small>vore: '+esc(mine)+'</small>'):'')+'</div>';}
+  var warn='';
+  if(typeof __kkFlagged!=='undefined' && __kkFlagged.length){
+    warn+='<div class=warn style=padding:6px 2px;white-space:normal>⚠ non-consent flag on: '+esc(__kkFlagged.join(', '))+' — jump to one of them to reset. See the settings Consent card.</div>';
+  }
   if(!list.length)th='<div class=dim style=padding:6px 2px>(no kobolds connected)</div>';
-  renderBox('tabs',th,false);
+  renderBox('tabs',th+warn,false);
 }
 function PrefsWord(t,m){return (t||m)?((t||'global')+' / '+(m||'global')):''}
+// Per-agent vore controls: two rows of discrete buttons. Target buttons cycle
+// the agent's own entry hole (vore_target posts to /api/instance); Fate buttons
+// its fate mode (vore_mode). Each button shows the agent's CURRENT pick; the
+// button matching the current value is highlighted. 'off'/'global' clears the
+// override back to the operator's setting.
+function voreButtons(n){
+  var nm=n.name||''; var out='';
+  var targets=['mouth','anal','pussy','dick','nipple','off'];
+  var curT=(n.vore_target||'').toLowerCase();
+  out+='<div class=dim style=font-size:11px;margin:2px 0 1px>MY TARGET</div>';
+  out+='<div class=vorebtns>';
+  targets.forEach(function(t){
+    var on=(t===curT);
+    var cls=on?'vorebtn on':'vorebtn';
+    var label=t.toUpperCase();
+    if(t==='off')label='GLOBAL';
+    out+='<button class='+cls+' onclick=post(&quot;/api/instance&quot;,{name:&quot;'+esc(nm)+'&quot;,action:&quot;vore_target&quot;,value:&quot;'+t+'&quot;})>'+esc(label)+'</button>';
+  });
+  out+='</div>';
+  var modes=['egg','bellyegg','grow','destroy','off'];
+  var curM=(n.vore_mode||'').toLowerCase();
+  out+='<div class=dim style=font-size:11px;margin:2px 0 1px>MY FATE</div>';
+  out+='<div class=vorebtns>';
+  modes.forEach(function(m){
+    var on=(m===curM);
+    var cls=on?'vorebtn on':'vorebtn';
+    var label=m.toUpperCase();
+    if(m==='off')label='GLOBAL';
+    out+='<button class='+cls+' onclick=post(&quot;/api/instance&quot;,{name:&quot;'+esc(nm)+'&quot;,action:&quot;vore_mode&quot;,value:&quot;'+m+'&quot;})>'+esc(label)+'</button>';
+  });
+  out+='</div>';
+  return out;
+}
 function renderKobolds(d){
   if(sel>=insts.length)sel=0;
   var n=insts[sel]||{};
@@ -924,7 +993,11 @@ function renderKobolds(d){
   h+=box('goal',n.goal==null?'(none)':(n.goal+(n.goal_for!=null?(' — for '+n.goal_for+' ticks'):'')));
   var vp='';
   if(n.vore_target||n.vore_mode)vp=' <span class=warn>my vore: '+esc((n.vore_target||'global')+' / '+(n.vore_mode||'global'))+'</span>';
-  h+='<div class=box><span class=chip>identity</span>'+vp+'<br><span class=dim>operator globals: '+esc((d&&d.vore)?((d.vore.destination||'OFF')+' / '+(d.vore.effect||'?')):'?')+' — yours override them for the swallows you start</span></div>';
+  var nc=n.non_consent||{};
+  var consentBadge = nc.flagged?' <span class=warn onclick=if(confirm(&quot;reset consent flag for '+esc(n.name)+'?&quot;))post(&quot;/api/instance&quot;,{name:&quot;'+esc(n.name)+'&quot;,action:&quot;reset_consent&quot;})>⚠ non-consent (reset)</span>':'';
+  h+='<div class=box><span class=chip>identity</span>'+vp+consentBadge+'<br><span class=dim>operator globals: '+esc((d&&d.vore)?((d.vore.destination||'OFF')+' / '+(d.vore.effect||'?')):'?')+' — yours override them for the swallows you start</span></div>';
+  if(n.vore_target||n.vore_mode){h+='<div class=box>'+voreButtons(n)+'</div>';
+  }else{h+='<div class=box><div class=dim style=font-size:11px>Pick a target/fate above, or say nothing — the agent can set its own with the vore_target / vore_mode tools.</div></div>';}
   h+='<details class=sec open><summary>facts ('+(n.facts||[]).length+')</summary><div class=box>'+esc((n.facts||[]).join('\n'))+'</div></details>';
   h+='<details class=sec><summary>history</summary><div class=box>'+esc((n.history||[]).join('\n'))+'</div></details>';
   h+='<details class=sec><summary>terminal (last turns)</summary><div class=box>'+esc((n.terminal||[]).join('\n'))+'</div></details>';
@@ -1017,7 +1090,50 @@ function buildSettingsUi(){
     +'<input id=cfgsearch placeholder=\'filter settings…\' style=width:260px oninput=cfgFilter=this.value.toLowerCase();cfgRows()>'
     +'<div id=cfgrows></div>';
   renderBox('settings',h,false);
+  renderVoreCard();
+  renderConsentCard();
   cfgRows();
+}
+// Operator Vore controls: the master master-switch, plus destination (F7) and
+// fate (F8) pickers. These post the BepInEx enum member name (Mouth/Anal/…) to
+// the same config field the F7/F8 hotkeys edit, so the settings tab and the
+// game stay in lock-step. A button is highlighted when it matches the live
+// value; the label is uppercase for readability but the posted value is the
+// PascalCase member name BepInEx's enum parser expects.
+function renderVoreCard(){
+  var v=_liveVore||{}; var dst=(v.destination||'OFF').toUpperCase(); var eff=(v.effect||'').toUpperCase(); var on=!!v.enabled;
+  var h='<h2 class=chip style=font-size:14px>Master</h2><div class=box>'
+    +(on?'<span class=warn>vore ARMED</span>':'<span class=dim>vore OFF</span>')
+    +' &nbsp;Destination: '+esc(dst)+' &nbsp;Fate: '+esc(eff)+'</div>';
+  h+='<h2 class=chip style=font-size:14px>Destination</h2><div class=box>';
+  // [label, BepInEx enum member name] — display label is uppercase, posted
+  // value is the exact PascalCase member name the parser accepts.
+  [['OFF','Off'],['MOUTH','Mouth'],['ANAL','Anal'],['PUSSY','Pussy'],['DICK','Dick'],['NIPPLE','Nipple']].forEach(function(b){
+    var lbl=b[0], member=b[1];
+    h+='<button class='+((dst===lbl)?'vorebtn on':'vorebtn')+' onclick=post(&quot;/api/config&quot;,{id:&quot;LittleTreats.SwallowDestination&quot;,value:&quot;'+member+'&quot;})>'+esc(lbl)+'</button> ';
+  });
+  h+='</div><h2 class=chip style=font-size:14px>Fate</h2><div class=box>';
+  [['EGG','Egg'],['BELLYEGG','BellyEgg'],['GROW','Grow'],['DESTROY','Destroy']].forEach(function(b){
+    var lbl=b[0], member=b[1];
+    h+='<button class='+((eff===lbl)?'vorebtn on':'vorebtn')+' onclick=post(&quot;/api/config&quot;,{id:&quot;LittleTreats.SwallowEffect&quot;,value:&quot;'+member+'&quot;})>'+esc(lbl)+'</button> ';
+  });
+  h+='</div>';
+  renderBox('vore',h,false);
+}
+// Standing non-consent info: what the detection does, what a flag means, and how
+// to reset it. Not per-instance — it explains the feature in the card itself.
+function renderConsentCard(){
+  var v=_liveNonConsent||{}; var flagged=!!v.flagged; var steer=!!v.steer;
+  var h='<h2 class=chip style=font-size:14px>Consent</h2><div class=box>'
+    +'A non-consent flag means an LLM refused the mod&apos;s adult content — it took a stance on the kink '
+    +'(refused the scene, moralised, felt insulted, said it won&apos;t consent). Such a model can play ordinary KoboldKare fine; '
+    +'it just won&apos;t drive sex or kink. Flagged models here:<br>';
+  if(flagged) h+='  <span class=warn>&#9888; '+esc((v.by||'a model'))+(v.reason?' — '+esc(v.reason):'')+'</span><br>';
+  else h+='  <span class=ok>none flagged</span><br>';
+  h+='SFW steering: '+(steer?'<span class=warn>ON — flagged models play non-sexual scenes</span>':'<span class=dim>off</span>')
+    +'. Flagged models can be reset per-instance from the <b>kobolds</b> panel (the ⚠ badge). '
+    +'Tune this in the settings <b>NonConsent</b> section below.</div>';
+  renderBox('consent',h,false);
 }
 function renderOps(){
   var h='<h2>ops (destructive)</h2><div class=box>';
@@ -1039,6 +1155,8 @@ function render(d){
   renderMeta(d);
   insts=d.instances||[];if(sel>=insts.length)sel=0;
   renderChips(insts);
+  window._liveVore=d.vore||{};
+  window._liveNonConsent=d.non_consent||{};
   renderBox('spectate',d.spectate&&d.spectate!=='none'?box('spectate',d.spectate):'',false);
   if(mode==='settings'){ if(!window._settingsBuilt) ensureSettings(); }
   else{window._settingsBuilt=false;clearBox('settings');clearBox('ops');clearBox('memslot');if(mode==='kobolds')renderKobolds(d);}
@@ -1056,27 +1174,13 @@ function poll(){
     try{render(JSON.parse(x.responseText))}catch(e){setMeta('<span class=err>bad state json</span>')}};
   x.onerror=function(){setMeta('<span class=err>server unreachable</span>')};x.send();
   if(mode==='kobolds' && pollSeq%2===1) rich(insts[sel]?insts[sel].name:''); // stats every 2nd poll (~6s)
-  if(mode==='serve'){ serveFetch(); ollamaFetch(); }
+  if(mode==='serve'){ ollamaFetch(); }
 }
-// ---- AI server (kk-serve companion) -------------------------------------
-// Status + controls + model picker + its own log, refreshed only while the
-// 'AI server' tab is open (the manager caches scans server-side; this fetch
-// is one cheap JSON that already carries everything).
-var serveData=null;
-function serveFetch(){
-  var x=new XMLHttpRequest();x.open('GET','/api/serve');
-  x.onload=function(){try{serveData=JSON.parse(x.responseText)}catch(e){serveData=null};renderServe()};x.send();
-}
-function serveAct(action,model){
-  var pl={action:action};if(model!==undefined)pl.model=model;
-  post('/api/serve',pl,function(r){ if(r.ok){setTimeout(serveFetch,300);} });
-}
-function serveActDev(device){
-  post('/api/serve',{action:'select_device',device:device},function(r){ if(r.ok)setTimeout(serveFetch,300); });
-}
-function serveToggle(id,newval){
-  post('/api/config',{id:id,value:newval},function(r){ if(r.ok)setTimeout(serveFetch,300); });
-}
+// ---- AI server (external host, adopted via Ollama) ----------------------
+// Status + controls + model picker, refreshed only while the tab is open
+// (the Ollama manager caches scans server-side; this fetch is one cheap JSON
+// that already carries everything). Ollama is the only external host now — the
+// old kk-serve python companion was removed.
 var ollamaData=null;
 function ollamaFetch(){
   var x=new XMLHttpRequest();x.open('GET','/api/ollama');
@@ -1126,144 +1230,6 @@ function renderOllama(){
   }
   h+='</select> <button onclick=ollamaAct(&quot;select&quot;,document.getElementById(&quot;ollsel&quot;).value)>use this model</button>';
   h+='<div class=dim style=font-size:11px>writes [LLM].Model too — takes effect on the next chat turn; model must be running in Ollama to serve</div></div>';
-  renderBox('serve',h,false);
-}
-function renderServe(){
-  if(mode!=='serve')return;
-  var d=serveData||{};
-  var h='<h2>AI server (kk-serve companion) <button onclick=serveFetch()>↻ refresh</button></h2>';
-  var st=d.status||'off';
-  var cls=st==='running'?'ok':(st==='off'||st==='stopped')?'dim':'warn';
-  var health=d.health&&(typeof d.health==='object')?d.health:{};
-  var line='<b class='+cls+'>'+esc(st)+'</b>'+(d.healthy?' <span class=ok>healthy</span>':'');
-  if(d.host&&d.host!=='windows')line+=' · <span class=warn>host: '+(d.host==='wine'?'steam proton/wine':esc(d.host))+'</span>';
-  if(d.adopted)line+=' · <span class=warn>adopted external server</span>';
-  if(d.pid)line+=' · pid '+esc(d.pid);
-  line+=' · port '+esc(d.port)+' · script '+esc(d.script||'(not found)');
-  h+='<div class=box>'+line;
-  var cur=health.current||health.model||'?'; var spec=health.current_spec;
-  h+='<br><b>current model:</b> '+esc(cur)+(spec&&spec.adapter?(' <span class=warn>+ adapter '+esc(spec.adapter.split('/').pop())+'</span>'):'');
-  if(health.context)h+=' · ctx '+esc(health.context)+' · kv_reuse '+(health.kv_reuse?'on':'off');
-  if(health.load_error)h+='<br><span class=err>load error: '+esc(health.load_error)+'</span>';
-  if(d.lastError)h+='<br><span class=err>'+esc(d.lastError)+'</span>';
-  if(d.note)h+='<br><span class=dim>'+esc(d.note)+'</span>';
-  h+='</div>';
-  // controls
-  h+='<div class=box>'
-    +'<button onclick=serveAct(&quot;restart&quot;)>restart</button> '
-    +'<button onclick=serveAct(&quot;start&quot;)>start</button> '
-    +'<button class=danger onclick=serveAct(&quot;stop&quot;)>stop</button> '
-    +'<button onclick=serveAct(&quot;rescan&quot;)>rescan models</button> '
-    +'<button onclick=serveToggle(&quot;Serve.Enabled&quot;,'+(d.enabled?'false':true)+')>'+(d.enabled?'disable launcher':'enable launcher')+'</button> '
-    +'<button onclick=serveToggle(&quot;Serve.AutoEndpoint&quot;,'+(d.autoEndpoint?'false':true)+')>'+((d.autoEndpoint?'stop':'take')+' LLM traffic')+'</button>'
-    +' <span class=dim>(traffic: '+(d.autoEndpoint?'kk-serve':'[LLM].Endpoint as configured')+')</span></div>';
-  // model selection: auto vs pinned, discovered list w/ fit + recommendation
-  var models=d.models&&(typeof d.models==='object')?d.models:{};
-  var list=models.models||[]; var rec=models.recommended;
-  h+='<h2>model</h2><div class=box>';
-  h+='<select id=srvsel style=width:420px>';
-  h+='<option value=\'auto\''+(d.selected==='auto'?' selected':'')+'>'+'auto — best fitting'+(rec?(' — '+esc(rec.split('/').pop())):' (no scan yet)')+'</option>';
-  for(var i=0;i<list.length;i++){var m=list[i];
-    var label=m.name+' — '+m.kind+(m.vram_gb?(' · '+m.vram_gb+' GB'):'')+(m.ctx?(' · ctx '+m.ctx):'')+(!m.fit?' · ✗ too large for free VRAM':'')+(m.why?(' · '+m.why):'');
-    h+='<option value=\''+esc(m.path)+'\''+(m.fit?'':' disabled')+(d.selected===m.path?' selected':'')+'>'+esc(label)+'</option>';
-  }
-  h+='</select> <button onclick=serveAct(&quot;select&quot;,document.getElementById(&quot;srvsel&quot;).value)>apply</button>';
-  if(rec)h+='<div class=dim>auto would load: '+esc(rec.split('/').pop())+'</div>';
-  h+='<div class=dim style=font-size:11px>apply hot-swaps the live server (restart fallback on failure); selection persists in [Serve].SelectedModel</div></div>';
-  // processing device: what the LIVE torch build sees + cpu; a device pick
-  // restarts the companion under its vendor's python
-  var devs=d.devices&&(typeof d.devices==='object')?d.devices:{};
-  var dl=devs.devices||[];
-  h+='<h2>processing device</h2><div class=box><select id=srvdev style=width:420px>';
-  h+='<option value=\'auto\''+(d.device==='auto'?' selected':'')+'>auto</option>';
-  h+='<option value=\'cpu\''+(d.device==='cpu'?' selected':'')+'>'+esc('cpu (any python)')+'</option>';
-  for(var i=0;i<dl.length;i++){var dv=dl[i];
-    if(dv.id==='cpu')continue;
-    var tag=dv.id+' — '+esc(dv.name||'')+(dv.backend?' ['+dv.backend+']':'')+(dv.free_gb!=null?(' · '+dv.free_gb+' GB free'):'');
-    h+='<option value=\''+esc(dv.id)+'\''+(d.device===dv.id?' selected':'')+'>'+esc(tag)+'</option>';
-  }
-  h+='</select> <button onclick=serveActDev(document.getElementById(&quot;srvdev&quot;).value)>apply</button>'
-    +'<div class=dim style=font-size:11px>a mixed-vendor box needs a per-vendor python: set [Serve].PythonCuda / PythonRocm / PythonCpu (settings tab); a device restarts the companion on apply</div></div>';
-  // python interpreter: detection + picker + manual path + per-device map
-  var pys=d.pythons&&(typeof d.pythons==='object')?d.pythons:null;
-  var pscan=d.pyScan||{};
-  var pm=d.pythonMap||{};
-  h+='<h2>python interpreter</h2><div class=box>';
-  h+='<div><b class=chip>main (PythonBin):</b> '+esc(pm.bin||'?')+' <input id=pybin style=width:300px value=\''+esc(pm.bin||'')+'\'>'
-    +'<button onclick=post(&quot;/api/serve&quot;,{action:&quot;select_python&quot;,path:document.getElementById(&quot;pybin&quot;).value})>set + restart</button>';
-  h+='<div class=dim style=font-size:11px>absolute path wins outright (venv python.exe); an empty/absolute-less value walks python→py on Windows</div></div>';
-  h+='<div style=margin:4px 0><button onclick=serveAct(&quot;find_pythons&quot;)>detect pythons</button>'+
-      '';
-  var pyscanState=(pscan.state&&pscan.state!=='idle')?(' <b>'+esc(pscan.state)+'</b> '+esc(pscan.note||'')):'';
-  if(pys){
-    var pl=pys.pythons||[];
-    h+='<div class=dim>detected ('+pl.length+')'+pyscanState+'</div><select id=pypick style=width:460px>';
-    for(var i=0;i<pl.length;i++){var pp=pl[i];
-      var tag=pp.path+' — '+esc(pp.version||'?')+(pp.torch?(' · torch '+esc(pp.torch)):' · no torch');
-      h+='<option value=\''+esc(pp.path)+'\'>'+esc(tag)+'</option>';
-    }
-    h+='</select> <button onclick=post(&quot;/api/serve&quot;,{action:&quot;select_python&quot;,path:document.getElementById(&quot;pypick&quot;).value})>use this</button>';
-    if(pys.note)h+='<div class=warn>'+esc(pys.note)+'</div>';
-  } else if(pscan.state==='detecting'){
-    h+='<div class=dim>scanning…'+pyscanState+'</div>';
-  }
-  // per-device pythons (vendor match: ROCm-built torch sees the AMD cards only,
-  // CUDA-built only the NVIDIA)
-  h+='<table style=margin-top:6px>';
-  h+='<tr><td class=dim>PythonCpu</td><td><input id=pycpu style=width:300px value=\''+esc(pm.cpu||'')+'\'></td></tr>';
-  h+='<tr><td class=dim>PythonCuda</td><td><input id=pycuda style=width:300px value=\''+esc(pm.cuda||'')+'\'></td></tr>';
-  h+='<tr><td class=dim>PythonRocm</td><td><input id=pyrocm style=width:300px value=\''+esc(pm.rocm||'')+'\'></td></tr>';
-  h+='</table><button onclick=post(&quot;/api/serve&quot;,{action:&quot;set_python_map&quot;,cpu:document.getElementById(&quot;pycpu&quot;).value,cuda:document.getElementById(&quot;pycuda&quot;).value,rocm:document.getElementById(&quot;pyrocm&quot;).value})>save device pythons</button>'
-    +'<div class=dim style=font-size:11px>device apply restarts the companion under the vendor python; empty = PythonBin</div>';
-  h+='</div>';
-  // model fetch (fetch_assets.py): catalog + recommendation + downloads
-  var cat=d.catalog&&(typeof d.catalog==='object')?d.catalog:null;
-  var fs=d.fetch||{};
-  h+='<h2>model fetch</h2><div class=box>';
-  h+='<div class=dim>'+(fs.state&&fs.state!=='idle'?'status: <b>'+esc(fs.state)+'</b> '+(fs.note?esc(fs.note):''):'no fetch running')+'</div>';
-  h+='<div style=margin:4px 0>'
-    +'<button onclick=serveAct(&quot;scan_catalog&quot;)>scan catalog</button> '
-    +'<button onclick=serveAct(&quot;fetch_bepinex&quot;)>fetch BepInEx</button></div>';
-  if(cat){
-    var cl=cat.catalog||[];
-    h+='<table>';
-    for(var i=0;i<cl.length;i++){var c=cl[i];
-      var rec=cat.recommended===c.repo;
-      h+='<tr><td style=color:#e8c17a>'+esc(c.repo)+(rec?' <span class=ok>← recommended'+(cat.free_vram_gb!=null?(' (free '+cat.free_vram_gb+' GB)'):'')+'</span>':'')+'</td>'
-        +'<td class=dim>'+esc(c.role+' · '+c.vram_gb+' GB')+'</td>'
-        +'<td><button onclick=serveAct(&quot;fetch&quot;,&quot;'+esc(c.repo)+'&quot;)>download</button></td></tr>';
-    }
-    h+='</table>';
-    if(cat.reasons&&cat.reasons.length)h+='<div class=dim style=font-size:11px>'+esc(cat.reasons.join(' · '))+'</div>';
-  } else {
-    h+='<div class=dim style=font-size:11px>press scan catalog to list what fetch_assets.py would recommend (and why)</div>';
-  }
-  h+='</div>';
-  // scan locations
-  h+='<h2>scan locations</h2><div class=box><textarea id=srvloc style=width:520px;height:60px;background:#10131a;color:#cdd3de;border:1px solid #2a303b;font:12px monospace>'
-    +esc(d.locations||'')+'</textarea><br>'
-    +'<button onclick=post(&quot;/api/config&quot;,{id:&quot;Serve.ModelLocations&quot;,value:document.getElementById(&quot;srvloc&quot;).value},function(r){if(r.ok)setTimeout(function(){serveAct(&quot;rescan&quot;)},300)})>save locations</button>'
-    +' <span class=dim>&#39;;&#39; or newline separated</span></div>';
-  renderBox('serve',h,false);
-  // companion log — same hold-at-scroll-up discipline as the mod log
-  var lg=(d.log||[]).map(function(l){var c='dim';if(String(l).indexOf('(err)')===0)c='err';return '<div class='+c+'>'+esc(l)+'</div>'+''}).join('');
-  if(!lg)lg='<div class=dim>(no companion output yet)</div>';
-  renderBox('servelog',lg,true);
-  var flg=((fs.log)||[]).map(function(l){var c='dim';if(String(l).indexOf('(err)')===0)c='err';return '<div class='+c+'>'+esc(l)+'</div>'+''}).join('');
-  if(!flg)flg='<div class=dim>(no fetch output yet)</div>';
-  renderBox('fetchlog',flg,true);
-  // INPUT WASH GUARD: everything above (models/devices/fetch state) can change
-  // on every poll — while the user is editing anything inside #serve the top
-  // panel must NOT rewrite, or their unsaved text/dropdown vanishes mid-edit.
-  // Logs below keep flowing. The rewrite lands on the next clean poll.
-  var holder=document.getElementById('serve');
-  if(holder){
-    var ae=document.activeElement;
-    var editing=ae&&holder.contains(ae)&&ae.tagName&&'SELECT,INPUT,TEXTAREA'.indexOf(ae.tagName)>=0;
-    if(editing&&holder._kkHtml)return;
-    // a fresh render also drops any stale saved-edit state: don't touch
-    // _kkHtml while editing so a saved value can't 'snap back' either
-  }
   renderBox('serve',h,false);
 }
 window.onload=function(){setNav();};
@@ -1324,6 +1290,15 @@ setInterval(poll,3000);poll();reports();setInterval(reports,15000);cfg();setInte
                 terminal = terminal.ToArray(),
                 vore_target = (object)VoreTargetOverride ?? "",
                 vore_mode = (object)VoreModeOverride ?? "",
+                // Non-consent detection (Wave 3 POC). flagged = the model was
+                // detected as refusing the adult roleplay; steer = SFW-only
+                // steering currently active; reason = why it last flagged.
+                non_consent = new {
+                    flagged = (bool)IsNonConsentFlagged(),
+                    steer = (bool)NonConsentSteerSFWOnly(),
+                    status = (string)NonConsentStatusText(),
+                    reason = string.IsNullOrEmpty(_lastNonConsentReason ?? "") ? "" : _lastNonConsentReason,
+                },
             };
         }
 

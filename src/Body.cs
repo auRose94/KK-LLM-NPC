@@ -343,6 +343,7 @@ namespace KKLLMNPC
             _hornySaturatedFor = 0f;
             ResetCarrySense();
             ResetHoldSense();
+            ResetSensationSense();
 
             // Reagent awareness: listen to the belly container for drink/spray/metabolize events.
             _bellySnapshotPending = true; // first OnChange after possessing = baseline, not a gift
@@ -878,6 +879,10 @@ namespace KKLLMNPC
         // Drain queued reagent + world events as a list of strings, clearing them.
         // World events (CarrySense: picked up/carried/thrown/sell-machine danger)
         // ride the same [event] channel the console and legacy perception drain.
+        // Category gating: events whose category the agent muted via `set_events`
+        // are dropped here, so the agent controls its own noise budget. The 'other'
+        // bucket (objectives, system lines) and unrecognised lines always pass, so
+        // muted categories only ever silence roleplay feedback, never goals.
         private List<object> DrainReagentEvents()
         {
             lock (_reagentEvents)
@@ -885,7 +890,9 @@ namespace KKLLMNPC
                 var outp = new List<object>();
                 while (_reagentEvents.Count > 0) outp.Add(_reagentEvents.Dequeue());
                 var world = DrainWorldEvents();
-                if (world != null) outp.AddRange(world);
+                if (world != null)
+                    foreach (var ev in world)
+                        if (CategoryAllowed(ev as string)) outp.Add(ev);
                 return outp;
             }
         }

@@ -912,6 +912,149 @@ namespace KKLLMNPC
             return new { ok = true, yaw = F(_yawDeg), pitch = F(_pitchDeg) };
         }
 
+        // Look AT something and report what's hit — the concrete "look at" tool.
+        // Aim at a partner/object by the `id` from `nearby`/survey, or by a world
+        // heading; return the live position, distance, facing, and what the ray
+        // landed on. If the ray lands on a real partner or usable, also let
+        // bystanders know (the `[looked]` event).
+        private object ToolLookAt(JsonObj p)
+        {
+            if (!IsAlive(_kobold) || !IsAlive(_head)) return new { ok = false, reason = "no_body" };
+
+            // Resolve the aim. `id` from nearby/survey wins; else a heading_deg.
+            float yaw = _yawDeg; float pitch = _pitchDeg; bool idGiven = false;
+            try
+            {
+                if (p.Has("id"))
+                {
+                    idGiven = true;
+                    int id = p.Has("id") ? (int)Math.Round(p.F("id")) : -1;
+                    Transform tf = (id >= 0) ? FindTargetById(id) : null;
+                    if (tf != null)
+                    {
+                        Vector3 dir = tf.position - _head.position;
+                        if (dir.sqrMagnitude > 1e-6f)
+                        {
+                            yaw = Mathf.Repeat(Mathf.Atan2(dir.x, dir.z) * Consts.Rad2Deg, 360f);
+                            pitch = Mathf.Clamp01(Mathf.Atan2(dir.y, Mathf.Max(0.01f, dir.magnitude))) * 2f - 45f;
+                        }
+                    }
+                }
+                if (p.Has("heading_deg")) yaw = p.F("heading_deg");
+            }
+            catch (Exception) { }
+            // Clamp pitch into the valid range the camera/animator can face.
+            pitch = Mathf.Clamp(pitch, -89f, 89f);
+            yaw = Mathf.Repeat(yaw, 360f);
+
+            // Turn the body to look (triggers a fresh image next tick).
+            lock (_stateLock)
+            {
+                _yawDeg = MoveAngleTowards(_yawDeg, yaw, 60f);
+                _pitchDeg = MoveAngleTowards(_pitchDeg, pitch, 40f);
+            }
+            _lastBigTurnTime = Time.unscaledTime;
+
+            // Fire the ray. On a hit, classify what was landed on.
+            float range = Mathf.Clamp(p.F("range", _cfgRayRange != null ? _cfgRayRange.Value : 25f), 2f, 100f);
+            var hitResult = (Dictionary<string, object>)RunOnMainThread(() =>
+            {
+                var res = new Dictionary<string, object>();
+                Vector3 dir = Quaternion.Euler(pitch, yaw, 0) * Vector3.forward;
+                var org = _head.position;
+                RaycastHit hit;
+                bool hitIt = Physics.Raycast(org, dir, out hit, range, ~0, QueryTriggerInteraction.Ignore) && !IsOwnCollider(hit.collider);
+                res["yaw"] = F(_yawDeg);
+                res["pitch"] = F(_pitchDeg);
+                if (!hitIt)
+                {
+                    res["hit"] = null;
+                }
+                else
+                {
+                    string name = "", kind = "geometry"; int tid = -1;
+                    bool partner = false;
+                    try
+                    {
+                        var kb = hit.collider.GetComponentInParent<Kobold>();
+                        if (kb != null)
+                        {
+                            kind = IsPlayerKobold(kb) ? "player" : "kobold";
+                            name = kb.name;
+                            tid = TargetIdFor(kb.transform, kb.name);
+                            partner = true;
+                        }
+                        else
+                        {
+                            var us = hit.collider.GetComponent<GenericUsable>() ?? hit.collider.GetComponentInParent<GenericUsable>();
+                            if (us != null)
+                            {
+                                string cn = CleanName(us.name);
+                                name = cn;
+                                kind = ClassifyUsable(cn);
+                                tid = TargetIdFor(us.transform, cn);
+                            }
+                        }
+                    }
+                    catch (Exception) { }
+                    Vector3 center = hit.point;
+                    RayHitInfo rhi = null;
+                    try
+                    {
+                        rhi = GetRayHitInfo(hit.collider);
+                        if (rhi != null && rhi.HasRender) center = rhi.Center;
+                    }
+                    catch (Exception) { }
+                    res["hit"] = new
+                    {
+                        hit = true,
+                        name = name,
+                        kind = kind,
+                        id = tid,
+                        distance = F(hit.distance),
+                        x = F(center.x), y = F(center.y), z = F(center.z),
+                        facing = F(hit.collider.transform.eulerAngles.y),
+                        width = F(rhi != null ? rhi.Size.x : 0f),
+                        height = F(rhi != null ? rhi.Size.y : 0f),
+                        depth = F(rhi != null ? rhi.Size.z : 0f),
+                        partner = partner,
+                    };
+                }
+                return res;
+            }, 8000) as Dictionary<string, object>;
+
+            // If we looked at a live partner, let bystanders see who's looking at
+            // whom — the [looked] event (bystander awareness, like the swallow
+            // narration's spectator line).
+            if (hitResult != null && hitResult.ContainsKey("hit") && hitResult["hit"] != null)
+            {
+                var hitDict = hitResult["hit"] as Dictionary<string, object>;
+                bool partner = (hitDict != null && hitDict.ContainsKey("partner")) ? Convert.ToBoolean(hitDict["partner"]) : false;
+                if (partner) BroadcastLooked(hitDict);
+            }
+
+            return new { ok = true, id_gave_target = idGiven, aim = hitResult };
+        }
+
+        // Bystander awareness: announce to everyone (except the looker) that they
+        // were looking at someone — the `[looked]` event. Cooldown-spaced so a
+        // model sweeping the room doesn't spam.
+        private void BroadcastLooked(Dictionary<string, object> hitDict)
+        {
+            try
+            {
+                if (Time.unscaledTime - _lookedCooldownT < 3f) return;
+                _lookedCooldownT = Time.unscaledTime;
+                string name = hitDict.ContainsKey("name") ? hitDict["name"] as string : "";
+                string kind = hitDict.ContainsKey("kind") ? hitDict["kind"] as string : "";
+                if (string.IsNullOrEmpty(name)) return;
+                string ev = "[looked] you were looking at " + (kind == "player" ? "the PLAYER" : name)
+                    + " — if anyone can see you, they noticed.";
+                try { Plugin.FanoutWorldEventExcept(ev, this, null); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
         // Legacy alias: jump is now a parameter of walk (the model-facing tool set is
         // go_to + walk + stop — one way to travel, one way to nudge).
         private object ToolJump()

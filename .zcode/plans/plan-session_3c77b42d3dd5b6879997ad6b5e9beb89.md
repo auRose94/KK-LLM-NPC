@@ -1,55 +1,44 @@
-## Ollama as First-Class Host (adopt external, discover, compaction, WebUI)
+## More roleplay signal, less context spam
 
-### The constraint shaping everything
-The game (Proton/wine) **cannot spawn Ollama** from inside the game. So "manage" Ollama = **adopt an externally-running instance** + discover + monitor — not spawn (unlike kk-serve, which spawns its python companion). This is actually simpler: no spawn watchdog, just health + model discovery.
+Your two asks are in tension (more events vs. less context). The balance you asked for is: **events ride the existing `[event]` queue (cheap, deduped) gated behind a default set, and the agent can silence categories it finds distracting via a filter tool; meanwhile the *most* valuable — live body state — becomes pollable instead of event-driven.** Pain/sweat/temperature/dirt aren't player mechanics (confirmed absent), so we don't fake them; we surface what the game *can* give.
 
-### The bug this also fixes
-Compaction **never fires for Ollama**: `ContextCore.FillRatio()` returns 0 when `ModelProbe.DetectedContextLength == 0`, and Ollama was never probed for its context window (only KoboldCpp's `/model` sets it). Fixing discovery automatically makes compaction work for Ollama users.
+---
 
-### Ollama API facts (verified)
-- `/api/tags` → `{ "models": [{ "name": "tev1:4b", "family": "qwen2", "format":"gguf", "size":<bytes>, "digest":"sha256:..." }] }`
-- `/api/show` → `info.info.context_length` (the real window) + `general.architecture` (family for `ModelFamilies` classification) + quantization
-- `/v1/models` (OpenAI) also works as fallback
-- No `/health` or `/shutdown` for the server — liveness = a probe to `/api/tags` or `/v1/models`. Serve-time `num_ctx` is a modelfile setting, not per-request.
+### 1. A default event set + an agent-controlled filter tool
+Reuse the live `PushWorldEvent` → `_worldEvents` (CarrySense.cs:28/31/42) → `DrainReagentEvents` (Body.cs:887) → `result["consumed"]` (Senses.cs:278) channel — no new queue.
 
-### Files & changes
+- **Category tags.** Every `[event]` string gets a short tag prefix it already has (`[sex]`, `[lay]`, `[event]`, `[overheard]`, danger, new `[sensation]`). I'll normalize these to a canonical set of categories.
+- **Filter tool** — new `event_filter`/`set_events` tool (like `say`): `category` + `action` (`off`/`on`). Sets per-category allow flags the drain step checks. Danger is **never** suppressible. Default = all major categories allowed; the agent can turn off e.g. `[sex]` gossip it finds distracting, then turn it back on later.
+- **Scope = the curated default set** (major transitions only, no per-tick micro-changes — avoids the clog):
+  - climax (`UpdateHorniness` high→low crossing, Movement.cs:372 — currently sets `_horny` but does *not* event)
+  - penetrate/exit, carry/grab/release, egg-lay readiness, vore-sate, body change on possession — these already fire events, keep them; they're the good ones
+  - a thresholded "big arousal/stim jump" event (the game already watches `stim > _lastStim + 0.08f` at Movement.cs:1018 — piggyback)
 
-**1. New `src/Ollama.cs`** — external-adoption watcher thread, mirroring KKServe's "health truth beats process truth" discipline (minus spawn):
-- Watcher thread polls the running Ollama at an interval.
-- `_adopted` = true once an Ollama answers a probe (`/api/tags` first, then `/v1/models`).
-- On adoption: fetch installed models + current model info (context length, architecture).
-- `EndpointOverride()` returns the Ollama `/v1/chat/completions` base when adopted and healthy, gated by a new `[Ollama].AutoEndpoint` flag — so an existing LM Studio setup is never hijacked.
-- `Snapshot()` / `HandlePost()` transport over the existing WebUI HTTP server, mirroring KKServe.
+### 2. Sensation change detection (producers)
+`PollSensation()` beside `PollCarrySense()` in a new `SensationSense.cs`, called from `FixedUpdateSafe`. Compares current `_horny` + normalized `stim`/penetration state to last-seen; fires a thresholded event on a real transition (not per frame), deduped by a per-category cooldown. Keeps the code where carry-sense already lives so event production is centralized and easy to read.
 
-**2. New `src/OllamaArgs.cs`** — pure, game-free logic (unit-testable):
-- Parse an Ollama endpoint to derive its base URL (strip `/v1/chat/completions` etc.).
-- Compute a safe `num_ctx` given the model's reported context (the "fit within window" math).
-- Parse `/api/tags` + `/api/show` JSON into a list of `{name, family, contextLength, size, digest}`.
+### 3. Look-at tool — aim, then tell
+New `lookat` tool (Tools.cs, wired into `RunTool` + `ActionParamProps`, namespaced in `enumVals`):
+- **Target by `id`** (an id the model already sees in `nearby`) **or by `yaw_deg`/`pitch_deg`**. Resolves id → cached world position, then turns the body via the existing `ToolLook` machinery (Tools.cs:894) and fires a ray, returning live **position + what's hit** (name, kind, distance, facing, category) — so the model can route toward it and react in this turn.
+- **"Properly looking" event:** if the ray lands on a partner or a notable usable, push a `[looked]` event **to bystanders via `FanoutWorldEventExcept`** (Main.cs:171) — other agents see *who* is looking *at what*. This is the raycast info passed as an event, exactly as you described.
 
-**3. `src/ModelProbe.cs`** — add an Ollama probe branch in `Probe()`:
-- Try `/api/tags` → sets `DetectedModelName` + `AvailableModels` (Ollama tags as `id`).
-- Try `/api/show` for the current model → sets `DetectedContextLength` (the window) + `DetectedTier` (architecture) + `DetectedQuantization`.
-- Falls back to existing `/v1/models` + KoboldCpp `/model` if Ollama isn't the host.
+### 4. Pollable body-state block (the real value)
+Add a compact `sensation` block each turn via a `ModuleRegistry.Perception` hook (Senses.cs:356 — the clean per-module hook, no Llm/Senses edits needed), so the model reads live game state without waiting for an event:
+- arousal/stim level + trend, current penetrations (who/what, hole, depth, velocity) from `_pen`/`_dickIn`, egg/belly volume + readiness, grabbed flag, in-station flag. This is "body state the game can deliver" surfaced as pollable data rather than event spam.
 
-**4. `ContextManager` / `ContextCore`** — compaction now works for Ollama automatically once `DetectedContextLength` is set. No new policy — just no longer silently returns 0.
+### 5. Pathfinding — fewer replans + quieter nav (the frame-drop + clog fix)
+Two distinct problems, fixed separately:
+- **Context clog first (your priority):** `[nav]` events fire on nearly every replan and pile into the `[event]`/history rings. Rework `NavOutcome` to fire only on **outcomes** that matter (arrived, blocked, no-route, big divergent replan) with a longer dedup, not on every internal replan. Fewer `[nav]` = less clog; the new `lookat` gives the model on-demand position knowledge so it doesn't need a nav event to know where things are.
+- **Frame drops (investigate-safe subset):** `Follow`-mode currently replans aggressively via `PathPolicy.ShouldReplan` (PathCore.cs) — add a per-NPC replan **rate-limit** so it can't plan every physics frame; the follow path is cheap to cache when identical. The bigger win (pooling A* scratch beyond `N >= 262144`, Finding.cs:474) is the risky part — I'll gate it behind a config flag or defer it to a follow-up rather than risk the shared-grid correctness.
 
-**5. WebUI (`WebUI.cs`)** — an `Ollama` section:
-- Adoption status + installed-models list (from `/api/tags`) + a **"Use this model"** button that fills `[LLM].Model`.
-- LLM model field becomes a `<select>` of Ollama's installed models (populated from the probe), falling back to free-text if Ollama isn't detected.
+---
 
-**6. Config (`Main.cs`)** — a new `[Ollama]` group:
-- `Enabled` (adopt running Ollama), `Endpoint` (default `http://127.0.0.1:11434`), `AutoEndpoint` (route LLM traffic when healthy), `PollIntervalSec`, `Model` (dropdown target).
+### Order
+1. Sensation change detection (`PollSensation` / `SensationSense.cs`).
+2. Filter tool (`event_filter`/`set_events`) + category gating in drain.
+3. `lookat` tool + `[looked]` bystander event.
+4. Pollable `sensation` perception block.
+5. Nav-event reduction + follow-mode replan rate-limit.
+6. Build + tests.
 
-**7. `tests/test_ollama.cs`** — register `truncatedargs`-style suite for `OllamaArgs.cs` parsing (tags/show parsing, endpoint/context math, free-text fallback).
-
-### Order of work
-1. `OllamaArgs.cs` (pure) + `test_ollama.cs` → build & test.
-2. `ModelProbe.cs` Ollama discovery branch.
-3. `Ollama.cs` watcher (adoption + model info + endpoint override).
-4. WebUI Ollama section + model dropdown.
-5. `Main.cs` `[Ollama]` config group.
-6. Full build + full suite (`run_tests.sh` already flags orphan tests via `audit_coverage`).
-
-### What's intentionally out of scope
-- In-game **spawn/stop** of Ollama (can't exec under Proton).
-- Raising `num_ctx` — that's the user's modelfile (config hint + the fit-math tells them the window).
+I'll wire everything to the existing partial-class/tool/registry patterns and run the full suite after each chunk. The only speculative risk is #5's perf path — I'll keep it conservative and flag it.
