@@ -63,7 +63,7 @@ namespace KKLLMNPC
 
         private static bool Enabled()
         {
-            var cfg = plugin != null ? plugin._cfgHandshake : null;
+            var cfg = LLMNPCPlugin.Alive(plugin) ? plugin._cfgHandshake : null;
             return cfg != null && cfg.Value;
         }
 
@@ -78,7 +78,7 @@ namespace KKLLMNPC
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
-                if (plugin == null) plugin = p;
+                if (!LLMNPCPlugin.Alive(plugin)) plugin = p;
                 bool want = Enabled();
                 if (want != _enabled)
                 {

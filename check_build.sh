@@ -17,7 +17,16 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-KDIR="${KOBOLDKARE_DIR:-/mnt/gaming/SteamLibrary/steamapps/common/KoboldKare}"
+# Resolve the game install: KOBOLDKARE_DIR wins, else ask Steam for it, else
+# fall back to a legacy default. The Steam lookup reads libraryfolders.vdf +
+# appmanifests, so it survives the game being moved to a new disk/library.
+if [ -n "${KOBOLDKARE_DIR:-}" ]; then
+    KDIR="$KOBOLDKARE_DIR"
+elif [ -x "$SCRIPT_DIR/tools/find_koboldkare.py" ] && KDIR="$(python3 "$SCRIPT_DIR/tools/find_koboldkare.py" 2>/dev/null)" && [ -n "$KDIR" ]; then
+    :
+else
+    KDIR="/mnt/gaming/SteamLibrary/steamapps/common/KoboldKare"
+fi
 
 if [ ! -d "$KDIR/BepInEx/core" ]; then
   echo "SKIP: no KoboldKare install at $KDIR (set KOBOLDKARE_DIR to enable this check)"
@@ -51,6 +60,8 @@ mcs -target:library -out:"$OUT/KKLLMNPC.dll" src/*.cs \
   -r:"$MGMT/UnityEngine.AudioModule.dll" \
   -r:"$MGMT/UnityEngine.VideoModule.dll" \
   -r:"$MGMT/UnityEngine.ImageConversionModule.dll" \
+  -r:"$MGMT/UnityEngine.InputLegacyModule.dll" \
+  -r:"$MGMT/Unity.InputSystem.dll" \
   -r:"$MGMT/UnityEngine.AIModule.dll" \
   -r:"$MGMT/PhotonUnityNetworking.dll" \
   -r:"$MGMT/Photon3Unity3D.dll" \

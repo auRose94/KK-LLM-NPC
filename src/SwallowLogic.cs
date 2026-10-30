@@ -225,6 +225,77 @@ namespace KKLLMNPC
         // fingerprint the rebirth registry matches on. Floats must already be
         // normalized (half-precision round-tripped) or the serialization drift breaks
         // the match; the game-typed wrapper in src/Swallow.cs does that.
+        // The button-mode the END key toggles between (see feature/decision-model-poc
+        // vore redesign): what pressing INSERT as the LOCAL PLAYER does. OFF = no
+        // button consumption (the safe default — the release/gesture path is gone, so
+        // nothing swallows unless a button is pressed); SELF = the held person you are
+        // looking at within InsertRange is teleported into YOUR mouth; FORCE = the held
+        // person is teleported into the mouth of the nearest other live non-player
+        // kobold within InsertRange. Kept pure so the mode toggle is unit-tested.
+        public enum SwallowSwellMode
+        {
+            Off = 0,
+            Self = 1,
+            Force = 2,
+        }
+
+        // How far away the held target must be for INSERT to work (meters). The player
+        // asked to be able to drop someone "from the sky" rather than bumping heads:
+        // close enough to see the face, far enough that a PrecisionGrabber nudge is
+        // never mistaken for a decision. InsertRangeMin is a hard inner bound and
+        // InsertRangeMax the hard outer bound.
+        internal const float DefaultInsertRangeMin = 0.5f;
+        internal const float DefaultInsertRangeMax = 4.0f;
+
+        // INSERT distance gate: is `dist` metres away from the target within the
+        // (min,max) window that makes a deliberate button-press? Squared maths lets the
+        // caller compare against a magnitude they already have cheaply.
+        public static bool InsertInRange(float dist, float min, float max)
+        {
+            return dist >= min && dist <= max;
+        }
+
+        public static bool InsertInRangeSq(float distSq, float minSq, float maxSq)
+        {
+            return distSq >= minSq && distSq <= maxSq;
+        }
+
+        public static SwallowSwellMode NextSwallowSwellMode(SwallowSwellMode m)
+        {
+            switch (m)
+            {
+                case SwallowSwellMode.Off: return SwallowSwellMode.Self;
+                case SwallowSwellMode.Self: return SwallowSwellMode.Force;
+                default: return SwallowSwellMode.Off;
+            }
+        }
+
+        public static string SwallowSwellModeLabel(SwallowSwellMode m)
+        {
+            switch (m)
+            {
+                case SwallowSwellMode.Self: return "SELF";
+                case SwallowSwellMode.Force: return "FORCE";
+                default: return "OFF";
+            }
+        }
+
+        // Parse a mode word (used by the vore_status / chat surface so the player can
+        // see + name the mode): self | force | off.
+        public static SwallowSwellMode ParseSwellMode(string word)
+        {
+            if (string.IsNullOrEmpty(word)) return SwallowSwellMode.Off;
+            word = NormalizeLetters(word);
+            switch (word)
+            {
+                case "self": case "self-insert": case "selfeat": case "me":
+                    return SwallowSwellMode.Self;
+                case "force": case "forcefeed": case "force-feeding":
+                    return SwallowSwellMode.Force;
+                default: return SwallowSwellMode.Off;
+            }
+        }
+
         public static string FingerprintFromNumbers(float[] floats, byte[] bytes, int dickEquip)
         {
             if (floats == null || bytes == null) return null;

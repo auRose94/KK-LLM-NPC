@@ -222,6 +222,36 @@ namespace KKLLMNPC
             return _playerChat;
         }
 
+        // Deliver a directed PRIVATE agent-to-agent line (the `whisper` tool) to THIS
+        // instance only. Records a chat entry, then stores the whisper and wakes the
+        // NPC — it rides the same wake/trigger funnel as chat so the recipient's next
+        // turn fires with a real addressed [whisper] event. `senderName` is the OTHER
+        // agent's chat name (this instance's own name), never "player".
+        internal void PushWhisper(string senderName, string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            text = (text ?? "").Replace("\r", "").Trim();
+            // Agent-to-agent whisper: name the sender so the recipient knows a sibling
+            // sent it privately and can reply by name (like an addressed DM).
+            string heard = (senderName ?? "another kobold") + " (whispered to you): " + text;
+            _whisper = heard;
+            _whisperTime = Time.unscaledTime;
+            _lastDeliveredWhisper = null; // force one delivery next drain
+            WakeFromSleep(); // a whisper is addressed — end `sleep <secs>` early
+            RecordChatEntry("kobold:" + (senderName ?? "someone"), text);
+            Logger.LogInfo("heard whisper from " + senderName + ": " + ShortenLine(text, 120));
+        }
+
+        // Whisper within the last ~30s — null otherwise, once per distinct line — so
+        // it drains as a single [whisper] event and never re-echoes every tick.
+        private string RecentWhisper()
+        {
+            if (_whisper == null || Time.unscaledTime - _whisperTime > 30f) return null;
+            if (_whisper == _lastDeliveredWhisper) return null;
+            _lastDeliveredWhisper = _whisper;
+            return _whisper;
+        }
+
         // True when a chat message is a cheat/system command (starts with '/') rather
         // than something the NPC should treat as real conversation. The NPC shouldn't
         // recognize these as speech at all.
@@ -447,6 +477,17 @@ namespace KKLLMNPC
             if (text.Length == 0) text = p.S("message", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
             text = Sanitize(text);
+            // JSON-in-speech cleaner: reasoning models (gpt-oss) sometimes answer chat
+            // turns with the act-shaped JSON instead of spoken words — a {"say": "..."}
+            // echo, a whole act object, or fenced fragments — and none of that may
+            // reach the player's chat. Extract the voice field when the object carries
+            // one; otherwise strip the JSON spans; say nothing if nothing speakable is
+            // left (the returned note teaches the model the format).
+            text = CleanSpokenJson(text);
+            text = TextUtil.ScrubTypeNames(text);
+            if (text.Length == 0)
+                return new { ok = false, reason = "json_only",
+                    note = "your reply was a JSON object, not spoken words — players hear NOTHING when you do that. Put what you SAY in the 'say' field as plain spoken words (no braces), or take an action instead" };
             // RP-template minds speak in {{user}}/{{char}} — resolve against the real
             // world AT SPEAK TIME (closest partner: live engagement, nearest person in
             // radius, host player) so the chat never shows a literal "{{user}}". Runs
@@ -584,6 +625,85 @@ namespace KKLLMNPC
                 catch (Exception e) { Logger.LogWarning("say async: " + e.Message); }
             });
             return new { ok = true, said = text };
+        }
+
+        private static readonly string[] MachineryKeys = { "\"progress\"", "\"action\":", "\"thought\"", "\"why\":" };
+        private static bool IsMachineryLine(string line)
+        {
+            string l = line.Trim();
+            if (l.Length == 0) return true;
+            string low = l.ToLowerInvariant();
+            foreach (var k in MachineryKeys) if (low.Contains(k)) return true;
+            if (low.Contains("json") || low.Contains("schema") || low.Contains("action object")) return true;
+            if (low.StartsWith("we need to output") || low.StartsWith("we can combine") || low.StartsWith("so we need")
+                || low.StartsWith("let me output") || low.StartsWith("the schema")) return true;
+            return false;
+        }
+
+        // gpt-oss (and other reasoning models) sometimes answer chat turns with the
+        // act-shaped JSON instead of spoken words — a {"say": "..."} echo, a whole act
+        // object, or fenced fragments. Extract the speakable field when the whole reply
+        // is one JSON object carrying a voice field ("say"/"text"/"message"/…); strip
+        // flat JSON fragments from mid-text prose; return "" when nothing speakable
+        // remains (the caller then refuses to speak and feeds the model a format note).
+        // {{user}}-style RP placeholders are untouched: the strip pattern requires a
+        // quote right after the brace, which "{{" never matches.
+        private static string CleanSpokenJson(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            string t = text.Trim();
+            // Strip one markdown-fence wrapper.
+            if (t.StartsWith("```", StringComparison.Ordinal))
+            {
+                int firstNl = t.IndexOf('\n');
+                if (firstNl > 0) t = t.Substring(firstNl + 1);
+                int lastFence = t.LastIndexOf("```", StringComparison.Ordinal);
+                if (lastFence >= 0) t = t.Substring(0, lastFence);
+                t = t.Trim();
+            }
+            // Whole reply is (probably) one JSON object: speak its voice field if it
+            // has one; an act object without a voice field says nothing.
+            if (t.Length > 1 && t[0] == '{' && t[t.Length - 1] == '}')
+            {
+                var parsed = Json.Parse(t) as System.Collections.Generic.Dictionary<string, object>;
+                if (parsed != null)
+                {
+                    foreach (var key in new[] { "say", "text", "message", "msg", "dialogue", "line", "response" })
+                    {
+                        if (parsed.TryGetValue(key, out var v) && v is string s && s.Trim().Length > 0)
+                            return s.Trim().Trim('"');
+                    }
+                    return "";
+                }
+                // not parseable as JSON — fall through to fragment stripping
+            }
+            // Machinery-line filter: reasoning models narrate their own output format
+            // ("We need to output a proper JSON action object...", lines quoting the act
+            // schema keys) and none of that is speech. Dropped per line so a mixed block
+            // keeps its speakable lines; a kobold saying "I need to find food" still
+            // passes (the patterns require output/combine verbs or quoted JSON keys).
+            if (t.IndexOf('\n') >= 0 || IsMachineryLine(t))
+            {
+                var kept = new System.Collections.Generic.List<string>();
+                foreach (var ln in t.Split('\n'))
+                {
+                    string l2 = ln.Trim();
+                    if (l2.Length == 0 || IsMachineryLine(l2)) continue;
+                    kept.Add(l2);
+                }
+                t = string.Join(" ", kept.ToArray()).Trim();
+                if (t.Length == 0) return "";
+            }
+            // Mid-text flat JSON fragments: {"key": "value", ...} with no nesting.
+            // The quote-after-brace requirement keeps RP placeholders ({{user}}) intact.
+            try
+            {
+                var rx = new System.Text.RegularExpressions.Regex("\\{\\s*\"[^{}]*\\}");
+                t = rx.Replace(t, m => m.Value.Contains("\":") || m.Value.Contains("\": ") ? " " : m.Value);
+            }
+            catch (Exception) { }
+            t = System.Text.RegularExpressions.Regex.Replace(t, "\\s+", " ").Trim();
+            return t.Trim('"').Trim();
         }
     }
 }

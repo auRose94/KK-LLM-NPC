@@ -33,6 +33,11 @@ namespace KKLLMNPC
             };
             ModuleRegistry.Tool("vore_target", (n, p) => n.ToolVoreTarget(p), schemas);
             ModuleRegistry.Tool("vore_mode", (n, p) => n.ToolVoreMode(p), schemas);
+
+            // The act behind the drive: swallow the person you are HOLDING and FACING.
+            // Gated by the human's vore settings (SwallowEnabled + a non-Off END mode);
+            // the entry hole/fate come from THIS agent's vore_target/vore_mode picks.
+            ModuleRegistry.Tool("swallow", (n, p) => n.ToolAgentSwallow(p));
         }
     }
 
@@ -114,6 +119,63 @@ namespace KKLLMNPC
                 return SwallowLogic.EffectLabel(SwallowManager.Effect()).ToLowerInvariant();
             }
             catch (Exception) { return "egg"; }
+        }
+
+        // The act behind the drive: swallow the person you are HOLDING and FACING
+        // (LLM-into-LLM vore — the absorb/egg fates merge the victim's memories into
+        // the eater's context). Every gate is the human's: SwallowEnabled + a non-Off
+        // END mode must be on, exactly like the player's INSERT. The entry hole/fate
+        // resolve from this agent's vore_target/vore_mode picks inside SwallowManager.
+        internal object ToolAgentSwallow(JsonObj p)
+        {
+            // MAIN-THREAD ONLY (the wave-41 lesson, same as eat_player): the swallow
+            // touches Photon ownership/RPCs, grabber/Rigidbody surgery and reflection
+            // into the grabber — calling those off the LLM worker thread corrupts the
+            // process. Marshal the whole flow; fall back to a clean error if the main
+            // thread is busy.
+            try
+            {
+                return RunOnMainThread(() => (object)AgentSwallowOnMain(), 10000)
+                    ?? (object)new { ok = false, reason = "main_thread_busy", note = "the main thread did not answer in 10s — try again next turn" };
+            }
+            catch (Exception e)
+            {
+                return new { ok = false, reason = "main_thread_failed", note = Shorten(e.Message, 160) };
+            }
+        }
+
+        // The swallow, guaranteed to run on the main thread.
+        private object AgentSwallowOnMain()
+        {
+            if (!IsAlive(_kobold)) return new { ok = false, reason = "no_body" };
+            // kobold-into-kobold only: the local player is eat_player's domain.
+            if (IsPlayerKobold(_kobold))
+                return new { ok = false, reason = "player_body", note = "use eat_player to eat the local player" };
+            SwallowManager.InsertStatus status;
+            bool started = SwallowManager.TryInsertForAgent(_kobold, out status);
+            if (started)
+            {
+                try { Logger.LogInfo("[" + MyName() + "] agent swallow: pulled in a held person (mode follows the human's settings)"); } catch (Exception) { }
+                return new { ok = true, swallowed = true,
+                    note = "they are inside you now — fate follows your vore_mode pick; their memories join yours per the fate" };
+            }
+            string note;
+            switch (status)
+            {
+                case SwallowManager.InsertStatus.Disabled:
+                    note = "vore is DISABLED — the human has the master switch or END mode off; do not assume you can eat"; break;
+                case SwallowManager.InsertStatus.NoTarget:
+                    note = "you are not HOLDING someone within swallow range — grab a person first, face them, then swallow"; break;
+                case SwallowManager.InsertStatus.AlreadyInside:
+                    note = "that person is already inside someone — no second eater"; break;
+                case SwallowManager.InsertStatus.ReceiverBusy:
+                    note = "you are already digesting someone (or the nearest receiver is) — one meal at a time"; break;
+                case SwallowManager.InsertStatus.NoReceiver:
+                    note = "FORCE mode: no other live kobold near you to receive them"; break;
+                default:
+                    note = "the swallow did not happen — hold a person you are facing and try again"; break;
+            }
+            return new { ok = false, reason = status.ToString(), note };
         }
 
         internal object ToolVoreTarget(JsonObj p)

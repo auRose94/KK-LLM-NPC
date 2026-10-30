@@ -40,7 +40,7 @@ namespace KKLLMNPC
         {
             try
             {
-                if (plugin == null || !plugin._mainReady || !plugin.Running) return;
+                if (!LLMNPCPlugin.Alive(plugin) || !plugin._mainReady || !plugin.Running) return;
                 if (Time.unscaledTime - _lastPoll < 1f) return;
                 _lastPoll = Time.unscaledTime;
 

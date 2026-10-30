@@ -105,6 +105,14 @@ namespace KKLLMNPC
                 if (c < 32 || c > 126)
                     return new { ok = false, reason = "invalid_name", hint = "Name must contain only printable ASCII characters (a-z, A-Z, 0-9, spaces, punctuation)." };
             }
+            // Natural-name guard: reject HTML-escape fragments and machine-like
+            // identifiers ("u003cthe", "AbsolB2") — only a simple first name (no
+            // digits, no symbols, no multi-word) is acceptable, so the agent doesn't
+            // pick something unreadable to type/say.
+            if (newName.Length < 2 || newName.Length > 14
+                || !System.Text.RegularExpressions.Regex.IsMatch(newName, @"^[A-Za-z][A-Za-z'-]{1,13}$")
+                || System.Text.RegularExpressions.Regex.IsMatch(newName, @"\d"))
+                return new { ok = false, reason = "not_natural", hint = "Pick one short human first-name (letters only, 2-14 chars; no digits or symbols)." };
 
             // Check uniqueness via NameRegistry.
             if (NameRegistry.IsTaken(newName))

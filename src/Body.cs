@@ -836,6 +836,15 @@ namespace KKLLMNPC
                 // Dedupe: if nothing materially changed, don't re-report the same mix.
                 if (what == _lastBellySummary) return;
                 _lastBellySummary = what;
+                // RATE GATE (2026-10-25): metabolic churn re-fires the belly event per
+                // reagent tick during digestion — "injected ..." spam drowned the real
+                // events. The default/injected case is the noisy one; deliberate
+                // pours (spray/flood/pumped) always report.
+                if (how == "injected")
+                {
+                    if (Time.unscaledTime - _lastInjectedEventAt < 30f) return;
+                    _lastInjectedEventAt = Time.unscaledTime;
+                }
 
                 lock (_reagentEvents)
                 {
@@ -1137,6 +1146,8 @@ namespace KKLLMNPC
         }
 
         // The penetrator-side mirror: when THIS kobold's dick is inside something.
+        private float _lastInjectedEventAt = -999f;
+
         private class KKPenetratorListener : PenetrationTech.PenetratorListener
         {
             public NPCInstance owner;
@@ -1333,6 +1344,11 @@ namespace KKLLMNPC
                         // penetrables — the agent read it as "someone is inside me"
                         // ("a phantom is fucking me"), begged not to stop.
                         if (ownerKb != null && ownerKb == _kobold) return;
+                        // PARENTED-TO-AGENT: a penetrator whose ROOT is our own root
+                        // is OUR equipment (grow-vore absorbs parent the meal's parts
+                        // under the eater; spline deforms can re-root the lookup) —
+                        // its motions are ours, never "someone is inside me".
+                        try { if (srcTf != null && _kobold != null && srcTf.root == _kobold.transform.root) return; } catch (Exception) { }
                     }
                 }
                 catch (Exception) { }
@@ -1354,14 +1370,21 @@ namespace KKLLMNPC
                             //EmitAmbient("hah~"); // being entered
                             _stimSource = whoPen; // name the source: partner or machine part
                             _stimSourceT = now;
-                            // The model's OWN body event: sex reaches CONSOLE MODE as a
-                            // world event now — models used to learn "there's an egg in
-                            // me" minutes later and never knew they were being entered.
-                            PushWorldEvent("[sex] you are BEING PENETRATED — " + whoPen + " entered your " + st.hole
-                                + ". This is real and happening NOW; respond (say), match/ask the rhythm, or use `feel` + `thrust` to take part — you may be locked in an animation meanwhile");
-                            if (voreInsert)
-                                PushWorldEvent("[vore-pen] CLARIFICATION: " + whoPen + " is a VORE INSERT — the swallowed meal's body is acting as the shaft while it slides deeper (" + st.hole
-                                    + "). It widens you and yes, it CAN feel sexual in context — that is the insert doing it, not a partner making love; your meal is still a meal.");
+                            // Throttle the body event: while a penetration holds, only
+                            // notify the model once per cooldown — repeated fan-outs
+                            // used to clog the console stream and crowd out replies.
+                            if (now - st.lastEventT >= 30f)
+                            {
+                                st.lastEventT = now;
+                                // The model's OWN body event: sex reaches CONSOLE MODE as a
+                                // world event now — models used to learn "there's an egg in
+                                // me" minutes later and never knew they were being entered.
+                                PushWorldEvent("[sex] you are BEING PENETRATED — " + whoPen + " entered your " + st.hole
+                                    + ". This is real and happening NOW; respond (say), match/ask the rhythm, or use `feel` + `thrust` to take part — you may be locked in an animation meanwhile");
+                                if (voreInsert)
+                                    PushWorldEvent("[vore-pen] CLARIFICATION: " + whoPen + " is a VORE INSERT — the swallowed meal's body is acting as the shaft while it slides deeper (" + st.hole
+                                        + "). It widens you and yes, it CAN feel sexual in context — that is the insert doing it, not a partner making love; your meal is still a meal.");
+                            }
                         }
                         st.src = penetrator.gameObject != null ? penetrator.transform : null;
                         float d = worldSpaceDistanceToPenetrator;

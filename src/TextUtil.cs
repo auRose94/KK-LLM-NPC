@@ -197,6 +197,130 @@ namespace KKLLMNPC
             return result;
         }
 
+        // ------------------------------------------------------------------
+        // Console thought containment (pure + unit-tested): a console reply that
+        // mixes PLANNING with an RP marker ("*considers* I need energy", 'the
+        // letter said "fetch the mail" — I should go') used to be broadcast WHOLE
+        // by the response-block path — the model's thinking escaped as chat text.
+        // SpeakablePartOf splits a reply into VOICE spans (quoted dialogue always;
+        // starred actions unless the stars wrap planning) and THINKING spans
+        // (plain prose that reads as self-directed planning). The caller speaks
+        // only the voice and keeps the thinking as a thought.
+        // ------------------------------------------------------------------
+        public static string SpeakablePartOf(string text, out string thinking)
+        {
+            thinking = "";
+            if (string.IsNullOrEmpty(text)) return "";
+            var voice = new StringBuilder(text.Length);
+            var thoughts = new StringBuilder();
+            bool voiceMarker = text.IndexOf("{{", StringComparison.Ordinal) >= 0; // a placeholder block IS voice
+            int i = 0, n = text.Length;
+            while (i < n)
+            {
+                char c = text[i];
+                if (c == '"' || c == '\u201C')
+                {
+                    // Straight quotes pair with themselves; a curly open pairs with
+                    // a curly close. A CLOSED quote span is ALWAYS voice — planning
+                    // inside quotes is spoken dialogue ("I'll wait" / "I should
+                    // probably go...", she said), never contained. An UNCLOSED
+                    // quote is degenerate output: its text falls back to the prose
+                    // rules (planning inside it stays contained).
+                    char closeCh = c == '\u201C' ? '\u201D' : '"';
+                    int e = text.IndexOf(closeCh, i + 1);
+                    if (e < 0)
+                    {
+                        string rest = text.Substring(i);
+                        if (IsThinkingProse(rest)) thoughts.Append(rest);
+                        else { voice.Append(rest); voiceMarker = true; }
+                        i = n;
+                    }
+                    else
+                    {
+                        voice.Append(text, i, e + 1 - i);
+                        voiceMarker = true;
+                        i = e + 1;
+                    }
+                }
+                else if (c == '*')
+                {
+                    int e = text.IndexOf('*', i + 1);
+                    if (e < 0)
+                    {
+                        // Lone asterisk (emphasis/footnote) — prose rules apply.
+                        string rest = text.Substring(i);
+                        if (IsThinkingProse(rest)) thoughts.Append(rest); else voice.Append(rest);
+                        i = n;
+                    }
+                    else
+                    {
+                        string inner = text.Substring(i + 1, e - i - 1);
+                        // Short single-token stars ("*and*", "*ok*") are emphasis,
+                        // not an action — they never count as the voice marker.
+                        if (inner.Trim().Length >= 4) voiceMarker = true;
+                        if (inner.Trim().Length > 0 && IsThinkingProse(inner)) thoughts.Append(text, i, e + 1 - i);
+                        else voice.Append(text, i, e + 1 - i);
+                        i = e + 1;
+                    }
+                }
+                else
+                {
+                    int next = i;
+                    while (next < n && text[next] != '"' && text[next] != '\u201C' && text[next] != '*') next++;
+                    string prose = text.Substring(i, next - i);
+                    if (IsThinkingProse(prose)) thoughts.Append(prose); else voice.Append(prose);
+                    i = next;
+                }
+            }
+            thinking = CollapseSpaces(thoughts.ToString()).Trim();
+            if (!voiceMarker)
+            {
+                // No real voice span survived (emphasis stars only / planning with a
+                // stray marker) — nothing is speakable; everything stays a thought.
+                if (thinking.Length == 0) thinking = CollapseSpaces(text).Trim();
+                return "";
+            }
+            return CollapseSpaces(voice.ToString()).Trim();
+        }
+
+        // Does this prose read as SELF-DIRECTED PLANNING (a console thought) rather
+        // than narration or speech? Signals: first-person intent ("I should/need/
+        // I'll"), let's/let me, goal/plan vocabulary, and the console's own command
+        // words (a thought that names cd/ls is terminal reasoning). Applied only to
+        // text OUTSIDE quoted dialogue — planning inside quotes is speech.
+        private static System.Text.RegularExpressions.Regex _thinkingSignal;
+        private static System.Text.RegularExpressions.Regex ThinkingSignalRegex()
+        {
+            if (_thinkingSignal == null)
+            {
+                _thinkingSignal = new System.Text.RegularExpressions.Regex(
+                    "("
+                    + @"\bi\s+(should|need|wanted?|want to|gotta|have to|must|will|would|am going|was going|plan|planned|decided|think|thought)\b"
+                    + @"|\bi'?ll\b|\bwe'?ll\b|\bi'?m going to\b|\blet'?s\b|\blet me\b|\bgoing to\b|\btime to\b"
+                    + @"|\bi think\b|\bmy goal\b|\bthe goal\b|\bmy plan\b|\bplan\s*:|\bstep\s*\d"
+                    + @"|\bmaybe\s+(i|we|let|it|the)\b|\bthen\s+(i|we)\b|\bnext,?\s+(i|we|let)\b|\bfirst,?\s+(i|we|let|then)\b"
+                    + @"|\b(cd|ls|sonar|whoami|go_to|report_issue)\b"
+                    + ")",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            }
+            return _thinkingSignal;
+        }
+
+        public static bool IsThinkingProse(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string t = text.Trim();
+            if (t.Length < 2) return false;
+            try { return ThinkingSignalRegex().IsMatch(t); } catch (Exception) { return false; }
+        }
+
+        private static string CollapseSpaces(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s ?? "";
+            try { return System.Text.RegularExpressions.Regex.Replace(s, "\\s+", " "); }
+            catch (Exception) { return s; }
+        }
+
         // Is this reply a RESPONSE BLOCK — roleplay the model means as its actual
         // chat line? Detected the objective way: asterisk-wrapped actions (*tail
         // sways*), quoted dialogue ("..."), or an RP placeholder ({{user}}).
@@ -437,6 +561,26 @@ namespace KKLLMNPC
                 default:
                     return ViewerRelativeFactNote();
             }
+        }
+
+        // Type-name scrubber (2026-10-25): C# objects that reached a string via
+        // ToString() ("System.Collections.Generic.Dictionary`2[System.String,
+        // System.Object]") used to persist in transcripts/memories and REPLICATE —
+        // models copy what they see, so one leak echoed through chat for turns.
+        // Strips the known spans at every persistence/relay point (say, heard-chat,
+        // facts, transcript). Pure.
+        public static string ScrubTypeNames(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            if (text.IndexOf("System.", StringComparison.Ordinal) < 0) return text;
+            try
+            {
+                var rx = new System.Text.RegularExpressions.Regex(
+                    "System\\.[A-Za-z0-9_.]+`?\\d*(\\[[^\\]]*\\])?(\\[[^\\]]*\\])?");
+                text = rx.Replace(text, " ");
+                return System.Text.RegularExpressions.Regex.Replace(text, "\\s+", " ").Trim();
+            }
+            catch (Exception) { return text; }
         }
     }
 }

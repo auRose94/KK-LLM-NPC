@@ -38,6 +38,10 @@ namespace KKLLMNPC
         /// "small" keeps prompts/payloads tight (chatty families: Granite/Nemotron).
         /// Empty = fall back to the existing size heuristics.</summary>
         public string PreferredTier;
+        /// <summary>Turn timeout (seconds) for this family's chat POSTs. Thinking
+        /// families burn wall-time on their CoT before ANY answer text arrives —
+        /// the flat default killed turns mid-think. 0 = the plain-turn default.</summary>
+        public int ThinkSlowSeconds;
         /// <summary>One-line human summary for logs/overlay.</summary>
         public string Note;
     }
@@ -81,12 +85,19 @@ namespace KKLLMNPC
             // Gemma ids never mention "qwen", so the Gemma check still catches
             // them below.
             if (Contains(name, "qwen")) return Qwen();
+            // NSFW-finetuned RP models (UNSEEN_Gemma_4_26B_NSFW and friends): the
+            // base family's quirk set applies, but the note records WHY this model
+            // works — trained on the content, not merely abliterated.
+            if (Contains(name, "unseen") || Contains(name, "nsfw"))
+                return NsfwFinetune(Contains(name, "gemma") ? "gemma-nsfw"
+                                    : Contains(name, "qwen") ? "qwen-nsfw" : "nsfw-finetune");
             if (Contains(name, "gemma")) return Gemma();
             if (Contains(name, "mistral") || Contains(name, "ministral") || Contains(name, "magistral")) return Mistral();
             if (Contains(name, "smollm") || Contains(name, "smolvlm")) return SmolLM();
 
             if (Contains(name, "phi")) return Phi();
-            if (Contains(name, "llama") || Contains(name, "gpt-oss")) return Llamaish();
+            if (Contains(name, "gpt-oss")) return GptOss();
+            if (Contains(name, "llama")) return Llamaish();
             if (Contains(name, "llava") || Contains(name, "moondream") || Contains(name, "vision")) return VisionOnly();
             return Generic;
         }
@@ -99,8 +110,9 @@ namespace KKLLMNPC
             TemplateLiteral = false,
             VisionCapable = true, // most deployed local Qwen variants have a VL sibling/merger
             ThinkTokenHeadroom = 512,
+            ThinkSlowSeconds = 300,
             PreferredTier = "", // sized normally; Qwen3 4B..32B all play well
-            Note = "Qwen — strips " + TkOpen + " blocks; needs token headroom for them",
+            Note = "Qwen (incl. 3.5) — strips " + TkOpen + " blocks; needs token headroom and slow-turn time for them",
         };
 
         // ZDTaichu (TaichuAI; NVIDIA license, Qwen3.5-9B backbone + C-RADIOv4-H vision
@@ -115,8 +127,21 @@ namespace KKLLMNPC
             TemplateLiteral = false,
             VisionCapable = true,    // mmproj vision encoder — first-person frames OK
             ThinkTokenHeadroom = 512,
+            ThinkSlowSeconds = 300,
             PreferredTier = "",      // 9B id — sized small by the normal heuristics
             Note = "ZDTaichu — Qwen3.5-class spatial reasoner: strips think blocks, vision via mmproj, likes temp 0",
+        };
+
+        private static ModelFamilyProfile NsfwFinetune(string family) => new ModelFamilyProfile
+        {
+            Family = family,
+            EmitsThinkBlocks = family.StartsWith("qwen"),
+            TemplateLiteral = true,
+            VisionCapable = family.StartsWith("gemma"),
+            ThinkTokenHeadroom = family.StartsWith("qwen") ? 512 : 0,
+            ThinkSlowSeconds = family.StartsWith("qwen") ? 300 : 0,
+            PreferredTier = "",
+            Note = "NSFW-finetuned RP model (" + family + ") — trained on the content, not merely abliterated",
         };
 
         private static ModelFamilyProfile Gemma() => new ModelFamilyProfile
@@ -127,7 +152,7 @@ namespace KKLLMNPC
             VisionCapable = true,
             ThinkTokenHeadroom = 0,
             PreferredTier = "",
-            Note = "Gemma — literal template, keep raw image + json_schema, no think overhead",
+            Note = "Gemma (incl. Gemma 4) — literal template, keep raw image + json_schema, no think overhead",
         };
 
         private static ModelFamilyProfile GLM() => new ModelFamilyProfile
@@ -137,6 +162,7 @@ namespace KKLLMNPC
             TemplateLiteral = false,
             VisionCapable = true,
             ThinkTokenHeadroom = 512,
+            ThinkSlowSeconds = 300,
             PreferredTier = "",
             Note = "GLM — strips " + TkOpen + " blocks; good console discipline",
         };
@@ -240,6 +266,23 @@ namespace KKLLMNPC
             Note = "Phi — literal small model",
         };
 
+        // gpt-oss: harmony format — the reply arrives in a REASONING channel
+        // (delta.reasoning / message.reasoning), often with the whole act inside it
+        // and an empty final content (ParseChatResponse harvests that). Long thinks:
+        // 120B-class models routinely burn 1-3 minutes of wall-time before a token
+        // of answer, so this family carries the biggest slow-turn timeout.
+        private static ModelFamilyProfile GptOss() => new ModelFamilyProfile
+        {
+            Family = "gpt-oss",
+            EmitsThinkBlocks = true,
+            TemplateLiteral = false,
+            VisionCapable = false,
+            ThinkTokenHeadroom = 512,
+            ThinkSlowSeconds = 300,
+            PreferredTier = "",
+            Note = "GPT-OSS — harmony reasoning channel harvested; slow turns expected",
+        };
+
         private static ModelFamilyProfile Llamaish() => new ModelFamilyProfile
         {
             Family = "llama",
@@ -248,7 +291,7 @@ namespace KKLLMNPC
             VisionCapable = false,
             ThinkTokenHeadroom = 128,
             PreferredTier = "",
-            Note = "Llama/GPT-OSS generic — standard handling",
+            Note = "Llama generic — standard handling",
         };
 
         private static ModelFamilyProfile VisionOnly() => new ModelFamilyProfile
@@ -269,6 +312,7 @@ namespace KKLLMNPC
             TemplateLiteral = false,
             VisionCapable = false,
             ThinkTokenHeadroom = 1024,
+            ThinkSlowSeconds = 300,
             PreferredTier = "",
             Note = "DeepSeek-style reasoner — strips markers, generous headroom",
         };

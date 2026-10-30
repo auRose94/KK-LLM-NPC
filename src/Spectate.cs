@@ -275,7 +275,7 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         internal static void Tick()
         {
-            if (Plugin == null) return;
+            if (!LLMNPCPlugin.Alive(Plugin)) return;
             ProcessDespawns();
 
             SpectateState a;
@@ -447,7 +447,7 @@ namespace KKLLMNPC
 
         private static int ReadPov()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowPov : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowPov : null;
             try { if (cfg != null) return (int)cfg.Value; } catch (Exception) { }
             return 0; // FirstPerson
         }
@@ -497,7 +497,7 @@ namespace KKLLMNPC
                     // configured offset) — TransformPoint scales the offset with
                     // the body, so grown eaters get grown eye offsets.
                     float fwd = SpectateLogic.FpForwardOffset(
-                        Plugin != null && Plugin._cfgCamForward != null ? Plugin._cfgCamForward.Value : 0.22f);
+                        LLMNPCPlugin.Alive(Plugin) && Plugin._cfgCamForward != null ? Plugin._cfgCamForward.Value : 0.22f);
                     Vector3 pos = head.TransformPoint(new Vector3(0f, 0.06f, fwd));
                     t.position = pos;
                     t.rotation = head.rotation;
@@ -507,7 +507,7 @@ namespace KKLLMNPC
                         {
                             a.OrigNear = cam.nearClipPlane;
                             a.NearTaken = true;
-                            cam.nearClipPlane = Plugin != null && Plugin._cfgCamNearClip != null
+                            cam.nearClipPlane = LLMNPCPlugin.Alive(Plugin) && Plugin._cfgCamNearClip != null
                                 ? Mathf.Clamp(Plugin._cfgCamNearClip.Value, 0.01f, 0.5f)
                                 : 0.10f;
                         }
@@ -615,7 +615,7 @@ namespace KKLLMNPC
         private object EatPlayerOnMain()
         {
             var plugin = SwallowManager.Plugin;
-            if (plugin == null) return new { ok = false, reason = "no_plugin" };
+            if (!LLMNPCPlugin.Alive(plugin)) return new { ok = false, reason = "no_plugin" };
             var cfg = plugin._cfgSwallowAgentEat;
             if (cfg == null || !cfg.Value)
                 return new { ok = false, reason = "disabled", note = "eat_player is not enabled ([LittleTreats] SwallowAgentEat)" };

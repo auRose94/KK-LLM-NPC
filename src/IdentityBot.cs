@@ -33,6 +33,12 @@ namespace KKLLMNPC
         private volatile bool _inRoom;
         private string _roomName;
         private string _nickName;
+        // The bot's own Photon actor number inside the room. It's what makes an
+        // agent's plain-text chat line (no "Name:" prefix) identifiable in
+        // Main.cs onEvent when the live NickName has drifted from the LLM's
+        // internal _npcName (see the attribution fix there) — actor numbers never
+        // drift, and a player can never share an agent's actor number.
+        private int _actorNr;
         private int _retries;
         private int _backoffSeconds = 2; // exponential backoff: 2s → 4s → 8s … cap 30s
         private int _startAttempts;
@@ -44,6 +50,11 @@ namespace KKLLMNPC
         internal NpcIdentityBot(NPCInstance npc) { _npc = npc; }
 
         internal bool InRoom { get { return _inRoom; } }
+
+        // The bot's actor number inside the room (0 until joined). Use by Main.cs
+        // to attribute the bot's own plain-text lines even when its live NickName
+        // has drifted from the LLM's internal _npcName — actor numbers don't drift.
+        internal int ActorNumber { get { return _actorNr; } }
 
         // The room this bot is bound to (target even while still connecting). Callers
         // compare it against the current room to decide if the bot is stale.
@@ -201,6 +212,7 @@ namespace KKLLMNPC
         public void OnDisconnected(DisconnectCause cause)
         {
             _inRoom = false;
+            _actorNr = 0; // actor number is room-scoped — clear it so a stale one can't leak
             _retries++;
             _npc.Logger.LogWarning("[identity-bot] disconnected: " + cause + " (attempt " + _retries + ", backoff=" + _backoffSeconds + "s) — falling back to owner-attributed chat");
             // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap.
@@ -231,7 +243,10 @@ namespace KKLLMNPC
             _inRoom = true;
             _retries = 0;
             _backoffSeconds = 2; // reset backoff on success
-            _npc.Logger.LogInfo("[identity-bot] in room as '" + _nickName + "' — NPC chat now attributed to the NPC");
+            // Capture our actor number so Main.cs can attribute our own plain-text
+            // lines even when the live NickName has drifted from the LLM's _npcName.
+            try { _actorNr = _client.LocalPlayer.ActorNumber; } catch (Exception) { }
+            _npc.Logger.LogInfo("[identity-bot] in room as '" + _nickName + "' (actor #" + _actorNr + ") — NPC chat now attributed to the NPC");
         }
         public void OnJoinRoomFailed(short returnCode, string message)
         {

@@ -49,14 +49,14 @@ namespace KKLLMNPC
         // Cached payloads — served to the WebUI verbatim.
         private static string _tagsJson = "";       // /api/tags
         private static string _showJson = "";       // /api/show for the current model
-        private static string _currentModel = "";   // the model /api/show was fetched for
+        private static volatile string _currentModel = ""; // the model /api/show was fetched for — written by the watcher thread, read off-thread
 
         // ------------------------------------------------------------------
         // lifecycle
         // ------------------------------------------------------------------
         internal static void Ensure(LLMNPCPlugin plugin, ConfigEntry<string> cfgLlmModel)
         {
-            if (_plugin != null) return;
+            if (LLMNPCPlugin.Alive(_plugin)) return;
             _plugin = plugin;
             _cfgLlmModel = cfgLlmModel;
             _cfgEnabled = plugin.Config.Bind("Ollama", "Enabled", false,
@@ -206,6 +206,15 @@ namespace KKLLMNPC
             bool auto = _cfgAutoEndpoint != null && _cfgAutoEndpoint.Value;
             if (!auto || !_adopted || !_healthy || string.IsNullOrEmpty(_base)) return null;
             return _base + "/v1/chat/completions";
+        }
+
+        // The model the watcher last saw as current on /api/tags ("" = nothing
+        // adopted yet). Lets the payload's model field resolve the "local-model"
+        // placeholder against the real server instead of 404ing (see
+        // NPCInstance.EffectiveModel).
+        internal static string CurrentModel()
+        {
+            return _currentModel ?? "";
         }
 
         // ------------------------------------------------------------------

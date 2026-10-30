@@ -19,6 +19,12 @@
 # repo). A GitHub Actions workflow cannot produce these zips.
 set -euo pipefail
 
+# BUNDLE_BEPINEX=0 / --no-bepinex: package WITHOUT downloading the BepInEx core
+# (for offline builds). Default: bundle the pinned BepInEx 5.4.22.0 into each zip
+# so the release is a complete drop-in.
+BUNDLE_BEPINEX="${BUNDLE_BEPINEX:-1}"
+for _a in "$@"; do [ "$_a" = "--no-bepinex" ] && BUNDLE_BEPINEX=0; done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -30,6 +36,59 @@ print(m.group(3) if m else "0.0.0")
 PY
 )"
 echo "release version: $VERSION"
+
+# ---------------------------------------------------------------------------
+# BepInEx bundling — pin the SAME version + asset mapping as tools/install_bepinex.sh
+# (5.4.22.0 is empirically the doorstop-fixed release that boots KoboldKare; the
+# asset names are the 5.4.22.0 naming: win→x64, linux→unix, macos→x86). We fetch
+# it once into a cache and MERGE it into each per-platform stage tree, so the
+# release zip is a complete drop-in: unzip over the game folder and it just works.
+# The merge (cp -a .../BepInEx/. ) preserves the plugins/ we already staged.
+# ---------------------------------------------------------------------------
+BEPINEX_TAG="v5.4.22"
+BEPINEX_VERSION="5.4.22.0"
+BEPINEX_CACHE="$SCRIPT_DIR/.bepinex-cache"
+
+# bepinex_asset <variant> -> the release asset path for that platform's game build.
+bepinex_asset() {
+  case "$1" in
+    win)    echo "$BEPINEX_TAG/BepInEx_x64_${BEPINEX_VERSION}.zip" ;;
+    linux)  echo "$BEPINEX_TAG/BepInEx_unix_${BEPINEX_VERSION}.zip" ;;
+    macos)  echo "$BEPINEX_TAG/BepInEx_x86_${BEPINEX_VERSION}.zip" ;;
+    *) echo "ERROR: unknown platform $1" >&2; exit 1 ;;
+  esac
+}
+
+# fetch_bepinex <variant> <stage> — download + extract the pinned BepInEx into
+# <stage>/BepInEx (merging the core/managed/doorstop around the staged plugins/).
+fetch_bepinex() {
+  local variant="$1" stage="$2"
+  local asset; asset="$(bepinex_asset "$variant")"
+  local url="https://github.com/BepInEx/BepInEx/releases/download/${asset}"
+  if [ ! -f "$BEPINEX_CACHE/BepInEx/core/BepInEx.dll" ]; then
+    echo "Fetching BepInEx ${BEPINEX_VERSION} (${asset})..."
+    mkdir -p "$BEPINEX_CACHE"
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+    if ! curl -sL -o "$tmp/bepinex.zip" "$url"; then
+      echo "ERROR: BepInEx download failed from $url" >&2; exit 1
+    fi
+    if ! unzip -q "$tmp/bepinex.zip" -d "$tmp/x" 2>/dev/null; then
+      echo "ERROR: BepInEx archive is not a valid zip." >&2; exit 1
+    fi
+    if [ ! -d "$tmp/x/BepInEx/core" ] || [ ! -f "$tmp/x/BepInEx/core/BepInEx.dll" ]; then
+      echo "ERROR: downloaded archive has no BepInEx/core/BepInEx.dll (unexpected layout)." >&2; exit 1
+    fi
+    rm -rf "$BEPINEX_CACHE"
+    mv "$tmp/x/BepInEx" "$BEPINEX_CACHE"
+    trap - RETURN
+    echo "  cached at $BEPINEX_CACHE"
+  fi
+  # Merge the cached BepInEx core/managed/doorstop into the stage tree, keeping the
+  # plugins/ we already staged. cp -a .../. copies the contents (incl. hidden files).
+  cp -a "$BEPINEX_CACHE/." "$stage/BepInEx/"
+  echo "  bundled BepInEx ${BEPINEX_VERSION} into $stage/BepInEx/"
+}
 
 if [ "${1:-}" != "--no-build" ]; then
   ./build.sh
@@ -50,10 +109,11 @@ notes_platform() {
       cat <<'MD'
 # INSTALL — Windows (tested)
 
-1. Install **BepInEx 5.4.22+ x64** for Windows into your `KoboldKare` folder and run
-   the game once so BepInEx creates its folders.
-2. Unzip this archive over your KoboldKare folder (paths: `BepInEx/plugins/`).
-3. Launch the game. The mod's config appears at `BepInEx/config/com.kk.llmnpc.cfg`
+BepInEx 5.4.22 is **included** in this archive — no separate download needed.
+
+1. Unzip this archive over your `KoboldKare` folder (it drops `BepInEx/` — core,
+   managed, doorstop and `plugins/` — into the game root).
+2. Launch the game. The mod's config appears at `BepInEx/config/com.kk.llmnpc.cfg`
    after the first run; the debug console opens at http://127.0.0.1:8338/.
 
 Requires an OpenAI-compatible chat server (local LM Studio / llama.cpp /
@@ -66,12 +126,12 @@ MD
 # INSTALL — Linux (untested end-to-end)
 
 The game's Linux branch ships under a separate depot; this zip's payload is the
-same Mono IL plugin as the Windows one, and should load the same way.
+same Mono IL plugin as the Windows one, and BepInEx 5.4.22 (unix build) is
+**included** — no separate download needed.
 
-1. Install **BepInEx 5.4.22+ x64** for **Linux (unix build)** into your
-   `KoboldKare` folder and run the game once so BepInEx creates its folders.
-2. Unzip this archive over your KoboldKare folder (paths: `BepInEx/plugins/`).
-3. Launch the game. Config at `BepInEx/config/com.kk.llmnpc.cfg`; debug console
+1. Unzip this archive over your `KoboldKare` folder (it drops `BepInEx/` into the
+   game root).
+2. Launch the game. Config at `BepInEx/config/com.kk.llmnpc.cfg`; debug console
    at http://127.0.0.1:8338/.
 
 KNOWN UNTESTED: the game's Linux branch has shader/texture artefacts on custom
@@ -83,13 +143,12 @@ MD
       cat <<'MD'
 # INSTALL — macOS (untested — no Apple hardware in the lab)
 
-The payload is the same Mono IL plugin on every OS.
+The payload is the same Mono IL plugin on every OS, and BepInEx 5.4.22 is
+**included** — no separate download needed.
 
-1. Install **BepInEx 5.4.22+** for **macOS (unix build)** into your
-   `KoboldKare.app`'s game root (Contents/ side of the app bundle: the folder
-   that contains `KoboldKare_Data`) and run the game once.
-2. Unzip this archive over that folder (paths: `BepInEx/plugins/`).
-3. Launch the game. Config at `BepInEx/config/com.kk.llmnpc.cfg`; debug console
+1. Unzip this archive over your `KoboldKare.app`'s game root (Contents/ side of
+   the app bundle: the folder that contains `KoboldKare_Data`).
+2. Launch the game. Config at `BepInEx/config/com.kk.llmnpc.cfg`; debug console
    at http://127.0.0.1:8338/.
 
 If the macOS Mono player refuses to load a Unity-built mixed assembly, tell us
@@ -112,6 +171,8 @@ stage_and_zip() {
       [ -f "$f" ] && cp "$f" "$stage/BepInEx/plugins/prompt_extras/"
     done
   fi
+  # Bundle the pinned BepInEx core (unless --no-bepinex). Merges around plugins/.
+  if [ "${BUNDLE_BEPINEX}" = "1" ]; then fetch_bepinex "$plat" "$stage"; fi
   notes_platform "$plat" > "$stage/INSTALL.md"
   [ -f README.md ] && cp README.md "$stage/"
   mkdir -p "$stage/docs"
@@ -172,9 +233,10 @@ zip carries an INSTALL-<platform>.md (plus the full README + CONFIG/VORE docs).
   known shader/texture artefacts on custom maps (game-side, pre-existing).
 - **macOS — untested** (no Apple hardware in the lab).
 
-Requires an OpenAI-compatible chat server reachable from the game machine, and
-BepInEx 5.4.22+ for your platform (not bundled — it's the officially packaged
-one, per-OS).
+Each zip is a complete drop-in: **BepInEx 5.4.22 is pre-included** — just unzip
+over your KoboldKare folder and launch. It also requires an OpenAI-compatible chat
+server reachable from the game machine (local LM Studio / llama.cpp / a hosted
+endpoint) — see the README's Requirements section.
 
 ---
 

@@ -212,6 +212,12 @@ namespace KKLLMNPC
             // degree number itself means nothing to the model.
             result["facing"] = Compass.FacingText(BodyYaw());
             var nearby = DescribeNearby();
+            // The raw engine identity (dev mesh name + runtime instanceID) is for the
+            // data-dumper's vision corpus ONLY — it must never reach the model prompt,
+            // or it leaks the engine's internal naming (the same class TextUtil.ScrubTypeNames
+            // prevents for free text). Strip it from the model-facing copy; DataDump
+            // calls DescribeNearby() on its own and keeps both keys.
+            StripEngineIdentity(nearby);
             result["nearby"] = nearby;
             bool radarOn = _cfgRadarEnabled != null && _cfgRadarEnabled.Value;
             if (radarOn) result["radar"] = BuildSonarMap(nearby, _radarFilter);
@@ -1200,10 +1206,26 @@ namespace KKLLMNPC
             return null;
         }
 
+        // Drop the raw engine-identity keys (dev mesh name + runtime instanceID) from
+        // a DescribeNearby() entry list so they never reach the model prompt. Pure
+        // structural strip — the dumper (DataDump) builds its own copy with these keys
+        // still present. Guards every entry against a non-dict element.
+        private static void StripEngineIdentity(List<object> list)
+        {
+            if (list == null) return;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var d = list[i] as Dictionary<string, object>;
+                if (d == null) continue;
+                d.Remove("dev_name");
+                d.Remove("instance_id");
+            }
+        }
+
         // OverlapSphere within 14m, deduped by root, tagged: k=kobold p=player u=usable,
         // with name, distance, relative bearing, and the usable category (bed/toilet/play/nest).
         // Also detects the human player for hello-greetings.
-        private List<object> DescribeNearby()
+        internal List<object> DescribeNearby()
         {
             var list = new List<object>();
             if (!IsAlive(_kobold)) return list;
@@ -1357,6 +1379,13 @@ namespace KKLLMNPC
                         ["y"] = F(bpos.y),
                         ["z"] = F(bpos.z),
                         ["f"] = F(bfacing),
+                        // Raw engine identity for the data-dumper (vision-cortex training
+                        // corpus): the mesh name with "(Clone)" + the runtime instanceID.
+                        // The dumper records both the human class (n/k) and this dev name so
+                        // the model can learn the engine's internal naming later. Only the
+                        // dumper consumes these keys; the text senses ignore them.
+                        ["dev_name"] = k != null ? k.name : (u != null ? u.name : null),
+                        ["instance_id"] = rootComp != null ? rootComp.GetInstanceID() : 0,
                     };
                     if (stateNote != null) entry["note"] = stateNote;
                     if (isPlayer)

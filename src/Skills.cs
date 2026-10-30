@@ -193,6 +193,41 @@ namespace KKLLMNPC
             if (lines == null) return;
             lock (_skillLock) _skills.Clear();
             if (lines.Count > 0) SkillsAbsorbFrom(null, lines);
+            SeedBuiltinSkills(); // built-ins only fill an EMPTY box — a loaded/absorbed
+            // set (persisted or eaten-in) always wins, so this never clobbers the agent's own.
+        }
+
+        // Built-in navigation routines — seed a fresh agent with a few "walk around and
+        // look" procedures it can run by name (skill explore / skill scan / skill look
+        // around), so the model feels inside the world without authoring them first. The
+        // steps are exactly the primitives the model already has (run/turn/look/ls/sonar);
+        // these just compose them into a taught pattern. Built directly (not via the
+        // console `skill add` payload) so multi-step ';' bodies can't be split by the
+        // line parser. Stored as two parallel arrays (no C#7 tuples — mcs defaults to
+        // the C#5 dialect here).
+        private static readonly string[] BuiltinSkillNames =
+        { "look around", "scan", "explore" };
+        private static readonly string[][] BuiltinSkillSteps =
+        {
+            new[] { "look around" },
+            new[] { "look around", "ls", "sonar" },
+            new[] { "look around", "run 3", "look around", "run 3" },
+        };
+
+        private void SeedBuiltinSkills()
+        {
+            lock (_skillLock)
+            {
+                if (_skills.Count > 0) return; // persisted/absorbed skills win
+                for (int i = 0; i < BuiltinSkillNames.Length; i++)
+                {
+                    _skills.Add(new SkillRec
+                    {
+                        Name = BuiltinSkillNames[i],
+                        Steps = new List<string>(BuiltinSkillSteps[i]),
+                    });
+                }
+            }
         }
 
         private static string NormalizeSkillName(string n)

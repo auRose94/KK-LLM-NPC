@@ -17,6 +17,30 @@ reasoning pass server-side (Ollama `think=false`, llama.cpp/vLLM `chat_template_
 {enable_thinking:false}`, llama.cpp `reasoning_budget=0`) — the first thing to try when a
 thinking family "takes slow/lost turns"; the struggled-trio notes above are a candidate.
 
+Thinking families also get automatic slow-turn timeouts (`Qwen 3.5 / GPT-OSS / GLM /
+R1-class → 300s`; plain turns stay 120s) because their CoT burns wall-time before any
+answer text arrives. `[LLM] TimeoutSeconds` overrides for your box — a long timeout on a
+busy local server holds an Ollama parallel slot, so lower it if a second NPC starves.
+
+## NSFW-capable models — abliterated ≠ trained
+
+An abliterated/uncensored model has its refusals removed; it has NOT learned to
+*recognize or perform* adult content. For this mod's scenes the model needs
+**NSFW-trained** weights — finetunes whose training data included explicit RP — or the
+NPC misreads what is happening, breaks character at the worst moment, or narrates
+around the act. Trained-on-content models recognize sex mid-scene and roleplay it well.
+
+Field-tested example (2026-10-24): [`Jommarn/UNSEEN_Gemma_4_26B_NSFW-GGUF`](https://huggingface.co/Jommarn/UNSEEN_Gemma_4_26B_NSFW-GGUF)
+— a Gemma 4 26B finetune; recognized the scene, kept character, good RP prose. Gemma-4
+and Qwen-3.5-based NSFW finetunes are the primary targets: the family profiles
+(`gemma-nsfw` / `qwen-nsfw` in `ModelFamilies.cs`) auto-apply the right quirk set from
+the model id (`unseen` / `nsfw` markers), inheriting the base family's JSON contract
+handling and timeouts.
+
+When training our own (see the pass-2 plan in the training project): this is the bar —
+the trained model must handle explicit RP *and* the act-JSON contract, not merely
+refuse nothing.
+
 ## Custom chat templates (templates/chat/)
 
 For models whose **embedded** chat template mishandles the game's payloads,

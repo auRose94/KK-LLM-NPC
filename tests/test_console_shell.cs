@@ -116,6 +116,115 @@ static class ConsoleShellTests
         Assert(ConsoleShell.IsPayloadCommand("report"), "report is a payload command");
     }
 
+    // ---- think: the private-reasoning payload command ----
+
+    static void ParseThinkPayload()
+    {
+        var l = ConsoleShell.Parse("think I should eat first, then water the farm");
+        Assert(l.Cmd == "think" && l.Payload == "I should eat first, then water the farm", "think keeps payload");
+        var t = ConsoleShell.ParseReply("think planning the egg run\ncd nest");
+        Assert(t.Count == 2 && t[0].Cmd == "think" && t[1].Cmd == "cd", "think + command mixed reply");
+        Assert(ConsoleShell.IsPayloadCommand("think"), "think is a payload command");
+        Assert(ConsoleShell.ToolCallToLine("think", "{\"text\":\"need energy\"}") == "think need energy", "native think tool call");
+        Assert(ConsoleShell.HelpFor("think").Contains("chat NEVER hears it"), "think help names privacy");
+    }
+
+    // ---- Manual: the in-world `man <topic>` library ----
+
+    static void ManualTests()
+    {
+        // Every topic resolves to a non-empty page under the size cap.
+        foreach (var tp in Manual.Topics)
+        {
+            string err;
+            string page = Manual.Page(tp, out err);
+            Assert(err == null, "topic '" + tp + "' resolves without error");
+            Assert(page.StartsWith("MAN " + tp + "\n", StringComparison.Ordinal), "page '" + tp + "' carries a header");
+            Assert(page.Length > 120, "page '" + tp + "' has real content");
+            Assert(page.Length <= 1400, "page '" + tp + "' stays compact (" + page.Length + " chars)");
+        }
+        // Bare man → the topic list.
+        string err0;
+        string list = Manual.Page("", out err0);
+        Assert(err0 == null && list.Contains("MANUAL topics:") && list.Contains("vore"), "bare man lists topics");
+        // Aliases and prefixes.
+        string e;
+        Assert(Manual.Page("eat", out e).StartsWith("MAN vore", StringComparison.Ordinal), "alias eat → vore");
+        Assert(Manual.Page("buy", out e).StartsWith("MAN money", StringComparison.Ordinal), "alias buy → money");
+        Assert(Manual.Page("sonar", out e).StartsWith("MAN map", StringComparison.Ordinal), "alias sonar → map");
+        Assert(Manual.Page("farm", out e).StartsWith("MAN farming", StringComparison.Ordinal), "prefix farm → farming");
+        Assert(Manual.Page("stat", out e).StartsWith("MAN stations", StringComparison.Ordinal), "prefix stat → stations");
+        Assert(Manual.Page("sex", out e).StartsWith("MAN stations", StringComparison.Ordinal), "alias sex → stations");
+        // Ambiguous prefix refused, unknown refused with the list.
+        string eBad;
+        string bad = Manual.Page("wibble", out eBad);
+        Assert(eBad != null && bad.Contains("MANUAL topics:"), "unknown topic refused + list shown");
+        string eAmb;
+        Manual.Page("s", out eAmb); // "s" hits stations AND skills → ambiguous
+        Assert(eAmb != null, "ambiguous prefix refused");
+        // Page content sanity — the big playtest rules must survive.
+        string e2;
+        Assert(Manual.Page("stations", out e2).Contains("NEVER create energy or eggs"), "stations page carries the economy rule");
+        Assert(Manual.Page("farming", out e2).Contains("stage"), "farming page carries the growth ladder");
+        Assert(Manual.Page("needs", out e2).Contains("READY_TO_LAY"), "needs page carries the nest gate");
+        Assert(Manual.Page("vore", out e2).Contains("PERSON IN YOUR CARE"), "vore page carries the guest-care rule");
+        // Shell wiring: man is its own command (no longer a help alias).
+        Assert(ConsoleShell.Canonical("man") == "man", "man is a command of its own");
+        var m = ConsoleShell.ParseReply("man stations");
+        Assert(m.Count == 1 && m[0].Cmd == "man" && m[0].Args.Length == 1 && m[0].Args[0] == "stations", "man stations parses");
+        Assert(ConsoleShell.HelpFor("man").Contains("manual"), "help line mentions the manual");
+        Assert(ConsoleShell.ToolCallToLine("man", "{\"topic\":\"farming\"}") == "man farming", "native man tool call");
+    }
+
+    // ---- Calc + buf/calc/dist shell wiring ----
+
+    static void ScratchAndCalcTests()
+    {
+        string err;
+        Assert(Calc.Evaluate("2+2", out err) == "4", "2+2=4");
+        Assert(Calc.Evaluate("(12-4)*3", out err) == "24", "parens + precedence");
+        Assert(Calc.Evaluate("10/4", out err) == "2.5", "10/4=2.5");
+        Assert(Calc.Evaluate("2x3", out err) == "6", "2x3 = multiply");
+        Assert(Calc.Evaluate("-(2+3)", out err) == "-5", "unary minus on parens");
+        Assert(Calc.Evaluate("12 % 5", out err) == "2", "modulo");
+        Assert(Calc.Evaluate("sqrt(2)", out err) == "1.414214", "sqrt(2)");
+        Assert(Calc.Evaluate("min(3,9)", out err) == "3", "min(3,9)");
+        Assert(Calc.Evaluate("max(3, 9, 5)", out err) == "9", "max of three");
+        Assert(Calc.Evaluate("abs(-5)", out err) == "5", "abs(-5)");
+        Assert(Calc.Evaluate("round(3.6)", out err) == "4", "round(3.6)");
+        Assert(Calc.Evaluate("1 + 2 * 3", out err) == "7", "precedence without parens");
+        Assert(Calc.Evaluate("1/0", out err) == null && err != null, "division by zero refused");
+        Assert(Calc.Evaluate("2+", out err) == null && err != null, "trailing operator refused");
+        Assert(Calc.Evaluate("foo(1)", out err) == null && err != null, "unknown function refused");
+        Assert(Calc.Evaluate("((1)", out err) == null && err != null, "unbalanced parens refused");
+        Assert(Calc.Evaluate("", out err) == null && err != null, "empty refused");
+        Assert(Calc.Format(7.0) == "7" && Calc.Format(0.3333333333) == "0.333333", "result formatting");
+        // Shell wiring: buf is a payload command, calc/dist parse, aliases land.
+        Assert(ConsoleShell.Canonical("buf") == "buf", "buf is a command");
+        Assert(ConsoleShell.Canonical("scratch") == "buf" && ConsoleShell.Canonical("notes") == "buf", "buf aliases");
+        Assert(ConsoleShell.Canonical("math") == "calc" && ConsoleShell.Canonical("distance") == "dist", "calc/dist aliases");
+        Assert(ConsoleShell.IsPayloadCommand("buf"), "buf keeps its payload");
+        var b = ConsoleShell.Parse("buf check the east field after the rain");
+        Assert(b.Cmd == "buf" && b.Payload == "check the east field after the rain", "buf append payload");
+        var bc = ConsoleShell.Parse("buf clear");
+        Assert(bc.Cmd == "buf" && bc.Args.Length > 0 && bc.Args[0] == "clear", "buf clear parses");
+        var c = ConsoleShell.Parse("calc (12 - 4) * 3");
+        Assert(c.Cmd == "calc" && string.Join(" ", c.Args) == "(12 - 4) * 3", "calc expression arrives in args");
+        var d = ConsoleShell.Parse("dist bed mailbox");
+        Assert(d.Cmd == "dist" && d.Args.Length == 2 && d.Args[0] == "bed" && d.Args[1] == "mailbox", "dist two places");
+        var dn = ConsoleShell.Parse("dist 12 4 40 32");
+        Assert(dn.Cmd == "dist" && dn.Args.Length == 4, "dist raw coords");
+        Assert(ConsoleShell.HelpFor("buf").Contains("scratch"), "buf help says scratch");
+        Assert(ConsoleShell.HelpFor("tee").Contains("buf"), "tee help names the buffer");
+        Assert(ConsoleShell.ToolCallToLine("calc", "{\"expr\":\"2+2\"}") == "calc 2+2", "native calc tool call");
+        Assert(ConsoleShell.ToolCallToLine("dist", "{\"from\":\"bed\",\"to\":\"mailbox\"}") == "dist bed mailbox", "native dist tool call");
+        // The new filters are real pipe stages.
+        var t = ConsoleShell.ExplodePipeline("ps | nl | pick 2");
+        Assert(t != null && t.Count == 3 && t[1].IsFilter && t[2].IsFilter, "ps | nl | pick explodes");
+        var tee = ConsoleShell.ExplodePipeline("cat places | tee | head -n 3");
+        Assert(tee != null && tee.Count == 3 && tee[1].Cmd == "tee" && tee[1].IsFilter, "tee is a pass-through filter stage");
+    }
+
     // ---- IsCommandWord ----
 
     static void IsCommandWordTest()
@@ -286,6 +395,81 @@ static class ConsoleShellTests
         Assert(h.Length > 200, "help is substantial");
     }
 
+    // ---- HelpSmall: the tiered surface for small models ----
+
+    static void HelpSmallText()
+    {
+        string s = ConsoleShell.HelpSmall();
+        // The curated core is present, grouped and scannable.
+        Assert(s.Contains("READ:") && s.Contains("LOOK:") && s.Contains("MOVE:")
+            && s.Contains("SPEAK:") && s.Contains("LEARN:"), "HelpSmall has the five groups");
+        Assert(s.Contains("cd") && s.Contains("run") && s.Contains("look") && s.Contains("echo"), "HelpSmall lists the core verbs");
+        Assert(s.Contains("help all"), "HelpSmall points to the full set");
+        // Rarely-used / heavy commands are NOT dumped on small models.
+        Assert(!s.Contains("masturbate"), "HelpSmall omits the in-body verb");
+        Assert(!s.Contains("feed_blender"), "HelpSmall omits module commands");
+        // Much leaner than the full table.
+        Assert(s.Length < ConsoleShell.Help().Length, "HelpSmall is smaller than full Help");
+    }
+
+    // ---- skill: now a real, wired command (was dead) ----
+
+    static void SkillCommandWired()
+    {
+        Assert(ConsoleShell.Canonical("skill") == "skill", "skill is a real command (was unknown)");
+        Assert(ConsoleShell.HelpFor("skill") != null, "skill has a help line");
+        var tools = ConsoleTools.BuildTools();
+        bool sawSkill = false;
+        foreach (var t in tools)
+        {
+            var td = t as Dictionary<string, object>;
+            var fn = td == null ? null : td["function"] as Dictionary<string, object>;
+            var fnName = fn == null ? null : (string)fn["name"];
+            if (fnName == "skill") sawSkill = true;
+        }
+        Assert(sawSkill, "skill is offered as a tool");
+    }
+
+    // ---- built-in navigation routines: each step is a real command ----
+
+    static void BuiltinSkillSteps()
+    {
+        // The seeded navigation routines must be runnable by the model — every step
+        // parses to a real command (never an unknown word).
+        string[][] builtins = {
+            new[] { "look around" },
+            new[] { "look around", "ls", "sonar" },
+            new[] { "look around", "run 3", "look around", "run 3" },
+        };
+        foreach (var steps in builtins)
+            foreach (var step in steps)
+            {
+                var cl = ConsoleShell.Parse(step);
+                Assert(cl != null && !cl.IsUnknown, "builtin step parses: '" + step + "'");
+            }
+    }
+
+    // ---- movement manual page ----
+
+    static void MovementManualPage()
+    {
+        string err;
+        string page = Manual.Page("movement", out err);
+        Assert(err == null, "movement resolves without error");
+        Assert(page.StartsWith("MAN movement\n", StringComparison.Ordinal), "movement carries a header");
+        Assert(page.Length <= 1400, "movement stays compact (" + page.Length + " chars)");
+        Assert(page.Contains("look around") && page.Contains("run") && page.Contains("cd"), "movement teaches walk + look + travel");
+        Assert(page.Contains("skill explore"), "movement names the built-in explore skill");
+        // Aliases resolve to the page.
+        string e;
+        Assert(Manual.Page("walk", out e).StartsWith("MAN movement", StringComparison.Ordinal), "alias walk → movement");
+        Assert(Manual.Page("look", out e).StartsWith("MAN movement", StringComparison.Ordinal), "alias look → movement");
+        // Bare man lists the new topic.
+        string e0;
+        string list = Manual.Page("", out e0);
+        Assert(list.Contains("movement"), "bare man lists movement");
+    }
+
     // ---- module-registered extras (RegisterExtra) ----
 
     static void ExtraNames()
@@ -390,6 +574,9 @@ static class ConsoleShellTests
         ParseLineGoalSubcommands();
         ParseSonarArgs();
         ParseReportPayload();
+        ParseThinkPayload();
+        ManualTests();
+        ScratchAndCalcTests();
         SalvageTests();
         ParseLineCallStyle();
         ParseReplyMultiLine();
@@ -399,6 +586,10 @@ static class ConsoleShellTests
         ParseReplyBullets();
         EchoCatTailTests();
         HelpText();
+        HelpSmallText();
+        SkillCommandWired();
+        BuiltinSkillSteps();
+        MovementManualPage();
         ExtraNames();
         ToolCallToLineTests();
         ToolCallMarkupTests();

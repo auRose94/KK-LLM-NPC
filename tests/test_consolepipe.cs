@@ -50,7 +50,11 @@ internal static class TestConsolePipe
         // --- filter set ---
         True(ConsolePipe.IsFilter("grep") && ConsolePipe.IsFilter("head")
             && ConsolePipe.IsFilter("tail") && ConsolePipe.IsFilter("wc")
-            && ConsolePipe.IsFilter("sort") && ConsolePipe.IsFilter("uniq"), "filters recognized");
+            && ConsolePipe.IsFilter("sort") && ConsolePipe.IsFilter("uniq")
+            && ConsolePipe.IsFilter("sed") && ConsolePipe.IsFilter("cut")
+            && ConsolePipe.IsFilter("tr") && ConsolePipe.IsFilter("nl")
+            && ConsolePipe.IsFilter("tac") && ConsolePipe.IsFilter("pick")
+            && ConsolePipe.IsFilter("tee"), "filters recognized");
         True(!ConsolePipe.IsFilter("ps") && !ConsolePipe.IsFilter(null), "game commands are not filters");
 
         // --- pipeline explosion rules (needs the command table) ---
@@ -96,6 +100,43 @@ internal static class TestConsolePipe
         Eq("2 apple\n1 pear\n1 apple", ConsolePipe.RunFilter("uniq", new[] { "-c" }, "apple\napple\npear\napple"), "uniq -c counts");
         Eq(true, ConsolePipe.RunFilter("grep", new[] { "x" }, null).IndexOf("needs pipe input", StringComparison.Ordinal) >= 0,
             "filters without a pipe teach the shape");
+
+        // --- the powertools: sed / cut / tr / nl / tac / pick / sort -n / tee ---
+        string body = "kobold near the door\na rock\nKobold big and round\n";
+        Eq("kobold near the gate\na rock\nKobold big and round",
+            ConsolePipe.RunFilter("sed", new[] { "s/door/gate/" }, body), "sed substitutes first occurrence per line");
+        Eq("kobold near the gate\na rock\nKobold big and round",
+            ConsolePipe.RunFilter("sed", new[] { "s/door/gate/g" }, body), "sed /g replaces every occurrence");
+        Eq("kobold xear the door\na rock\nKobold big axd round",
+            ConsolePipe.RunFilter("sed", new[] { "s/n/x/" }, body), "sed without /g = first occurrence PER LINE");
+        Eq("and now this\na rock\nKobold big and round",
+            ConsolePipe.RunFilter("sed", new[] { "s/kobold near the door/and now this/" }, body),
+            "sed can rewrite a whole line");
+        Eq(true, ConsolePipe.RunFilter("sed", new[] { "oops" }, body).IndexOf("needs a substitution", StringComparison.Ordinal) >= 0,
+            "sed without s/// teaches");
+        Eq(true, ConsolePipe.RunFilter("sed", new[] { "s//x/" }, body).IndexOf("empty OLD", StringComparison.Ordinal) >= 0,
+            "sed with empty OLD teaches");
+        Eq("kobold near\nx y", ConsolePipe.RunFilter("cut", new[] { "-f", "1-2" }, "kobold near the door\nx y z"), "cut whitespace fields 1-2");
+        Eq("z\ne", ConsolePipe.RunFilter("cut", new[] { "-f2", "-f3" }, "kobold near z\nq w e r"), "cut keeps the last -f spec (like real cut)");
+        Eq("the door", ConsolePipe.RunFilter("cut", new[] { "-d", " ", "-f3-4" }, "kobold near the door"), "cut -d space with range");
+        Eq("a", ConsolePipe.RunFilter("cut", new[] { "-d:", "-f2" }, "x:a:b"), "cut -d: single char delim");
+        Eq(true, ConsolePipe.RunFilter("cut", new string[0], body).IndexOf("needs fields", StringComparison.Ordinal) >= 0,
+            "cut without -f teaches");
+        Eq("obold near the door\na rock", ConsolePipe.RunFilter("tr", new[] { "-d", "K" }, "Kobold near the door\na rock"), "tr -d deletes chars");
+        Eq("kobold near the door", ConsolePipe.RunFilter("tr", new[] { "K", "k" }, "Kobold near the door"), "tr X Y replaces one char");
+        Eq("   1  a\n   2  b", ConsolePipe.RunFilter("nl", new string[0], "a\nb"), "nl numbers lines");
+        Eq("b\na", ConsolePipe.RunFilter("tac", new string[0], "a\nb"), "tac reverses line order");
+        Eq("Kobold big and round", ConsolePipe.RunFilter("pick", new[] { "3" }, body), "pick grabs line N");
+        Eq(true, ConsolePipe.RunFilter("pick", new[] { "9" }, body).IndexOf("no line 9", StringComparison.Ordinal) >= 0,
+            "pick out of range teaches");
+        Eq("1 apple\n1 pear\n2 apple", ConsolePipe.RunFilter("sort", new[] { "-n" }, "2 apple\n1 pear\n1 apple"), "sort -n numeric by leading number");
+        Eq("2 apple\n1 pear\n1 apple", ConsolePipe.RunFilter("sort", new[] { "-rn" }, "2 apple\n1 pear\n1 apple"), "sort -rn reverse numeric");
+        // tee: passes the stream through unchanged AND hands it to the sink.
+        string teed = null;
+        string teeOut = ConsolePipe.RunFilter("tee", new string[0], "a\nb", delegate(string s) { teed = s; });
+        Eq("a\nb", teeOut, "tee passes the stream through");
+        Eq("a\nb", teed, "tee hands the stream to the sink");
+        Eq("a\nb", ConsolePipe.RunFilter("tee", new string[0], "a\nb"), "tee without a sink still passes through");
 
         if (_failed == 0) Console.WriteLine("test_consolepipe: all OK");
         else Console.WriteLine("test_consolepipe: " + _failed + " failure(s)");

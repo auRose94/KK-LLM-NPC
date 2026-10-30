@@ -66,7 +66,9 @@ namespace KKLLMNPC
         private const float SampleInterval = 0.4f;
         private const float MinPointSpacing = 0.5f;
         private const int TrailCap = 4000;
-        private const float LegReportDistance = 9f;
+        private const float LegReportDistance = 12f;
+        private static float _lastReportTime = -1e9f;
+        private const float LegReportMinInterval = 45f;
         private const float TrailFreshSeconds = 300f;
         // Persistence throttling: file writes are MAIN-THREAD POISON on network drives
         // (the game may run on a share — an SMB stall inside Update is a "freeze").
@@ -81,7 +83,7 @@ namespace KKLLMNPC
         {
             try
             {
-                if (plugin == null || !plugin._mainReady || !plugin.Running) return;
+                if (!LLMNPCPlugin.Alive(plugin) || !plugin._mainReady || !plugin.Running) return;
                 string scene;
                 try { scene = SceneManager.GetActiveScene().name; } catch (Exception) { scene = ""; }
                 if (scene != _scene)
@@ -246,6 +248,9 @@ namespace KKLLMNPC
             lock (_lock)
             {
                 if (!_legInit) return;
+                // Global throttle — with several moving players this event would
+                // flood every NPC's console stream and crowd out real turns.
+                if (Time.unscaledTime - _lastReportTime < LegReportMinInterval) return;
                 Vector3 delta = _lastPt - _legAnchor;
                 if (delta.magnitude < LegReportDistance) return;
                 ev = "ROUTE WATCH: your player is " + (_legJumped ? "hopping/parkouring" : "walking") + " "
@@ -255,6 +260,7 @@ namespace KKLLMNPC
                 _legAnchor = _lastPt;
                 _legJumped = false;
                 _lastDoorName = null;
+                _lastReportTime = Time.unscaledTime;
             }
             try { plugin.FanoutWorldEvent(ev); } catch (Exception) { }
         }

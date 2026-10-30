@@ -84,7 +84,7 @@ run_headless_suites() {
   run_suite goalresolver tests/test_goalresolver.cs -- src/PathCore.cs
   run_suite contextcore tests/test_contextcore.cs -- src/ContextCore.cs src/Json.cs src/Constants.cs
   run_suite chat        tests/test_chat_similarity.cs -- src/ChatSimilarity.cs
-  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ConsolePipe.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs
+  run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ConsolePipe.cs src/Manual.cs src/Calc.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs
   run_suite consolepipe tests/test_consolepipe.cs -- src/ConsolePipe.cs src/ConsoleShell.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs
   run_suite datarecord  tests/test_datarecord.cs -- src/DataRecord.cs src/Json.cs
   run_suite decisionparse tests/test_decisionparse.cs -- src/DecisionParse.cs src/Guidance.cs src/Json.cs

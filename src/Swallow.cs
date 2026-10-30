@@ -221,7 +221,7 @@ namespace KKLLMNPC
 
         internal static SwallowEffect Effect()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowEffect : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowEffect : null;
             if (cfg == null) return SwallowEffect.Egg;
             return cfg.Value;
         }
@@ -241,7 +241,7 @@ namespace KKLLMNPC
         // --------------------------
         internal static SwallowDestination DestinationFor(Kobold actor)
         {
-            var enabled = Plugin != null ? Plugin._cfgSwallowEnabled : null;
+            var enabled = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowEnabled : null;
             if (enabled == null || !enabled.Value) return SwallowDestination.Off;
             try
             {
@@ -284,7 +284,7 @@ namespace KKLLMNPC
 
         internal static float GrowPercentFraction()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowGrowPercent : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowGrowPercent : null;
             float pct = 10f;
             try { if (cfg != null) pct = cfg.Value; } catch (Exception) { }
             if (pct < 0f) pct = 0f;
@@ -297,30 +297,29 @@ namespace KKLLMNPC
             var tryDrop = typeof(Grabber).GetMethod("TryDrop", BindingFlags.Instance | BindingFlags.Public);
             if (tryDrop == null)
             {
-                if (Plugin != null) Plugin.Logger.LogWarning("swallow: TryDrop not found — trigger disabled");
+                if (LLMNPCPlugin.Alive(Plugin)) Plugin.Logger.LogWarning("swallow: TryDrop not found — trigger disabled");
                 return;
             }
             harmony.Patch(tryDrop,
                 prefix: new HarmonyLib.HarmonyMethod(typeof(SwallowManager).GetMethod(
                     nameof(TryDropPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
-            if (Plugin != null) Plugin.Logger.LogInfo("swallow: TryDrop trigger patched (drop while looking up).");
+            if (LLMNPCPlugin.Alive(Plugin)) Plugin.Logger.LogInfo("swallow: TryDrop trigger patched (drop while looking up).");
         }
 
         // ------------------------------------------------------------------
         // Trigger: returns TRUE to let the normal drop run, FALSE when the
         // release gesture was consumed by a swallow (or several, one per held
-        // person). Two gestures, in precedence order:
-        //   1. Self-eat (v1): the PLAYER's drop while steeply looking up —
-        //      everything held that is a person goes inside the player.
-        //   2. Force-feeding: ANY kobold's drop whose held person sits right on
-        //      another kobold's HEAD makes the receiver swallow them.
-        // Everything else in hand still gets released, like a drop.
+        // The ONLY remaining release-triggered gesture is the player's steep
+        // look-up self-eat (below). Everything else in hand just drops —
+        // the on-a-head force-feed gesture was removed (see the INSERT button
+        // docs). Returns TRUE to let the normal drop run, FALSE when a
+        // self-eat swallow was started.
         // ------------------------------------------------------------------
         private static bool TryDropPrefix(Grabber __instance)
         {
             try
             {
-                if (Plugin == null) return true;
+                if (!LLMNPCPlugin.Alive(Plugin)) return true;
                 var cfgEnabled = Plugin._cfgSwallowEnabled;
                 // Double gate: SwallowEnabled AND a destination picked. Destination OFF
                 // (the operator's default, F7/WebUI controllable) deliberately
@@ -364,7 +363,11 @@ namespace KKLLMNPC
                 }
                 if (persons.Count == 0) return true;
 
-                // Gesture 1: self-eat — player-only, requires the steep look-up.
+                // Self-eat look-up fallback — player-only, requires the steep
+                // look-up (the pre-button gesture). The DELIBERATE button path is
+                // TryInsert(); the player can still lean back and drop a held
+                // person to eat them, but only when their face is clearly pointing
+                // at the ceiling.
                 if (NPCInstance.IsPlayerKobold(dropper)
                     && SwallowLogic.IsLookUp(CameraForwardY(), LookUpDot()))
                 {
@@ -376,18 +379,66 @@ namespace KKLLMNPC
                     return false;
                 }
 
-                // Gesture 2: force-feeding — any dropper, no look-up needed; the
-                // held person must be right on a receiver's head.
-                if (!ForceFeeding()) return true;
-                var accepted = new List<Kobold>();
+                // ------------------------------------------------------------------
+                // PHYSICS TRIGGERS (2026-10-25) — drop-position vore, an alternative
+                // to the button system. Same human-owned gates as every swallow
+                // (master switch + the relevant body's destination armed — an Off
+                // destination disarms everything above already).
+                // ------------------------------------------------------------------
                 foreach (var victim in persons)
                 {
-                    var receiver = FindShoveEater(dropper, victim);
-                    if (receiver != null && Begin(receiver, victim, dropper)) accepted.Add(victim);
+                    // (1) Release BELOW the waist: the held person drops into the
+                    // dropper's armed south hole (pussy/anal/dick/nipple). The MOUTH
+                    // stays the look-up gesture — dropping below never routes there.
+                    // Works for any dropper: the player AND agents (LLM-into-LLM via
+                    // a drop gesture; hole/fate resolve from the dropper's own picks).
+                    try
+                    {
+                        float dy = victim.transform.position.y - dropper.transform.position.y;
+                        var dest = DestinationFor(dropper);
+                        if (dy < -0.4f && dest != SwallowDestination.Mouth
+                            && !IsDigestingVictim(victim) && !EaterBusy(dropper)
+                            && Begin(dropper, victim, dropper))
+                        {
+                            ReleaseAllFromGrabber(__instance, persons);
+                            return false;
+                        }
+                    }
+                    catch (Exception) { }
+
+                    // (2) Release ONTO a third kobold standing below the release
+                    // point: the dropper STUFFS the held person into them — the
+                    // third body becomes the eater. This is "feed your friend by
+                    // dropping food on them".
+                    try
+                    {
+                        var third = NearestKoboldUnder(victim.transform.position, dropper, victim);
+                        if (third != null && DestinationFor(third) != SwallowDestination.Off
+                            && !IsDigestingVictim(victim) && !EaterBusy(third)
+                            && (PlayerVictimsAllowed() || !NPCInstance.IsPlayerKobold(victim))
+                            && Begin(third, victim, third))
+                        {
+                            ReleaseAllFromGrabber(__instance, persons);
+                            return false;
+                        }
+                    }
+                    catch (Exception) { }
+
+                    // Record the release either way: the landing monitor must treat
+                    // freshly-released kobolds as thrown objects, not self-falling
+                    // eaters ("they fall on someone THAT DIDN'T DROP THEM").
+                    int vid = victim.GetInstanceID();
+                    _recentRelease[vid] = Time.unscaledTime;
+                    _recentReleaseDropper[vid] = dropper.GetInstanceID();
                 }
-                if (accepted.Count == 0) return true;
-                ReleaseAllFromGrabber(__instance, accepted);
-                return false;
+
+                // Otherwise — nothing: a held person released while facing
+                // anywhere else just drops normally. The accidental cascade (a
+                // still-swinging victim being grabbed by a second eater) can no
+                // longer happen: the release-on-a-head force-feed path was
+                // removed, so the only way a held person is swallowed is the
+                // deliberate TryInsert button.
+                return true;
             }
             catch (Exception e)
             {
@@ -396,23 +447,497 @@ namespace KKLLMNPC
             }
         }
 
+        // ------------------------------------------------------------------
+        // SOUTH VORE (2026-10-25, renamed from "landing vore") — the falling-half
+        // of the physics triggers. A kobold that lands on another body takes them
+        // in through a SOUTH hole (the game has no mouth-first swallow animation,
+        // so landing-vore routes pussy/anal per the eater's vore_target pick,
+        // defaulting to pussy). Two tiers:
+        //   CROUCH-INTENT — fall while HOLDING CROUCH and land on their head: the
+        //   deliberate gesture. Fall-speed gate is soft (a crouch-hop counts),
+        //   radius generous, and it visually reads correctly.
+        //   HARD LANDING — no crouch: the accident tier keeps the fast-fall gate.
+        // A freshly-RELEASED kobold is exempt (thrown object — the release
+        // triggers own them), a kobold never eats the body that just dropped
+        // them, and NPCs never physics-eat the local player. All the
+        // human-owned gates apply per eater (SwallowEnabled + destination armed).
+        // ------------------------------------------------------------------
+        private static readonly Dictionary<int, float> _recentRelease = new Dictionary<int, float>();
+        private static readonly Dictionary<int, int> _recentReleaseDropper = new Dictionary<int, int>();
+        private class FallTrack { public float LastVy; public bool Falling; public bool CrouchedFall; }
+        private static readonly Dictionary<int, FallTrack> _fallTrack = new Dictionary<int, FallTrack>();
+        private static float _lastLandingScan;
+        private static System.Reflection.FieldInfo _crouchField;
+
+        // The controller's crouch state (crouchAmount > 0.4) — readable for player
+        // and agent bodies alike, since the game itself drives it from either input.
+        private static bool IsCrouched(Kobold k)
+        {
+            try
+            {
+                var ctrl = k.GetComponent<KoboldCharacterController>();
+                if (ctrl == null) return false;
+                if (_crouchField == null)
+                {
+                    var t = typeof(KoboldCharacterController);
+                    _crouchField = t.GetField("crouchAmount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                                ?? t.GetField("CrouchAmount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                }
+                if (_crouchField == null) return false;
+                return Convert.ToSingle(_crouchField.GetValue(ctrl), CultureInfo.InvariantCulture) > 0.4f;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // The landing swallow's hole: always a south hole. The eater's own
+        // vore_target pick (pussy/anal/dick/nipple) wins; an armed mouth falls
+        // back to pussy. Off (or the master switch) = disarmed → null.
+        private static SwallowDestination? SouthHoleFor(Kobold eater)
+        {
+            var d = DestinationFor(eater);
+            if (d == SwallowDestination.Off) return null;
+            if (d == SwallowDestination.Pussy || d == SwallowDestination.Anal
+                || d == SwallowDestination.Dick || d == SwallowDestination.Nipple) return d;
+            return SwallowDestination.Pussy;
+        }
+
+        // Called from the plugin's main-thread tick. Throttled; zero cost when
+        // vore is disarmed (the track clears so stale fall state can't fire later).
+        internal static void SouthVoreTick()
+        {
+            if (!LLMNPCPlugin.Alive(Plugin)) return;
+            var cfgEnabled = Plugin._cfgSwallowEnabled;
+            if (cfgEnabled == null || !cfgEnabled.Value)
+            {
+                if (_fallTrack.Count > 0) { _fallTrack.Clear(); _recentRelease.Clear(); _recentReleaseDropper.Clear(); }
+                return;
+            }
+            float now = Time.unscaledTime;
+            if (now - _lastLandingScan < 0.12f) return;
+            _lastLandingScan = now;
+
+            var kobolds = SceneCache.Find<Kobold>(2f);
+            if (kobolds == null) return;
+            foreach (var k in kobolds)
+            {
+                if (k == null || k.transform == null) continue;
+                Rigidbody rb = null;
+                try { rb = k.body; } catch (Exception) { }
+                if (rb == null) continue;
+                int id = k.GetInstanceID();
+                FallTrack ft;
+                if (!_fallTrack.TryGetValue(id, out ft)) { ft = new FallTrack(); _fallTrack[id] = ft; }
+                float vy;
+                try { vy = rb.velocity.y; } catch (Exception) { continue; }
+                bool crouched = IsCrouched(k);
+                float gate = crouched ? -2.5f : -7f;   // crouch is intent — a soft gate
+                bool falling = vy < gate;
+                if (ft.Falling && falling && crouched) ft.CrouchedFall = true;  // held crouch through the descent
+                if (ft.Falling && !falling && vy > -2f)
+                {
+                    // Just landed. Crouch-intent lands ON their head (above them,
+                    // tight flat radius); the accident tier keeps the wide window.
+                    bool intent = ft.CrouchedFall || crouched;
+                    var target = intent
+                        ? NearestKoboldAround(k.transform.position, k, 1.2f, 0.2f, 1.8f)
+                        : NearestKoboldAround(k.transform.position, k, 1.7f, -1.2f, 1.6f);
+                    if (target != null) TrySouthSwallow(k, target, intent, now);
+                }
+                if (!falling) ft.CrouchedFall = false;
+                ft.LastVy = vy;
+                ft.Falling = falling;
+            }
+            // stale-entry cleanup (released/despawned bodies age out; the fall
+            // track rebuilds within one scan, so a bulk clear is cheapest)
+            if (_fallTrack.Count > 96) _fallTrack.Clear();
+            if (_recentRelease.Count > 32)
+            {
+                var drop = new List<int>();
+                foreach (var kv in _recentRelease) if (now - kv.Value > 3f) drop.Add(kv.Key);
+                foreach (var d in drop) { _recentRelease.Remove(d); _recentReleaseDropper.Remove(d); }
+            }
+        }
+
+        private static void TrySouthSwallow(Kobold faller, Kobold target, bool intent, float now)
+        {
+            try
+            {
+                int fid = faller.GetInstanceID(), tid = target.GetInstanceID();
+                // The landed-on just released this faller? Then the release
+                // triggers own the pair — never let the throwee eat their dropper.
+                float relTime;
+                int dropperId;
+                if (_recentRelease.TryGetValue(fid, out relTime) && now - relTime < 2f
+                    && _recentReleaseDropper.TryGetValue(fid, out dropperId) && dropperId == tid)
+                    return;
+                // The faller was itself freshly released — it's a thrown object,
+                // not a self-falling eater.
+                if (_recentRelease.TryGetValue(fid, out relTime) && now - relTime < 0.8f) return;
+                // Landed-on is freshly released (a thrown victim mid-flight to its
+                // eater) — don't double-trigger; the release path owns the pair.
+                if (_recentRelease.TryGetValue(tid, out relTime) && now - relTime < 0.8f) return;
+
+                SwallowDestination? hole = SouthHoleFor(faller);
+                if (hole == null) return;   // the faller's own arming
+                if (EaterBusy(faller) || IsDigestingVictim(target)) return;
+                bool eaterIsPlayer = NPCInstance.IsPlayerKobold(faller);
+                if (!eaterIsPlayer && NPCInstance.IsPlayerKobold(target)) return; // NPCs never physics-eat the player
+                if (NPCInstance.IsPlayerKobold(target) && NPCInstance.IsPlayerKobold(faller) && !PlayerVictimsAllowed()) return;
+
+                if (Begin(faller, target, faller, holeOverride: hole))
+                    try { LLMNPCPlugin.Log?.LogInfo("south vore" + (intent ? " (crouch)" : " (hard landing)")
+                        + ": a falling body took " + CleanNameForLog(target) + " in through their "
+                        + SwallowLogic.DestinationLabel(hole.Value).ToLowerInvariant()); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
+        private static string CleanNameForLog(Kobold k)
+        {
+            try { return KKLLMNPC.NPCInstance.CleanName(k.name); } catch (Exception) { return "kobold"; }
+        }
+
+        // The nearest OTHER kobold standing under/near a release point (for the
+        // drop-onto-third stuffing trigger). Excludes both bodies and anyone
+        // currently being digested.
+        private static Kobold NearestKoboldUnder(Vector3 pos, Kobold excludeA, Kobold excludeB)
+        {
+            Kobold best = null;
+            float bestDist = 1.8f;
+            var kobolds = SceneCache.Find<Kobold>(2f);
+            if (kobolds == null) return null;
+            foreach (var k in kobolds)
+            {
+                if (k == null || k.transform == null || k == excludeA || k == excludeB) continue;
+                if (IsDigestingVictim(k)) continue;
+                Vector3 p = k.transform.position;
+                float dy = pos.y - p.y;
+                if (dy < -0.2f || dy > 2.5f) continue;   // must be below the release point
+                float flat = new Vector2(p.x - pos.x, p.z - pos.z).magnitude;
+                if (flat > bestDist) continue;
+                best = k; bestDist = flat;
+            }
+            return best;
+        }
+
+        // Nearest OTHER body within a flat radius and a vertical window of a point
+        // (the south-vore landing tiers use different windows: crouch-intent lands
+        // ON their head — above; the accident tier keeps the wide overlap window).
+        private static Kobold NearestKoboldAround(Vector3 pos, Kobold self, float flatMax, float dyMin, float dyMax)
+        {
+            Kobold best = null;
+            float bestDist = flatMax;
+            var kobolds = SceneCache.Find<Kobold>(2f);
+            if (kobolds == null) return null;
+            foreach (var k in kobolds)
+            {
+                if (k == null || k.transform == null || k == self) continue;
+                Vector3 p = k.transform.position;
+                float dy = p.y - pos.y;
+                if (dy < dyMin || dy > dyMax) continue;
+                float flat = new Vector2(p.x - pos.x, p.z - pos.z).magnitude;
+                if (flat > bestDist) continue;
+                best = k; bestDist = flat;
+            }
+            return best;
+        }
+
+        // ------------------------------------------------------------------
+        // INSERT BUTTON — the deliberate, distance-gated "drop from the sky"
+        // consume (the user's fix for the accidental cascade). The old on-a-head
+        // force-feed path fired on EVERY release and could grab a still-swinging
+        // victim that was already being eaten. INSERT replaces that: consumption
+        // now happens ONLY by an explicit button press, so a held person can
+        // never be grabbed by a second eater by accident.
+        //
+        // INSERT teleports the held PERSON you are FACING within [min,max] metres
+        // up high above the eaten-by body (the sky-drop) and swallows them like
+        // any other session. The END button cycles the SWELL MODE that decides
+        // who the eaten-by body is:
+        //   SELF  = a held person you face teleports into YOUR OWN mouth
+        //           (the player eats what they're holding) — the default
+        //           "consume this player" button the user asked for.
+        //   FORCE = the held person you face teleports into the mouth of the
+        //           nearest OTHER live non-player kobold standing near you
+        //           (self-insert / force-feed: yourself is the eaten-by body).
+        // Both require a held PERSON you can see and a valid destination (a
+        // per-agent vore_target override wins). A held person ALREADY inside
+        // someone's stomach is refused (AlreadyInside) — the first line of the
+        // cascade guard; Begin()'s _active check is the second.
+        // ------------------------------------------------------------------
+
+        // Status codes returned to the player via TryInsert.
+        internal enum InsertStatus
+        {
+            Success,          // swallowed
+            Disabled,         // master switch or swell mode off
+            NoBody,           // player has no body
+            NoTarget,         // no held person facing us within the window
+            AlreadyInside,    // victim is already being swallowed (cascade guard)
+            Refused,          // Begin declined (no valid eaten-by body)
+            NoReceiver,       // FORCE mode: no other live kobold near us
+            ReceiverBusy,     // FORCE mode: nearest kobold is being eaten
+        }
+
+        // Press INSERT. Returns whether a swallow started + a status for the
+        // player. Main-thread only. `eater` = the LOCAL PLAYER's body (whose
+        // hands hold and whose menu key is pressed).
+        internal static bool TryInsert(Kobold eater, out InsertStatus status)
+        {
+            status = InsertStatus.Refused;
+            if (!LLMNPCPlugin.Alive(Plugin)) { status = InsertStatus.Disabled; return false; }
+            if (eater == null || eater.transform == null) { status = InsertStatus.NoBody; return false; }
+            var cfgEnabled = Plugin._cfgSwallowEnabled;
+            if (cfgEnabled == null || !cfgEnabled.Value) { status = InsertStatus.Disabled; return false; }
+
+            SwallowLogic.SwallowSwellMode mode = SwallowManager.SwellMode();
+            if (mode == SwallowLogic.SwallowSwellMode.Off) { status = InsertStatus.Disabled; return false; }
+            // Only the LOCAL PLAYER can press INSERT.
+            if (!NPCInstance.IsPlayerKobold(eater)) { status = InsertStatus.Refused; return false; }
+
+            // The held PERSON we are facing within [min,max] metres.
+            Kobold victim = null;
+            if (!FindInsertedVictim(eater, out victim)) { status = InsertStatus.NoTarget; return false; }
+
+            // Refuse a person already inside someone's stomach — first guard.
+            if (IsDigestingVictim(victim)) { status = InsertStatus.AlreadyInside; return false; }
+
+            // Force mode: find the nearest other live non-player kobold near us.
+            if (mode == SwallowLogic.SwallowSwellMode.Force)
+            {
+                Kobold receiver = null;
+                if (!FindForceReceiver(eater, victim, out receiver, out bool busy))
+                {
+                    status = busy ? InsertStatus.ReceiverBusy : InsertStatus.NoReceiver;
+                    return false;
+                }
+                return BeginInsertFor(receiver, victim, eater, out status);
+            }
+            // Self mode: eat into your own mouth.
+            return BeginInsertFor(eater, victim, eater, out status);
+        }
+
+        // Agent-initiated insert: an LLM kobold eats the person it is HOLDING — the
+        // LLM-into-LLM vore path (the "force their two contexts together" feature:
+        // the absorb/egg fates merge the victim's memories into the eater). Same
+        // human-owned gates as the player's INSERT (SwallowEnabled + a non-Off mode —
+        // the prompt's vore drive is the feeling, the human owns whether the act
+        // exists), plus agent-specific guards: never the local player as victim
+        // (eat_player is that feature), one swallow at a time per eater.
+        internal static bool TryInsertForAgent(Kobold eater, out InsertStatus status)
+        {
+            status = InsertStatus.Refused;
+            if (!LLMNPCPlugin.Alive(Plugin)) { status = InsertStatus.Disabled; return false; }
+            if (eater == null || eater.transform == null) { status = InsertStatus.NoBody; return false; }
+            var cfgEnabled = Plugin._cfgSwallowEnabled;
+            if (cfgEnabled == null || !cfgEnabled.Value) { status = InsertStatus.Disabled; return false; }
+
+            SwallowLogic.SwallowSwellMode mode = SwallowManager.SwellMode();
+            if (mode == SwallowLogic.SwallowSwellMode.Off) { status = InsertStatus.Disabled; return false; }
+
+            // One at a time: an eater already digesting someone refuses another.
+            if (EaterBusy(eater)) { status = InsertStatus.ReceiverBusy; return false; }
+
+            // The held PERSON we are facing within [min,max] metres.
+            Kobold victim = null;
+            if (!FindInsertedVictim(eater, out victim)) { status = InsertStatus.NoTarget; return false; }
+
+            // Agent vore is kobold-into-kobold: the local player is eat_player's
+            // domain, not this tool's.
+            if (NPCInstance.IsPlayerKobold(victim)) { status = InsertStatus.Refused; return false; }
+
+            // Refuse a person already inside someone's stomach — first guard.
+            if (IsDigestingVictim(victim)) { status = InsertStatus.AlreadyInside; return false; }
+
+            if (mode == SwallowLogic.SwallowSwellMode.Force)
+            {
+                Kobold receiver = null;
+                if (!FindForceReceiver(eater, victim, out receiver, out bool busy))
+                {
+                    status = busy ? InsertStatus.ReceiverBusy : InsertStatus.NoReceiver;
+                    return false;
+                }
+                return BeginInsertFor(receiver, victim, eater, out status);
+            }
+            return BeginInsertFor(eater, victim, eater, out status);
+        }
+
+        // END button — cycle the swell mode Off -> Self -> Force -> Off. Returns
+        // the new mode. Main-thread only.
+        internal static SwallowLogic.SwallowSwellMode EndToggleMode()
+        {
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowSwellMode : null;
+            if (cfg == null) return SwallowLogic.SwallowSwellMode.Off;
+            SwallowLogic.SwallowSwellMode next = SwallowLogic.NextSwallowSwellMode(cfg.Value);
+            cfg.Value = next;
+            return next;
+        }
+
+        // The held PERSON we are facing within [min,max] metres of the eater.
+        // Player victims are gated by the player-vs-player permission. Returns
+        // true when a valid held target was found.
+        private static bool FindInsertedVictim(Kobold eater, out Kobold victim)
+        {
+            victim = null;
+            var held = NPCInstance.HeldScanFor(eater);
+            float min = InsertRangeMin();
+            float max = InsertRangeMax();
+            foreach (var h in held)
+            {
+                if (h == null || h.Victim == null || h.Victim == eater) continue;  // can't eat yourself
+                if (h.IsPlayerVictim && !PlayerVictimsAllowed()) continue;
+                float dist = h.Dist > 0f ? h.Dist : Mathf.Max(min, max * 0.5f);
+                if (!SwallowLogic.InsertInRange(dist, min, max)) continue;
+                victim = h.Victim;
+                return true;
+            }
+            return false;
+        }
+
+        // FORCE mode target: the nearest OTHER live non-player kobold (the
+        // eaten-by body) standing within max metres of the held victim, not
+        // grabbed, and not being eaten. `busy` reports when the nearest candidate
+        // is being eaten vs. none existing.
+        private static bool FindForceReceiver(Kobold eater, Kobold victim, out Kobold receiver, out bool busy)
+        {
+            receiver = null;
+            busy = false;
+            float max = InsertRangeMax();
+            float bestDist = max;
+            // Two passes over the candidates: prefer the nearest FREE receiver (not
+            // itself digesting someone — EaterBusy), and remember the nearest BUSY one
+            // as a fallback so we can still report ReceiverBusy if no free receiver
+            // exists. Without this the nearest kobold being busy blocked the whole
+            // FORCE insert even when a farther free kobold was available.
+            Kobold bestBusy = null; float bestBusyDist = float.MaxValue;
+            try
+            {
+                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
+                {
+                    if (k == null || k == eater || k == victim) continue;
+                    if (NPCInstance.IsPlayerKobold(k)) continue;               // can't eat into a player body
+                    try { if (k.grabbed) continue; } catch (Exception) { }
+                    float dist;
+                    try { dist = Vector3.Distance(k.transform.position, victim.transform.position); }
+                    catch (Exception) { continue; }
+                    if (dist > max) continue;
+                    bool eating = false;
+                    try { eating = EaterBusy(k); } catch (Exception) { }
+                    if (eating)
+                    {
+                        if (dist < bestBusyDist) { bestBusyDist = dist; bestBusy = k; }
+                        continue;
+                    }
+                    if (dist < bestDist) { bestDist = dist; receiver = k; }
+                }
+            }
+            catch (Exception) { }
+            if (receiver != null) return true;            // a free receiver was found
+            if (bestBusy != null) { receiver = bestBusy; busy = true; return true; }
+            return false;
+        }
+
+        // Execute a start: teleport the held victim high above the eaten-by body
+        // (the sky-drop — Begin's pull phase slides them back down the maw), then
+        // Begin() owns them. The held body's spring-anchor is released from the
+        // grabber so it can't fight the pull-in pin.
+        private static bool BeginInsertFor(Kobold eater, Kobold victim, Kobold actor, out InsertStatus status)
+        {
+            status = InsertStatus.Refused;
+            // Sky-drop: raise the held victim well above the eaten-by body's head so
+            // the pull-in visually falls in (StartPos for the phase). Hoisted out of
+            // the try so the else-branch can undo it if Begin declines.
+            Vector3 top = actor.transform.position + Vector3.up * 2.0f;
+            try
+            {
+                victim.transform.position = top;
+                try { victim.body.isKinematic = true; } catch (Exception) { }
+            }
+            catch (Exception) { }
+
+            bool ok;
+            if (SwallowManager.Begin(actor, victim, actor))
+            {
+                status = InsertStatus.Success;
+                ok = true;
+                ReleaseFromGrabber(actor, victim);
+            }
+            else
+            {
+                status = InsertStatus.Refused;
+                ok = false;
+                // Undo the sky-drop + kinematic flag we set above — Begin declined
+                // (e.g. the victim was already inside someone), so RestoreVictimBody
+                // will never run for this attempt and the held person would otherwise
+                // stay frozen at +2m with no gravity.
+                try { victim.transform.position = top; } catch (Exception) { }
+                try { victim.body.isKinematic = false; } catch (Exception) { }
+            }
+            return ok;
+        }
+
+        // Drop one held victim from the local player's grabber (no throw).
+        private static void ReleaseFromGrabber(Kobold eater, Kobold victim)
+        {
+            try
+            {
+                var grabber = eater.GetComponentInChildren<Grabber>(true);
+                if (grabber == null) return;
+                var raw = NPCInstance.GetField<object>(grabber, "grabbedObjects") as IList;
+                if (raw == null) return;
+                for (int i = raw.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        var kob = NPCInstance.GetProp(raw[i], "kobold") as Kobold;
+                        if (kob == null || kob != victim) continue;
+                        var rel = raw[i].GetType().GetMethod("Release", BindingFlags.Instance | BindingFlags.Public);
+                        rel?.Invoke(raw[i], null);
+                    }
+                    catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+
         private static bool PlayerVictimsAllowed()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowPlayerVictims : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowPlayerVictims : null;
             return cfg != null && cfg.Value;
         }
 
-        private static bool ForceFeeding()
+        // The END-button mode the INSERT swallow button acts on. OFF = nothing is
+        // consumable (safe default); SELF teleports into your own mouth; FORCE into
+        // the nearest live non-player kobold you're standing near.
+        internal static SwallowLogic.SwallowSwellMode SwellMode()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowForceFeeding : null;
-            return cfg != null && cfg.Value;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowSwellMode : null;
+            if (cfg == null) return SwallowLogic.SwallowSwellMode.Off;
+            return cfg.Value;
+        }
+
+        // The INSERT distance window around a held target, in metres (min then max).
+        internal static float InsertRangeMin()
+        {
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowInsertRangeMin : null;
+            float v = SwallowLogic.DefaultInsertRangeMin;
+            try { if (cfg != null) v = cfg.Value; } catch (Exception) { }
+            return v;
+        }
+
+        internal static float InsertRangeMax()
+        {
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowInsertRangeMax : null;
+            float v = SwallowLogic.DefaultInsertRangeMax;
+            try { if (cfg != null) v = cfg.Value; } catch (Exception) { }
+            return v;
         }
 
         // The armed entry hole for ALL swallow triggers (config [LittleTreats]
         // SwallowDestination — F7 cycles it, WebUI sets it). OFF disarms everything.
         internal static SwallowDestination Destination()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowDestination : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowDestination : null;
             if (cfg == null) return SwallowDestination.Off;
             return cfg.Value;
         }
@@ -441,7 +966,7 @@ namespace KKLLMNPC
         private static float _hintedDestinationOff;
         private static void MaybeHintDestination()
         {
-            var cfgEnabled = Plugin != null ? Plugin._cfgSwallowEnabled : null;
+            var cfgEnabled = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowEnabled : null;
             if (cfgEnabled == null || !cfgEnabled.Value) return;
             if (Destination() != SwallowDestination.Off) return;
             float now;
@@ -555,42 +1080,6 @@ namespace KKLLMNPC
             return 0f;
         }
 
-        // Force-feed placement: the held person is right on/at a receiver's HEAD —
-        // nearest alive non-player kobold that is neither the dropper nor busy.
-        internal const float HeadShoveRadius = 0.85f;
-
-        private static Kobold FindShoveEater(Kobold dropper, Kobold victim)
-        {
-            Kobold best = null;
-            float bestDist = HeadShoveRadius;
-            try
-            {
-                Vector3 vPos = victim.transform.position;
-                foreach (var k in UnityEngine.Object.FindObjectsOfType<Kobold>())
-                {
-                    if (k == null || !SafeAlive(k) || k == dropper || k == victim) continue;
-                    // grief guard: receivers can't be players — unless the player-
-                    // vs-player vore permission is on AND the dropper is a player.
-                    try { if (NPCInstance.IsPlayerKobold(k) && !(PlayerVictimsAllowed() && NPCInstance.IsPlayerKobold(dropper))) continue; } catch (Exception) { }
-                    try { if (k.grabbed) continue; } catch (Exception) { } // being held themselves
-                    if (EaterBusy(k)) continue;                   // already digesting someone
-                    // FULL-INSERT RULE (replaces the bump-on-head check): the held
-                    // body must be stuffed INTO the receiver's mouth region — its
-                    // center below the maw point and within reach. Merely resting or
-                    // bumping ON TOP of the head no longer triggers anything (that
-                    // check started digestions from casual PrecisionGrabber bumps).
-                    Vector3 mouthPos = MouthOf(k);
-                    if (vPos.y > mouthPos.y + 0.12f) continue; // above the maw = not inserted
-                    float d = Vector3.Distance(mouthPos, vPos);
-                    if (d >= bestDist) continue;
-                    bestDist = d;
-                    best = k;
-                }
-            }
-            catch (Exception) { return null; }
-            return best;
-        }
-
         // internal for the spectate manager (its Tick parks the player at the belly).
         // Is this kobold currently being digested (an active swallow session's
         // victim)? The victim's body parts ARE penetrator props — their dick
@@ -605,7 +1094,7 @@ namespace KKLLMNPC
         // after the egg went all cycles — another agent took over the body").
         internal static bool IsAwaitingRebirth(Kobold k)
         {
-            if (k == null || Plugin == null) return false;
+            if (k == null || !LLMNPCPlugin.Alive(Plugin)) return false;
             // HOT-PATH GUARD: the claim scan calls this per candidate per tick —
             // a fingerprint pass is work we must only pay while an egg is actually
             // pending (registry empty in every session without a swallowed body).
@@ -764,7 +1253,7 @@ namespace KKLLMNPC
         // caller). True = a swallow session + spectate takeover are live.
         internal static bool TryEatPlayer(NPCInstance eaterNpc)
         {
-            if (Plugin == null || eaterNpc == null) return false;
+            if (!LLMNPCPlugin.Alive(Plugin) || eaterNpc == null) return false;
             var cfg = Plugin._cfgSwallowAgentEat;
             if (cfg == null || !cfg.Value) return false;
             Kobold eater = null;
@@ -783,7 +1272,7 @@ namespace KKLLMNPC
 
         internal static float AgentEatRange()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowEatRange : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowEatRange : null;
             float v = SpectateLogic.DefaultEatRange;
             try { if (cfg != null) v = cfg.Value; } catch (Exception) { }
             if (v < 1f) v = 1f;
@@ -822,12 +1311,22 @@ namespace KKLLMNPC
         // playerVictim = the LOCAL PLAYER is the one being swallowed: the spectate
         // takeover starts here and the consume phase parks their body instead of
         // destroying it (SpectateManager owns the camera/park from this moment on).
-        private static bool Begin(Kobold eater, Kobold victim, Kobold actor, bool playerVictim = false)
+        private static bool Begin(Kobold eater, Kobold victim, Kobold actor, bool playerVictim = false, SwallowDestination? holeOverride = null)
         {
             if (actor == null) actor = eater;
             int vid;
             try { vid = victim.GetInstanceID(); } catch (Exception) { return false; }
             if (victim.photonView == null) return false;
+
+            // One meal at a time per eater: refuse to start a swallow when `eater` is
+            // already digesting someone. This is the single chokepoint every swallow
+            // path funnels through (TryInsert, the look-up look-up gesture, drop-
+            // position vore, eat_player, force-feed), so the guard lives here — not
+            // just in TryInsertForAgent. Without it two SwallowState entries could
+            // share one eater, and when the first completed EndSwallow would clear
+            // Swallowed while the second was still active, re-enabling the grabber
+            // mid-second-meal (the exact state the flag exists to prevent).
+            if (EaterBusy(eater)) return false;
 
             lock (_lock)
             {
@@ -856,7 +1355,7 @@ namespace KKLLMNPC
             string who = BodyLabel(actor);
             string eaterLabel = BodyLabel(eater);
             bool selfEat = actor == eater;
-            var holeDest = DestinationFor(actor); // per-agent override wins; global = player control
+            var holeDest = holeOverride ?? DestinationFor(actor); // per-agent override wins; global = player control
             string hole = SwallowLogic.DestinationLabel(holeDest).ToLowerInvariant();
             string entryVerb = SwallowLogic.EntryVerb(holeDest);
 
@@ -916,6 +1415,11 @@ namespace KKLLMNPC
             // swallow (begin + digest lines + end) and can abort from THEIR machine.
             try { BroadcastBegin(st); } catch (Exception) { }
             try { st.EaterNpc = Plugin.InstanceForBody(eater); } catch (Exception) { st.EaterNpc = null; }
+            // The EATER is the AI whose loop keeps running during a swallow — its
+            // grabber fires every frame. The victim above already sets its own
+            // StomachSwallowed, but the eater's never gets flagged: without this the
+            // eaten-by model keeps grabbing floor items all through the conversion.
+            if (st.EaterNpc != null) { try { st.EaterNpc.Swallowed = true; } catch (Exception) { } }
             // Mid-play swallow belt: if the victim was penetrating the eater when
             // swallowed, the eater's _pen entry never sees a "pull out" — purge
             // both sides of the false penetration so no rhythm survives the meal.
@@ -1041,7 +1545,7 @@ namespace KKLLMNPC
         private static string BodyLabel(Kobold k)
         {
             try { if (k != null && NPCInstance.IsPlayerKobold(k)) return "the player"; } catch (Exception) { }
-            var npc = Plugin != null && k != null ? Plugin.InstanceForBody(k) : null;
+            var npc = LLMNPCPlugin.Alive(Plugin) && k != null ? Plugin.InstanceForBody(k) : null;
             if (npc != null)
             {
                 try { string n = npc.GetMyName(); if (!string.IsNullOrEmpty(n)) return n; } catch (Exception) { }
@@ -1099,7 +1603,7 @@ namespace KKLLMNPC
         // drop can never eat someone by accident (playtest request).
         internal static float LookUpDot()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowLookUpDot : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowLookUpDot : null;
             float v = SwallowLogic.DefaultLookUpDot;
             try { if (cfg != null) v = cfg.Value; } catch (Exception) { }
             if (v < 0.1f) v = 0.1f;
@@ -1109,7 +1613,7 @@ namespace KKLLMNPC
 
         private static float DigestSeconds()
         {
-            var cfg = Plugin != null ? Plugin._cfgSwallowDigest : null;
+            var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowDigest : null;
             float v = 45f;
             try { if (cfg != null) v = cfg.Value; } catch (Exception) { }
             if (v < 5f) v = 5f;
@@ -1165,7 +1669,7 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         internal static void Tick()
         {
-            if (Plugin == null) return;
+            if (!LLMNPCPlugin.Alive(Plugin)) return;
             lock (_lock)
             {
                 for (int i = _active.Count - 1; i >= 0; i--)
@@ -1705,6 +2209,7 @@ namespace KKLLMNPC
                 try { if (st.Npc != null) st.Npc.PushWorldEvent("the swallow was interrupted — you were pulled out of the world entirely, not reborn from an egg."); } catch (Exception) { }
                 try { if (st.EaterNpc != null) st.EaterNpc.PushWorldEvent("the swallow was interrupted: " + st.Name + " was pulled out of the world from inside you — nothing of them was converted."); } catch (Exception) { }
                 DestroyVirtualPen(st);
+                EndSwallow(st);
                 _active.RemoveAt(index);
                 return;
             }
@@ -1751,6 +2256,7 @@ namespace KKLLMNPC
                 catch (Exception) { }
                 try { RestoreVictimBody(st.Victim, st.Eater != null ? st.Eater.transform.position : st.Victim.transform.position); } catch (Exception) { }
                 if (st.Npc != null) try { st.Npc.Swallowed = false; } catch (Exception) { }
+                EndSwallow(st);
                 _active.RemoveAt(index);
                 return;
             }
@@ -1882,6 +2388,7 @@ namespace KKLLMNPC
             {
                 st.EggSpawned = true; // "handled" — remove the session
                 DestroyVirtualPen(st);
+                EndSwallow(st);
                 _active.RemoveAt(index);
             }
             // else: this tick's completion failed — keep the victim pinned and retry.
@@ -2029,7 +2536,7 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         internal static bool TryAbortFromChat(string rawMsg)
         {
-            if (Plugin == null) return false;
+            if (!LLMNPCPlugin.Alive(Plugin)) return false;
             var cfgEnabled = Plugin._cfgSwallowEnabled;
             var cfgAgent = Plugin._cfgSwallowAgentEat;
             bool swallowOn = cfgEnabled != null && cfgEnabled.Value;
@@ -2085,10 +2592,24 @@ namespace KKLLMNPC
         // Undo the entire pin for one session and put the victim back into the
         // world in front of the eater (their OnReleaseRPC-style recovery, minus
         // what we changed ourselves).
+        // Clear the StomachSwallowed flag off EVERY mind tied to a finished
+        // session — the victim (line 939) AND the eater (line 923, my grab fix).
+        // Without the eater's reset here the eaten-by model's flag is left true
+        // forever: its grabber is permanently blocked and it can never grab again.
+        private static void EndSwallow(SwallowState st)
+        {
+            if (st.EaterNpc != null) { try { st.EaterNpc.Swallowed = false; } catch (Exception) { } }
+        }
+
         private static void ReleaseSwallowed(SwallowState st)
         {
             RestoreVictimEquipment(st);
             var v = st.Victim;
+            // Clear the eaten-by model's Swallowed flag FIRST, before any early return
+            // below — otherwise a victim that is already gone leaves the eater's grabber
+            // permanently bricked (Swallowed stuck true until scene reload). Every other
+            // teardown path clears it; this abort path must too.
+            EndSwallow(st);
             if (!SafeAlive(v))
             {
                 LLMNPCPlugin.Log.LogWarning("swallow abort: '" + st.Name + "' was already gone — nothing to release");
@@ -2117,6 +2638,9 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
             }
+            // (EndSwallow already ran near the top of this method — see the comment
+            // above the SafeAlive check — so the eater's grabber is cleared even when
+            // the victim was already gone and we returned early.)
 
             try { Bubble(st.Eater, "You heave " + st.Name + " back up — alive and whole."); } catch (Exception) { }
             if (st.EaterNpc != null)
@@ -2686,7 +3210,7 @@ namespace KKLLMNPC
         {
             try
             {
-                if (k == null || Plugin == null) return;
+                if (k == null || !LLMNPCPlugin.Alive(Plugin)) return;
                 string fingerprint = NPCInstance.GenesFingerprint(k.GetGenes());
                 if (string.IsNullOrEmpty(fingerprint)) return;
                 string oldKey, name;
@@ -2785,7 +3309,7 @@ namespace KKLLMNPC
         {
             try
             {
-                if (Plugin == null) return;
+                if (!LLMNPCPlugin.Alive(Plugin)) return;
                 RebirthLink link;
                 string name;
                 string layerFp;
@@ -3037,13 +3561,17 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgSwallowEnabled;
         internal ConfigEntry<float> _cfgSwallowDigest;
         internal ConfigEntry<float> _cfgSwallowLookUpDot;
-        internal ConfigEntry<bool> _cfgSwallowForceFeeding;
+        // END-button mode for the INSERT swallow button (Off/Self/Force).
+        internal ConfigEntry<SwallowLogic.SwallowSwellMode> _cfgSwallowSwellMode;
+        // INSERT distance window around the held target (meters).
+        internal ConfigEntry<float> _cfgSwallowInsertRangeMin;
+        internal ConfigEntry<float> _cfgSwallowInsertRangeMax;
         internal ConfigEntry<SwallowEffect> _cfgSwallowEffect;
         internal ConfigEntry<bool> _cfgSwallowGrowLarger;
         internal ConfigEntry<bool> _cfgSwallowGrowStrength;
         internal ConfigEntry<bool> _cfgSwallowGrowSex;
         internal ConfigEntry<float> _cfgSwallowGrowPercent;
-        // WHERE the person goes in (and the master off switch) — F7/WebUI controllable.
+        // WHERE the person goes in (and the master off switch) — PAGE UP/DOWN/WebUI controllable.
         internal ConfigEntry<SwallowDestination> _cfgSwallowDestination;
         // Autonomy + memory (bound in Main.cs Awake; consumed by Llm/Console/NPCInstance).
         internal ConfigEntry<float> _cfgIdleInitiative;
@@ -3086,13 +3614,15 @@ namespace KKLLMNPC
                 string c = ConsoleShell.Canonical(cmd);
                 if (c == null) return false; // unknown words are prose anyway
                 if (c == "echo" || c == "emote" || c == "sleep" || c == "help" || c == "clear" || c == "report"
-                    || c == "remember" || c == "forget" || c == "goal" || c == "plan") return true;
+                    || c == "remember" || c == "forget" || c == "goal" || c == "plan" || c == "think"
+                    || c == "buf" || c == "calc") return true;
                 // The in-body verbs are MEANINGFUL only from inside someone.
                 if (c == "kick" || c == "masturbate" || c == "surrender") return true;
                 switch (c)
                 {
                     case "ls": case "ps": case "pwd": case "whoami": case "cat": case "status":
                     case "hold": case "sonar": case "look": case "find": case "screenshot": case "items":
+                    case "man": case "dist":
                         return true;
                     default: return false; // cd/use/get/drop/throw/run/turn/jump/crouch/exit/follow + module tools
                 }

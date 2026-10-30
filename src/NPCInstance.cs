@@ -32,6 +32,7 @@ namespace KKLLMNPC
 
         // ---- config (copied from plugin so existing field-name references just work) ----
         internal ConfigEntry<string> _cfgEndpoint;
+        internal ConfigEntry<int> _cfgTimeoutSeconds;
         internal ConfigEntry<string> _cfgModel;
         internal ConfigEntry<string> _cfgApiKey;
         internal ConfigEntry<string> _cfgSystem;
@@ -72,6 +73,9 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgStereo;
         internal ConfigEntry<float> _cfgStereoIPD;
         internal ConfigEntry<float> _cfgTurnRate;
+        internal ConfigEntry<string> _cfgKvCacheType;
+        internal ConfigEntry<bool> _cfgMtpEnabled;
+        internal ConfigEntry<string> _cfgDraftModel;
         internal ConfigEntry<float> _cfgAccel;
         internal ConfigEntry<float> _cfgDecel;
         internal ConfigEntry<float> _cfgBrakeDist;
@@ -283,6 +287,14 @@ namespace KKLLMNPC
         private string _playerChat;
         private float _playerChatTime;
         private string _lastDeliveredChat;
+        // A directed PRIVATE agent-to-agent line (the `whisper` tool) delivered to
+        // ONE sibling by chat name — like a Discord DM. Delivered via PushWhisper,
+        // surfaced to its recipient as its own [whisper] event line, and never
+        // broadcast room-wide. Rides the same wake/trigger funnel as chat so the
+        // recipient's turn actually fires; duet-capped by the caller.
+        private string _whisper;
+        private float _whisperTime;
+        private string _lastDeliveredWhisper;
         // The game chat log as it read at the moment this NPC acquired its body ("awoke").
         // Repeat suppression for say: small models emit the exact same line several
         // turns in a row, spamming the in-game chat window with duplicates.
@@ -391,7 +403,7 @@ namespace KKLLMNPC
         }
 
         // Penetration awareness.
-        private class PenState { public string name; public float depth; public float lastT; public float vel; public string hole; public Transform src; public List<float> History = new List<float>(); } // History: (t,d) pairs, last ~5s — the rhythm graph
+        private class PenState { public string name; public float depth; public float lastT; public float vel; public string hole; public Transform src; public float lastEventT = -1e9f; public List<float> History = new List<float>(); } // History: (t,d) pairs, last ~5s — the rhythm graph
         private readonly Dictionary<object, PenState> _pen = new Dictionary<object, PenState>();
         private readonly Dictionary<object, PenState> _dickIn = new Dictionary<object, PenState>();
         private ScriptableReagent _eggReagent;
@@ -482,7 +494,59 @@ namespace KKLLMNPC
         // generic. Benign race on lazy init: classification is deterministic and
         // idempotent, so double-compute across threads converges on the same
         // profile.
+        // A sibling agent's LIVE position by chat name (the registry maps body ids ↔
+        // names; ps lists the same set). Null when nobody wears that name right now.
+        internal Vector3? AgentBodyPosition(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            int bodyId = BodyIdForAgentName(name);
+            if (bodyId < 0) return null;
+            var kobolds = SceneCache.Find<Kobold>(2f);
+            if (kobolds == null) return null;
+            foreach (var k in kobolds)
+                if (k != null && k.GetInstanceID() == bodyId && k.transform != null)
+                    return k.transform.position;
+            return null;
+        }
+
+        // Block the go_to arrival loop briefly (the runner drives movement) — the
+        // sibling case needs the walk to actually happen before the tool returns.
+        private bool ToolGoToAwaitArrival(Vector3 target)
+        {
+            try
+            {
+                float deadline = Time.unscaledTime + 25f;
+                while (Time.unscaledTime < deadline)
+                {
+                    Thread.Sleep(200);
+                    if (!IsAlive(_kobold)) return false;
+                    float d = Vector3.Distance(_kobold.transform.position, target);
+                    if (d <= Mathf.Max(1.6f, StopDistance())) return true;
+                }
+            }
+            catch (Exception) { }
+            return false;
+        }
+
+        private float StopDistance()
+        {
+            return Consts.NavTargetArriveDist + 0.6f; // slightly looser than nav-arrive: siblings move
+        }
+
         private ModelFamilyProfile _familyProfile;
+        // (FamilyProfile accessor already defined later in this partial.)
+
+        // Chat POST timeout: [LLM].TimeoutSeconds wins when the operator sets it;
+        // otherwise thinking families get the slow-turn budget (their CoT burns
+        // wall-time before any answer text) and plain families keep the tight one.
+        private int ChatTimeoutSeconds()
+        {
+            int cfg = _cfgTimeoutSeconds != null ? _cfgTimeoutSeconds.Value : 0;
+            if (cfg > 0) return cfg;
+            var p = FamilyProfile;
+            if (p != null && p.EmitsThinkBlocks && p.ThinkSlowSeconds > 0) return p.ThinkSlowSeconds;
+            return 120;
+        }
         private bool _familyResolved;
         internal ModelFamilyProfile FamilyProfile
         {
@@ -634,13 +698,14 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         internal NPCInstance(LLMNPCPlugin plugin)
         {
-            if (plugin == null) throw new ArgumentNullException(nameof(plugin));
+            if (!LLMNPCPlugin.Alive(plugin)) throw new ArgumentNullException(nameof(plugin));
             Plugin = plugin;
             Logger = plugin.Logger;
             try { CreationTime = Time.unscaledTime; } catch (Exception) { CreationTime = 0f; }
 
             // Copy config entries so existing field-name references in partial class files just work.
             _cfgEndpoint = plugin._cfgEndpoint;
+            _cfgTimeoutSeconds = plugin._cfgTimeoutSeconds;
             _cfgModel = plugin._cfgModel;
             _cfgApiKey = plugin._cfgApiKey;
             _cfgSystem = plugin._cfgSystem;
@@ -681,6 +746,9 @@ namespace KKLLMNPC
             _cfgStereo = plugin._cfgStereo;
             _cfgStereoIPD = plugin._cfgStereoIPD;
             _cfgTurnRate = plugin._cfgTurnRate;
+            _cfgKvCacheType = plugin._cfgKvCacheType;
+            _cfgMtpEnabled = plugin._cfgMtpEnabled;
+            _cfgDraftModel = plugin._cfgDraftModel;
             _cfgAccel = plugin._cfgAccel;
             _cfgDecel = plugin._cfgDecel;
             _cfgBrakeDist = plugin._cfgBrakeDist;
@@ -733,6 +801,12 @@ namespace KKLLMNPC
             _cfgNonConsentSFWOnly = plugin._cfgNonConsentSFWOnly;
             _cfgNonConsentFlagThreshold = plugin._cfgNonConsentFlagThreshold;
             _cfgNonConsentFlagDecaySec = plugin._cfgNonConsentFlagDecaySec;
+            // ---- built-in navigation routines (walk around + pivot head to look) ----
+            // A fresh agent wakes with a few "walk around and look" procedures it can run
+            // by name (skill explore / skill scan / look around), so it feels inside the
+            // world without authoring them first. SkillsLoadFrom (on body restore) only
+            // fills an EMPTY box, so a saved/absorbed skill set always wins over these.
+            SeedBuiltinSkills();
         }
 
         // ------------------------------------------------------------------
@@ -888,6 +962,23 @@ namespace KKLLMNPC
         {
             string myPrefix = MyName() + ":";
             return msg.StartsWith(myPrefix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Actor-number attribution (drift-immune): true when THIS instance owns
+        // the identity bot AND its own Photon actor number matches the chat
+        // event's sender. The identity bot sends PLAIN text (no "Name:" prefix),
+        // so IsMySpeech never sees it; the NickName == _npcName compare in Main.cs
+        // OnEvent then fails whenever the live Photon NickName has drifted from
+        // the LLM's internal _npcName (a rename that lagged on the bot's Photon
+        // client, or NickName normalization at start). Actor numbers never drift
+        // and a player can't share an agent's, so this is the reliable signal.
+        internal bool IsAgentSelf(int actorNumber)
+        {
+            if (actorNumber <= 0) return false;
+            var bot = _identityBot;
+            if (bot == null) return false;
+            try { return bot.ActorNumber != 0 && bot.ActorNumber == actorNumber; }
+            catch (Exception) { return false; }
         }
 
         // ---- addressing (FT-02/FT-03) ----
@@ -1109,6 +1200,8 @@ namespace KKLLMNPC
             _consoleLastCmdKey = null;
             _consoleStuckCount = 0;
             if (_consoleRecentCmds != null) _consoleRecentCmds.Clear();
+            lock (_bufLock) { _scratchBuf.Clear(); } // the scratch buffer is session/personal — dies with the identity
+            _lastTurnStampT = 0f; _turnClockLine = null;
             _pendingShotB64 = null;
             _consoleSlept = false;
             _sleepUntilTime = 0f;
@@ -1224,6 +1317,43 @@ namespace KKLLMNPC
             // null and we fall through to the configured endpoint.
             string s = Ollama.EndpointOverride();
             return s ?? Val(_cfgEndpoint);
+        }
+
+        // One resolution point for the payload's model field. [LLM].Model's
+        // "local-model" default is an LM Studio-ism (LM Studio ignores the field);
+        // Ollama's /v1/chat/completions instead 404s on unknown names ("model
+        // 'local-model' not found"). So when the configured model is the placeholder
+        // (or empty) AND an Ollama is actually answering — the watcher adopted one,
+        // or the startup probe saw /api/tags — send the server's real current model.
+        // A specifically-chosen model always passes through untouched.
+        private string EffectiveModel()
+        {
+            string configured = _cfgModel != null ? _cfgModel.Value : null;
+            if (!string.IsNullOrWhiteSpace(configured)
+                && !string.Equals(configured.Trim(), "local-model", StringComparison.OrdinalIgnoreCase))
+                return configured;
+
+            string watcher = Ollama.CurrentModel();
+            if (!string.IsNullOrWhiteSpace(watcher)) return ResolveModelLog(watcher);
+            string probed = ModelProbe.DetectedModelName;
+            if (!string.IsNullOrWhiteSpace(probed)) return ResolveModelLog(probed);
+            return configured; // nothing known — send as-is; the 404 body names the model
+        }
+
+        private static bool _modelResolutionLogged;
+        private static string ResolveModelLog(string resolved)
+        {
+            if (!_modelResolutionLogged)
+            {
+                _modelResolutionLogged = true;
+                try
+                {
+                    LLMNPCPlugin.Log?.LogInfo("model: sending '" + resolved
+                        + "' — placeholder 'local-model' resolved against the Ollama endpoint");
+                }
+                catch (Exception) { }
+            }
+            return resolved;
         }
 
         private string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
@@ -1562,6 +1692,13 @@ namespace KKLLMNPC
 
         internal void RememberFact(string fact)
         {
+            // Type-name garbage never becomes a memory (a single pre-fix leak used to
+            // persist and re-echo through context for turns).
+            if (!string.IsNullOrEmpty(fact) && fact.IndexOf("System.Collections", StringComparison.Ordinal) >= 0)
+            {
+                try { Logger.LogDebug("fact dropped (raw type name leaked into it): " + fact.Substring(0, Math.Min(80, fact.Length))); } catch (Exception) { }
+                return;
+            }
             if (string.IsNullOrWhiteSpace(fact)) return;
             string f = Sanitize(fact.Trim());
             // Backstop: junk facts (goals-as-facts, momentary body states, viewer-

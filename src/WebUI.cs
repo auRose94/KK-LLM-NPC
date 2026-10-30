@@ -322,7 +322,7 @@ namespace KKLLMNPC
         {
             try
             {
-                if (Plugin == null || string.IsNullOrEmpty(id)) return null;
+                if (!LLMNPCPlugin.Alive(Plugin) || string.IsNullOrEmpty(id)) return null;
                 var fields = typeof(LLMNPCPlugin).GetFields(BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
                 foreach (var f in fields)
                 {
@@ -519,7 +519,7 @@ namespace KKLLMNPC
                 string action = d.ContainsKey("action") ? Convert.ToString(d["action"]) : "";
                 NPCInstance target = null;
                 LLMNPCPlugin plugin = Plugin;
-                if (plugin != null)
+                if (LLMNPCPlugin.Alive(plugin))
                 {
                     lock (plugin._instancesLock)
                         foreach (var n in plugin._instances)
@@ -612,7 +612,7 @@ namespace KKLLMNPC
             {
                 try
                 {
-                    if (Plugin != null)
+                    if (LLMNPCPlugin.Alive(Plugin))
                         Plugin.RunOnMainThread(() =>
                         {
                             try
@@ -637,7 +637,7 @@ namespace KKLLMNPC
             {
                 try
                 {
-                    if (Plugin != null)
+                    if (LLMNPCPlugin.Alive(Plugin))
                         Plugin.RunOnMainThread(() =>
                         {
                             try
@@ -665,7 +665,7 @@ namespace KKLLMNPC
         {
             try
             {
-                if (plugin == null) return;
+                if (!LLMNPCPlugin.Alive(plugin)) return;
                 var list = new List<object>();
                 List<NPCInstance> snap;
                 lock (plugin._instancesLock) snap = new List<NPCInstance>(plugin._instances);
@@ -727,7 +727,7 @@ namespace KKLLMNPC
         {
             var instances = new List<object>();
             LLMNPCPlugin plugin = Plugin;
-            if (plugin != null)
+            if (LLMNPCPlugin.Alive(plugin))
             {
                 List<NPCInstance> snap;
                 lock (plugin._instancesLock) snap = new List<NPCInstance>(plugin._instances);
@@ -738,7 +738,7 @@ namespace KKLLMNPC
                 }
             }
             object poll = null;
-            try { poll = plugin != null ? plugin.DllPollDebug() : null; } catch (Exception) { }
+            try { poll = LLMNPCPlugin.Alive(plugin) ? plugin.DllPollDebug() : null; } catch (Exception) { }
             string spectate = null;
             try
             {
@@ -749,17 +749,17 @@ namespace KKLLMNPC
             catch (Exception) { }
             string phase = null; bool mainReady = false; decimal idle = -1m;
             try { phase = LLMNPCPlugin.MainPhase; } catch (Exception) { }
-            try { mainReady = plugin != null && plugin._mainReady; } catch (Exception) { }
-            try { idle = (decimal)(plugin != null ? LLMNPCPlugin.MainIdleWallSeconds : -1f); } catch (Exception) { }
+            try { mainReady = LLMNPCPlugin.Alive(plugin) && plugin._mainReady; } catch (Exception) { }
+            try { idle = (decimal)(LLMNPCPlugin.Alive(plugin) ? LLMNPCPlugin.MainIdleWallSeconds : -1f); } catch (Exception) { }
             // Vore arm state at a glance (F7/F8 cycle it; the settings tab edits it).
             string voreDest = "?", voreEffect = "?"; bool voreOn = false;
             try
             {
-                if (plugin != null && plugin._cfgSwallowDestination != null)
+                if (LLMNPCPlugin.Alive(plugin) && plugin._cfgSwallowDestination != null)
                     voreDest = SwallowLogic.DestinationLabel(plugin._cfgSwallowDestination.Value);
-                if (plugin != null && plugin._cfgSwallowEffect != null)
+                if (LLMNPCPlugin.Alive(plugin) && plugin._cfgSwallowEffect != null)
                     voreEffect = SwallowLogic.EffectLabel(plugin._cfgSwallowEffect.Value);
-                if (plugin != null && plugin._cfgSwallowEnabled != null) voreOn = plugin._cfgSwallowEnabled.Value;
+                if (LLMNPCPlugin.Alive(plugin) && plugin._cfgSwallowEnabled != null) voreOn = plugin._cfgSwallowEnabled.Value;
             }
             catch (Exception) { }
             var root = new Dictionary<string, object>
@@ -1415,5 +1415,9 @@ setInterval(poll,3000);poll();reports();setInterval(reports,15000);cfg();setInte
     {
         internal ConfigEntry<bool> _cfgWebEnabled;
         internal ConfigEntry<int> _cfgWebPort;
+        internal ConfigEntry<bool> _cfgInGameHud;
+        internal ConfigEntry<int> _cfgTimeoutSeconds;
+        // Static view for the in-game HUD (SpectateHudUI has no plugin reference).
+        internal static ConfigEntry<bool> CfgInGameHud;
     }
 }

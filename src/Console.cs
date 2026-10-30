@@ -48,6 +48,7 @@ namespace KKLLMNPC
         private int _consoleEmptyStreak;   // consecutive empty replies
         private string _consoleLastCmdKey; // "cmd:arg1,arg2" for stuck detection
         private int _consoleStuckCount;
+        private bool _consoleStuckBreak;   // hard cap reached — end the turn this cycle
         private List<string> _consoleRecentCmds; // recent command strings for similarity check
         private string _pendingShotB64;    // image to attach to the next output message
         private string _recorderShotB64;   // [DataRecord]-only frame (text-only runtime): RecordTurn consumes it, it never enters the payload
@@ -65,6 +66,42 @@ namespace KKLLMNPC
         private int _consoleTurnsSinceShot;
         private Vector3 _lastShotPos;
         private float _lastShotYaw;
+        // TURN CLOCK (state anchor): session time now + the gap since the previous
+        // turn's prompt — the model SEES the world-time its thinking burns, so it
+        // can't get lost in thought ("now: 00:14:32 (+2m07s since your last turn…)").
+        private float _lastTurnStampT;
+        private string _turnClockLine;
+
+        // ------------------------------------------------------------------
+        // SCRATCH BUFFER — the agent's personal, sandboxed notepad. Pure text,
+        // zero game effect: `buf <text>` appends, `buf` shows it numbered, `buf
+        // clear` wipes, pipes land in it (`ls | buf`, and `X | tee` copies the
+        // stream into it while passing it on). It is PERSONAL (this instance's
+        // memory, not the transcript) and SURVIVES context trims — the whole
+        // point: anything written here outlives the rolling conversation window.
+        // Session-scope only: it dies with the agent (skills are the forever
+        // place; remember is the sticky place). Unlike skills it is never shared
+        // or saved.
+        // ------------------------------------------------------------------
+        private readonly object _bufLock = new object();
+        private readonly List<string> _scratchBuf = new List<string>();
+        private const int BufMaxLines = 48;
+        private const int BufMaxLineChars = 240;
+
+        // tee's sink: append one stream (split into lines) to the scratch buffer.
+        private void BufAppendSink(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            lock (_bufLock)
+            {
+                foreach (var raw in text.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n'))
+                {
+                    string t = raw.Length > BufMaxLineChars ? raw.Substring(0, BufMaxLineChars) : raw;
+                    _scratchBuf.Add(t);
+                }
+                while (_scratchBuf.Count > BufMaxLines) _scratchBuf.RemoveAt(0);
+            }
+        }
 
         // Attach the current first-person view automatically: every N turns when the
         // body actually moved/turned, and right after a stuck streak — but only for
@@ -154,6 +191,7 @@ namespace KKLLMNPC
             {
                 string t = rawLine.Trim();
                 if (t.Length == 0) { keep.Append(rawLine).Append('\n'); continue; }
+                t = TextUtil.ScrubTypeNames(t);
                 string bare = t.TrimStart('$', '>', '#').Trim();
                 if (set.Contains(t) || (bare.Length > 0 && set.Contains(bare)))
                 {
@@ -261,16 +299,60 @@ namespace KKLLMNPC
         }
 
         // Flatten a console message's content (string or text-parts array) to one string.
-        private static string ConsoleMsgText(Dictionary<string, object> m)
-        {
-            try
-            {
-                object c;
-                if (m == null || !m.TryGetValue("content", out c)) return "";
-                if (c is string) return (string)c;
-                return Json.Write(c);
+	        private static string ConsoleMsgText(Dictionary<string, object> m)
+	        {
+	            try
+	            {
+	                object c;
+	                if (m == null || !m.TryGetValue("content", out c)) return "";
+	                if (c is string) return (string)c;
+	                return ObjText(c);
+	            }
+	            catch (Exception) { return ""; }
+	        }
+
+	        // Robust textualisation of arbitrary event/payload content — never emit
+	        // "System.Object[]" (or any .ToString() of an opaque collection). For
+	        // object arrays use the image-aware text parts; for other collections
+	        // join their items; otherwise Json.Write. Returns "?" on anything it
+	        // can't reduce rather than a useless type name.
+	        private static string ObjText(object o)
+	        {
+	            try
+	            {
+	                if (o == null) return "";
+	                if (o is string) return (string)o;
+	                if (o is System.Collections.IEnumerable en)
+	                {
+	                    var sb = new System.Text.StringBuilder();
+	                    int imgCount = 0, textCount = 0;
+	                    foreach (var item in en)
+	                    {
+	                        if (item is Dictionary<string, object> d)
+	                        {
+	                            if (d.TryGetValue("type", out var t) && string.Equals(t as string, "image_url", StringComparison.Ordinal)) { imgCount++; continue; }
+	                            if (d.TryGetValue("text", out var tx))
+                            {
+                                if (textCount > 0) sb.Append(" ");
+                                sb.Append(tx); textCount++;
+                            }
+                            continue;
+                        }
+                        if (item != null)
+                        {
+                            if (sb.Length > 0) sb.Append(" ");
+                            sb.Append(ObjText(item));
+                        }
+                    }
+                    string txt = sb.ToString().Trim();
+                    if (imgCount > 0 && txt.Length == 0) txt = "(image attached)";
+                    else if (imgCount > 0) txt += " [" + imgCount + " image(s)]";
+                    if (txt.Length > 0) return txt;
+                }
+                try { return Json.Write(o); } catch (Exception) { }
+                return "";
             }
-            catch (Exception) { return ""; }
+            catch (Exception) { return "?"; }
         }
 
         private static string ShortenLine(string s, int max)
@@ -330,9 +412,10 @@ namespace KKLLMNPC
             "MONEY: your body has its own coins (shown in status/whoami/cat needs). `buy [name]` purchases whatever purchasable you stand next to — a machine contract (:needs_buy), the kobold dispenser, or a shop item. Walk there (cd) then buy; economy.purchasables lists costs. Buying needs no permission from anyone. " +
             "SOCIAL: one echo at a time; never repeat the same line twice; avoid emoji (they don't render). `emote <what you do>` is body language (renders *like this*). " +
             "RESPONSE BLOCKS: you may also just WRITE your reply the way you'd speak it — a roleplay block (dialogue in quotes, *actions*, {{user}}-style address to your partner) is detected and sent to the chat window verbatim, no `echo` needed; " +
-            "starred actions are narration only — back them with the real command (cd/use/get) the same turn. " +
+            "starred actions are narration only — back them with the real command (cd/use/get) the same turn. Planning and reasoning go in `think <text>` — the chat never hears it; quoted dialogue is what gets spoken. " +
             "VISION: `screenshot` shows you your first-person view whenever you ask; the mod also attaches it automatically every few turns (and when you get stuck) — USE the images: decide from what you SEE, not what you guess. " +
-            "TERMINAL DISCIPLINE: never start a reply with '$' and never copy the terminal output back (the game already printed it) — replies are NEW command lines only; copy-echoes are skipped. Never put a second command after `echo` on one line — everything after echo is SPOKEN (each command gets its own line; a glued trailing `cat <subject>` is rescued and runs). And when a station is 'seat blocked' for you, don't retry blindly — cat stations / ls, pick another, or ask.";
+            "TERMINAL DISCIPLINE: never start a reply with '$' and never copy the terminal output back (the game already printed it) — replies are NEW command lines only; copy-echoes are skipped. Never put a second command after `echo` on one line — everything after echo is SPOKEN (each command gets its own line; a glued trailing `cat <subject>` is rescued and runs). And when a station is 'seat blocked' for you, don't retry blindly — cat stations / ls, pick another, or ask. " +
+            "MANUAL: `man <topic>` reads the in-world manual of mechanics (stations/needs/farming/vore/memory/map/...; bare `man` lists topics) — the full docs are one command away whenever a rule surprises you.";
 
         // The console protocol contract (appended to the persona).
         private static readonly string ConsoleProtocol =
@@ -342,9 +425,12 @@ namespace KKLLMNPC
             "Star text is narration only — the world changes through commands (cd/use/get/thrust/... ), so back a starred physical act with its command right away. " +
             "The game runs each line and prints its output. Read the output, then send your next commands. " +
             "When you want to SPEAK to a person, the command is: echo <your words>. " +
+            "Reasoning goes in: think <text> — PRIVATE, the chat never hears it; bare thinking written as plain prose is kept but wasted, so use think. " +
             "Keep replies tight: 1-4 commands per turn. " +
             "RULES: poll before acting (ls, cat, status) — don't guess; travel is cd, interact is use, speech is echo; " +
-            "PIPES work like bash: `ps | grep kobold | head -n 5`, `cat facts | sort | uniq -c`, `sonar | head`; filters (grep/head/tail/wc/sort/uniq) cost no command budget; " +
+            "PIPES work like bash: `ps | grep kobold | head -n 5`, `cat facts | sort | uniq -c`, `sonar | head`; filters (grep/head/tail/wc/sort/uniq + sed/cut/tr/nl/tac/pick/tee) cost no command budget; " +
+            "SCRATCH & MATH: `buf` is your PERSONAL notepad — `buf <text>` appends a note, `buf` shows it numbered, `buf clear` wipes, a pipe lands in it (`ls | buf`, or `cat places | tee` to copy mid-stream) — it survives context trims (session-scope; skills are the forever place); " +
+            "`calc <expr>` does the arithmetic (calc (12-4)*3, sqrt/min/abs/round) and `dist <place> [<place2>]` gives meters + compass bearing (uses your remembered place: facts) — never do coordinate math in your head; " +
             "sequence with `;` or `&&` (cd kitchen && ls); speech/memory lines (echo/remember/skill/goal/plan) keep their '|' and ';' as DATA — never pipe through them; " +
             "pressing ENTER (an empty reply) is a legitimate ask: it serves the NEXT FRAME (fresh events + state) instead of an error — use it to just look around; " +
             "NEVER begin a reply with '$' and NEVER copy the terminal output back — the game prints the output itself; your reply = only NEW command lines (a copied '$ ...' or status line is skipped); " +"PLANNING: for anything with more than one move, `plan <step text>` adds a step (`plan` shows the list, `plan next` marks the current step done, `plan clear` wipes it) — your state anchor carries the current plan step every turn, so the how-to survives context trims; " +
@@ -354,22 +440,31 @@ namespace KKLLMNPC
             "SONAR: `sonar` prints a north-up ASCII map of your surroundings — its top edge is ALWAYS north (+Z) and right edge east (+X); it NEVER rotates when you turn (the ^-arrow beside @ is your facing — `pwd` shows it in compass words); bearings in `cat stations` ('addr', e.g. Blender#SW4) use the same fixed compass; `sonar <letters>` filters glyphs (W walls, V windows, S sills, U stations, K kobolds, P player; `sonar all` resets; the filter sticks); " +
             "STATION TALK: when someone says 'the one by the window/the mailbox', match it against the (near: ...) clues in `cat stations`; when picking ONE station to share with the player, prefer the one flagged closest to them; " +
             "REPORTING: when commands misbehave or outputs contradict reality (sonar looks wrong, ids stop resolving, cd keeps failing) and you can't work around it, tell your maintainers ONCE: `report <what is broken + what you tried>` — it files a note for the human dev; don't spam it; " +
+            "MANUAL: `man` lists topics and `man <topic>` reads the in-world manual (basics/terminal/speech/agents/stations/needs/farming/items/money/quests/memory/skills/vore/world/map) — the full mechanics docs; read a page when a rule surprises you or a command keeps failing; " +
             "when you're done acting, end the turn with sleep.";
 
         private static readonly string ConsoleProtocolSmall =
             "CONSOLE MODE — you are inside a shell. Reply with COMMAND LINES (one per line) or a roleplay block (it is spoken for you verbatim). " +
             "To speak to a person: echo <your words>. Travel: cd <place>. Interact: use <thing>. " +
+            "WALK AND LOOK: to feel inside a room, alternate turning your head and stepping — `look around; run 3; look around; run 3`. `look around` shows what's in each direction; `run 3` walks ~3s; `stop` halts. BUILT-IN SKILLS: `skill explore` (walk + look), `skill scan` (look + ls + sonar). " +
+            "Private thinking: think <text> (the chat never hears it). " +
             "The game runs each line and shows output; read it, then send the next command. 1-3 commands per turn. " +
             "sonar prints a north-up map (top=north, never rotates); report <what's broken> files a dev note. " +"plan <step> = break a task into ordered steps (cat plan shows; plan next when a step is done). " +
-            "pipes work: ps | grep k | head -n 5; an empty reply = ENTER = serve the next frame. " +
+            "pipes work: ps | grep k | head -n 5; also sed/cut/tr/nl/tac/pick/tee. an empty reply = ENTER = serve the next frame. " +
+            "buf = your scratch notepad: buf <text> appends, buf shows, buf clear wipes, cmd | buf pipes into it. calc <expr> = arithmetic; dist <place> = meters + bearing. " +
             "cat quest = the game's objective letter (mail waiting = use mailbox); report when you can't help a broken thing. " +
+            "man <topic> = read the manual (stations, farming, movement, vore, memory...; bare man lists topics). " +
             "End your turn with: sleep";
 
         private string ConsoleSystemPrompt()
         {
             string persona = ConsolePersona();
             string proto = IsSmallModel ? ConsoleProtocolSmall : ConsoleProtocol;
-            return persona + "\n\n" + proto + "\n\nCOMMANDS:\n" + ConsoleShell.Help();
+            // Tiered command surface: small models get the lean ~15-command core
+            // (HelpSmall) every turn; the full ~60-command table is one command away
+            // via `help all` / `man`. Dumping the whole table on a small model drowns it.
+            string commands = IsSmallModel ? ConsoleShell.HelpSmall() : ConsoleShell.Help();
+            return persona + "\n\n" + proto + "\n\nCOMMANDS:\n" + commands;
         }
 
         private string BootLine()
@@ -471,6 +566,8 @@ namespace KKLLMNPC
         private string StateAnchorLine()
         {
             var parts = new List<string>();
+            // The turn clock leads: time pressure is the first thing the model reads.
+            if (!string.IsNullOrEmpty(_turnClockLine)) parts.Add(_turnClockLine);
             // Live intimacy first — mid-play it outranks everything. Console had no
             // perception payload, so being entered/loaded reached the model only via
             // much-later belly/egg numbers.
@@ -551,7 +648,7 @@ namespace KKLLMNPC
             // own break when it resumes.
             float sleptLeft = _sleepUntilTime - Time.unscaledTime;
             if (sleptLeft > 0f) parts.Add("sleeping: " + Mathf.CeilToInt(sleptLeft) + "s left (turn deferred, chat wakes you)");
-            if (_consoleProseStreak >= 2 && !_consoleLastReplyWasBlock) parts.Add("REPLY WITH COMMAND LINES ONLY — try: help (a roleplay/dialogue block is also accepted: it is sent to chat)");
+            if (_consoleProseStreak >= 2 && !_consoleLastReplyWasBlock) parts.Add("REPLY WITH COMMAND LINES ONLY — try: help (a roleplay/dialogue block is also accepted: it is sent to chat; private reasoning goes in think <text>)");
             if (parts.Count == 0) return "";
             return string.Join(" | ", parts.ToArray()) + "\n";
         }
@@ -568,11 +665,22 @@ namespace KKLLMNPC
                 if (chat != null) sb.Append("[chat] ").AppendLine(chat);
             }
             catch (Exception) { }
+            // Directed private agent-to-agent line (the `whisper` tool): its own
+            // [whisper] event so the recipient sees it's a DM from a sibling, not a
+            // room line. Counts as a real addressed [event] (sets hadTrigger) so the
+            // recipient actually speaks. Kept distinct from [chat] so it never
+            // broadcasts to everyone.
+            try
+            {
+                string whisper = RecentWhisper();
+                if (whisper != null) sb.Append("[whisper] ").AppendLine(Sanitize(whisper));
+            }
+            catch (Exception) { }
             try
             {
                 var evs = DrainReagentEvents();
                 if (evs != null)
-                    foreach (var ev in evs) sb.Append("[event] ").AppendLine(Sanitize(ev.ToString()));
+                    foreach (var ev in evs) sb.Append("[event] ").AppendLine(Sanitize(ObjText(ev)));
             }
             catch (Exception) { }
             try
@@ -583,7 +691,7 @@ namespace KKLLMNPC
                 var world = DrainWorldEvents();
                 if (world != null)
                     foreach (var w in world)
-                        if (w != null) sb.Append("[event] ").AppendLine(Sanitize(w.ToString()));
+                        if (w != null) sb.Append("[event] ").AppendLine(Sanitize(ObjText(w)));
             }
             catch (Exception) { }
             // SIBLING PROXIMITY nudge: a second, short-cooldown trigger alongside
@@ -711,6 +819,34 @@ namespace KKLLMNPC
                 if (_consoleMsgs == null) InitConsoleConversation();
                 _consoleSlept = false;
                 _consoleCmdsThisCycle = 0;
+                _unknownLinesThisCycle = 0;   // fresh cycle: no unknown-command escalation yet
+                _consoleStuckBreak = false;
+
+                // TURN CLOCK: stamp this turn with the session time and the gap
+                // since the previous turn's prompt. The anchor carries it, so the
+                // model sees time passing between its ticks — wall-clock pressure
+                // against getting lost in thought ("… +2m07s since your last turn —
+                // think, then ACT").
+                float stampNow = Time.unscaledTime;
+                float sinceLast = _lastTurnStampT > 0f ? stampNow - _lastTurnStampT : 0f;
+                _lastTurnStampT = stampNow;
+                {
+                    float elapsed = stampNow - _sessionStartTime;
+                    if (elapsed < 0f) elapsed = 0f;
+                    int hh = (int)(elapsed / 3600f), mm = (int)((elapsed % 3600f) / 60f), ss = (int)(elapsed % 60f);
+                    var clock = new StringBuilder().Append("now: ")
+                        .Append(hh.ToString("00")).Append(':').Append(mm.ToString("00")).Append(':').Append(ss.ToString("00"));
+                    if (sinceLast > 20f)
+                    {
+                        clock.Append(" (+");
+                        if (sinceLast >= 90f)
+                            clock.Append((int)(sinceLast / 60f)).Append('m');
+                        else
+                            clock.Append(sinceLast.ToString("0", CultureInfo.InvariantCulture)).Append('s');
+                        clock.Append(" since your last turn — time is passing; think, then ACT)");
+                    }
+                    _turnClockLine = clock.ToString();
+                }
 
                 // Auto-view: give the model its eyes (config [Console] AutoScreenshotTicks).
                 MaybeAutoScreenshot();
@@ -741,6 +877,9 @@ namespace KKLLMNPC
                 {
                     string reply = QueryConsoleModel();
                     if (reply == null) return; // endpoint problem — loop backs off and retries
+                    // Whether THIS reply was harvested from the reasoning channel —
+                    // captured now, before anything else can touch the flag.
+                    bool promotedReasoning = _lastReplyWasPromotedReasoning;
                     reply = Sanitize(reply).Trim();
                     // Reasoning markers must never reach command-line parsing — strip
                     // first so reasoning-only replies land in the empty-streak path.
@@ -830,9 +969,13 @@ namespace KKLLMNPC
                         foreach (var l in lines)
                             if (l.IsUnknown && l.Raw.Trim().Length > 0) proseParts.Add(l.Raw.Trim());
                         string proseBlock = string.Join(" ", proseParts.ToArray());
-                        if (MaybeSpeakResponseBlock(proseBlock, hadTrigger, false))
+                        bool recorded;
+                        if (MaybeSpeakResponseBlock(proseBlock, hadTrigger, false, promotedReasoning, out recorded))
                             _consoleProseStreak = 0;
-                        else if (proseBlock.Length > 4)
+                        else if (!recorded && proseBlock.Length > 4)
+                            // Only record here when the block wasn't a response block (maybe-
+                            // speak left it unrecorded); a spoken/private block already pushed
+                            // its planning remainder, so pushing again would double-record it.
                             PushHistory("think", proseBlock.Length > 60 ? proseBlock.Substring(0, 60) : proseBlock);
                     }
 
@@ -864,7 +1007,8 @@ namespace KKLLMNPC
                         // asterisk actions / {{user}}). That IS its voice — send the
                         // whole block to chat instead of demanding `echo`. Speaking is
                         // the turn; no nudge.
-                        if (MaybeSpeakResponseBlock(reply, hadTrigger, true))
+                        bool recorded;
+                        if (MaybeSpeakResponseBlock(reply, hadTrigger, true, promotedReasoning, out recorded))
                         {
                             _consoleProseStreak = 0;
                             _consoleEmptyStreak = 0;
@@ -888,12 +1032,12 @@ namespace KKLLMNPC
                         string nudgeMsg;
                         if (_consoleProseStreak == 1)
                         {
-                            nudgeMsg = "That's not a command line. Reply with commands only (try: help).\n$\n";
+                            nudgeMsg = "That's not a command line. Reply with commands; reasoning goes in `think <text>` (private), a roleplay block is spoken.\n$\n";
                         }
                         else if (_consoleProseStreak == 2)
                         {
                             // More direct guidance for prose writers
-                            nudgeMsg = "REPLY WITH COMMAND LINES ONLY — plain thoughts are refused; a ROLEPLAY block (quoted dialogue / *actions*) is accepted and spoken.\nTry: ls, cd, echo, sleep\n$\n";
+                            nudgeMsg = "REPLY WITH COMMAND LINES ONLY — plain thoughts are refused; use `think <text>` for private reasoning; a ROLEPLAY block (quoted dialogue / *actions*) is accepted and spoken.\nTry: ls, cd, echo, think, sleep\n$\n";
                         }
                         else if (_consoleProseStreak >= 3 && _consoleProseStreak < 5)
                         {
@@ -933,7 +1077,14 @@ namespace KKLLMNPC
                     {
                         bool feedPipe = pipeReady;
                         pipeReady = false;
-                        if (!line.IsFilter && _consoleCmdsThisCycle >= ConsoleMaxCmdsPerCycle)
+                        // SCRATCH commands (think/buf/calc) have no game effect, so
+                        // they ride FREE like the stream filters — a thinking-heavy
+                        // model must never burn its acting budget (or learn to smuggle
+                        // thoughts into speech again) and never counts as "did
+                        // something" for the talking-to-nobody guard.
+                        bool isScratch = !line.IsUnknown
+                            && (line.Cmd == "think" || line.Cmd == "buf" || line.Cmd == "calc");
+                        if (!line.IsFilter && !isScratch && _consoleCmdsThisCycle >= ConsoleMaxCmdsPerCycle)
                         {
                             // `sleep` is the turn terminator the prompts TELL the model to
                             // send — honor it even with the budget spent, or the model gets
@@ -956,8 +1107,10 @@ namespace KKLLMNPC
                         if (line.IsFilter)
                         {
                             // Stream filter over the piped input; FREE — no game
-                            // effect, no command slot, no history bookkeeping.
-                            output = ConsolePipe.RunFilter(line.Cmd, line.Args, feedPipe ? pipeText : null);
+                            // effect, no command slot, no history bookkeeping. The
+                            // sink lets `tee` copy the stream into the scratch buffer
+                            // while passing it on.
+                            output = ConsolePipe.RunFilter(line.Cmd, line.Args, feedPipe ? pipeText : null, BufAppendSink);
                             pipeText = output;
                             pipeReady = line.PipeDown;
                             outSb.AppendLine(output);
@@ -965,14 +1118,26 @@ namespace KKLLMNPC
                         }
                         if (line.IsUnknown)
                         {
-                            output = "unknown command — try: help";
+                            // Escalating unknown-command hint (was: silent for 45s, then one
+                            // generic line — small models just looped on the bad word). Keep
+                            // the first nag quiet so a stray token doesn't clutter the turn,
+                            // then escalate: once the model has produced ≥2 unknown lines this
+                            // cycle, hand it a concrete "did you mean / try help" nudge so it
+                            // stops firing blind commands. The 45s throttle still caps the
+                            // repeated identical nags so it can't spam.
+                            if (_unknownLinesThisCycle >= 2 && Time.unscaledTime - _lastUnknownNag >= 45f)
+                            {
+                                _lastUnknownNag = Time.unscaledTime;
+                                output = "unknown command — type `help` to see what you can do, or `man <topic>` for the rules; don't keep firing words that aren't commands.";
+                            }
+                            else output = ""; // first unknown: stay quiet (it's likely a parse artifact)
+                            _unknownLinesThisCycle++;
                         }
                         else
                         {
-                            _consoleCmdsThisCycle++;
-                            executed++;
-                            output = RunConsoleLine(line);
-                            if (line.Cmd != "echo" && line.Cmd != "emote") onlySpeech = false;
+                            if (!isScratch) { _consoleCmdsThisCycle++; executed++; }
+                            output = RunConsoleLine(line, feedPipe ? pipeText : null);
+                            if (!isScratch && line.Cmd != "echo" && line.Cmd != "emote") onlySpeech = false;
                             // A suppressed echo/emote (repeat guard) consumed no real
                             // action — give the budget slot back: the playtest stalled in
                             // a permanent [limit] loop because the model's repeated
@@ -993,9 +1158,13 @@ namespace KKLLMNPC
                         if (line.PipeDown) { pipeText = output; pipeReady = true; }
                         else { pipeText = null; pipeReady = false; }
 
-                        // history for `cat history`
-                        string hist = Shorten(output, 60);
-                        PushHistory(line.Cmd, hist);
+                        // history for `cat history` (think records its own content
+                        // inside CmdThink; buf/calc are pure scratch — no history)
+                        if (!isScratch)
+                        {
+                            string hist = Shorten(output, 60);
+                            PushHistory(line.Cmd, hist);
+                        }
 
                         // Record command for similarity tracking
                         RecordCommand(line.Raw);
@@ -1008,14 +1177,25 @@ namespace KKLLMNPC
                         if (key == _consoleLastCmdKey || isRepeat)
                         {
                             _consoleStuckCount++;
-                            // Provide more helpful stuck message with guidance
-                            if (_consoleStuckCount >= 2)
-                                outSb.AppendLine("stuck — you're repeating similar commands. Try something different, check your goal, or sleep.");
+                            // Progressive escalation (was: one static line forever — the model
+                            // just looped on the same failing command). Each rung gives more
+                            // concrete guidance, and the hard cap ENDS the turn so a stuck
+                            // model can't burn the whole cycle repeating itself.
+                            if (_consoleStuckCount == 2)
+                                outSb.AppendLine("stuck — you're repeating similar commands. Try something different, or check `cat goal` / `cat places` / `ls` for what's actually here.");
+                            else if (_consoleStuckCount == 3)
+                                outSb.AppendLine("still stuck on the same thing (" + line.Cmd + "). A failing command prints WHY — read it and change approach, or type `help` to see your options.");
+                            else if (_consoleStuckCount >= 4)
+                            {
+                                outSb.AppendLine("you've tried " + line.Cmd + " many times with no luck. Stop repeating it — `sleep` to reset, or `man` / `help` for guidance.");
+                                _consoleStuckBreak = true; // end this turn; a fresh cycle starts next tick
+                            }
                         }
                         else _consoleStuckCount = 0;
                         _consoleLastCmdKey = key;
 
                         if (line.Cmd == "sleep") _consoleSlept = true;
+                        if (_consoleStuckBreak) _consoleSlept = true; // reuse the end-cycle path
                     }
                     // The budget is spent — stop asking the model THIS turn (asking on
                     // just produced rounds of "[limit]" + a sleep refusal in the same
@@ -1106,7 +1286,7 @@ namespace KKLLMNPC
             int maxTok = Math.Max(64, Math.Min(4096, ModelFamilies.EffectiveMaxTokens(userTok, 256, FamilyProfile)));
             var payload = new Dictionary<string, object>
             {
-                ["model"] = Val(_cfgModel),
+                ["model"] = string.IsNullOrEmpty(EffectiveModel()) ? "local-model" : EffectiveModel(),
                 ["messages"] = _consoleMsgs.ToArray(),
                 ["temperature"] = Math.Round(_cfgTemperature != null ? (double)_cfgTemperature.Value : 0.3, 2),
                 ["max_tokens"] = maxTok,
@@ -1222,14 +1402,20 @@ namespace KKLLMNPC
                 add("stop", CmdStop);
                 add("sleep", CmdSleep);
                 add("remember", CmdRemember);
+                add("think", CmdThink);
+                add("buf", CmdBufNoPipe);
+                add("calc", CmdCalc);
+                add("dist", CmdDist);
                 add("forget", CmdForget);
                 add("goal", CmdGoal);
+                add("skill", CmdSkillImpl);
                 add("plan", CmdPlan);
                 add("items", CmdItems);
                 add("kick", CmdKickInside);
                 add("masturbate", CmdCumInside);
                 add("surrender", CmdSurrender);
                 add("screenshot", CmdScreenshot);
+                add("man", CmdMan);
                 add("help", CmdHelp);
                 add("clear", CmdClear);
 
@@ -1239,7 +1425,15 @@ namespace KKLLMNPC
         }
 
         // Run one parsed line → terminal output text. Never throws.
+        // pipeIn: output of the previous pipeline stage — only `buf` consumes it
+        // (`ls | buf` lands the stream in the scratch buffer); other commands
+        // ignore it (sequences run without piping).
         private string RunConsoleLine(ConsoleLine line)
+        {
+            return RunConsoleLine(line, null);
+        }
+
+        private string RunConsoleLine(ConsoleLine line, string pipeIn)
         {
             try
             {
@@ -1254,6 +1448,8 @@ namespace KKLLMNPC
                 if (Swallowed && !ConsoleCommandAllowedWhileSwallowed(line.Cmd))
                     return "(you are deep inside someone's body — hands, legs and machines do nothing from here; "
                         + "speech (echo/emote), memory, goals/plan, read-only commands and the in-body verbs (kick / masturbate / surrender) still work). Don't retry body commands; sleep if you have nothing to say.";
+                // buf takes the piped input (`ls | buf`) before the plain dispatch.
+                if (line.Cmd == "buf") return CmdBuf(line, pipeIn);
                 List<ConsoleCmd> cmds = GetConsoleCmds();
                 foreach (var c in cmds)
                 {
@@ -1625,6 +1821,29 @@ namespace KKLLMNPC
                 }
             }
             string outp = sb.ToString().TrimEnd();
+            if (outp.Length == 0)
+            {
+                // CENSUS (2026-10-25): "the other agents are not in ps" needs the skip
+                // REASON per body — log the classification at debug so one reproduction
+                // names the failing gate (nick? claim? name lookup?).
+                try
+                {
+                    var kobolds = SceneCache.Find<Kobold>(2f);
+                    int n = 0;
+                    foreach (var k in kobolds)
+                    {
+                        if (k == null || k == _kobold) continue;
+                        n++;
+                        string nick = KoboldOwnerNick(k);
+                        bool claimed = LLMNPCPlugin.IsClaimedByAnyLLM(k.GetInstanceID());
+                        string agentName = claimed ? AgentNameForBody(k.GetInstanceID()) : null;
+                        Logger.LogDebug("[ps census] '" + CleanName(k.name) + "' nick=" + (nick ?? "null")
+                            + " claimed=" + claimed + " agentName=" + (agentName ?? "null"));
+                    }
+                    Logger.LogDebug("[ps census] scene kobolds scanned: " + n);
+                }
+                catch (Exception) { }
+            }
             return outp.Length > 0 ? outp : "no one else in the room";
         }
 
@@ -1825,7 +2044,12 @@ namespace KKLLMNPC
         private static string ToDictValue(Dictionary<string, object> d, string key)
         {
             object v;
-            return d != null && d.TryGetValue(key, out v) && v != null ? v.ToString() : "";
+            if (d == null || !d.TryGetValue(key, out v) || v == null) return "";
+            // Nested dictionaries used to render as "System.Collections.Generic
+            // .Dictionary`2[...]" in the terminal (the cd tool's route object).
+            var nested = v as System.Collections.IDictionary;
+            if (nested != null) { try { return Json.Write(v); } catch (Exception) { } }
+            return v.ToString();
         }
 
         // report — file a bug note for the human maintainers (AI feedback channel).
@@ -1943,19 +2167,53 @@ namespace KKLLMNPC
         // rides the idle-chatter cadence (one block per ~90 s) so a block can't turn
         // into a monologue. ToolSay's own repeat suppression + the turn's
         // identical-repeat guard are the loop breakers.
-        private bool MaybeSpeakResponseBlock(string block, bool hadTrigger, bool endTurn)
+        // CONTAINMENT (2026-10-25): console thoughts used to escape as chat text —
+        // a reply of mostly PLANNING that merely traveled with an RP marker
+        // ("*considers* I need energy", 'she said "come here" — I should go over')
+        // was broadcast whole. Only the VOICE spans are spoken now; the planning
+        // remainder is kept as a thought (history), and a block with no voice span
+        // at all is contained entirely. `promotedReasoning` (a reply harvested from
+        // the model's hidden reasoning channel) is NEVER speech — the act loop made
+        // the same call.
+        // Returns true when the block was spoken. `thoughtRecorded` reports whether the
+        // method itself pushed the planning remainder to history — the caller must NOT
+        // push it again in that case (it would double-record into the capped history).
+        // It is false only when the block was not a response block at all (or was
+        // promoted reasoning), where the caller is the sole recorder.
+        private bool MaybeSpeakResponseBlock(string block, bool hadTrigger, bool endTurn, bool promotedReasoning, out bool thoughtRecorded)
         {
+            thoughtRecorded = false;
             if (string.IsNullOrWhiteSpace(block)) return false;
             block = block.Trim();
             if (!TextUtil.IsRpResponseBlock(block)) return false;
+            if (promotedReasoning) return false;
+            string thinking;
+            string speakable = TextUtil.SpeakablePartOf(block, out thinking);
+            if (string.IsNullOrWhiteSpace(speakable))
+            {
+                if (thinking.Length > 4)
+                {
+                    PushHistory("think", thinking.Length > 60 ? thinking.Substring(0, 60) : thinking);
+                    thoughtRecorded = true;
+                }
+                Logger.LogInfo("[" + MyName() + "] block kept private (planning prose, no voice): " + Shorten(block, 80));
+                return false;
+            }
             bool canSpeak = hadTrigger || Time.unscaledTime - _lastIdleChatterNudge > 90f;
             if (!canSpeak) return false;
             if (!hadTrigger) _lastIdleChatterNudge = Time.unscaledTime;
             _consoleLastReplyWasBlock = true;
+            if (thinking.Length > 4)
+            {
+                PushHistory("think", thinking.Length > 60 ? thinking.Substring(0, 60) : thinking);
+                thoughtRecorded = true;
+            }
             try
             {
-                ToolSay(new TextArgs(Sanitize(block)));
-                Logger.LogInfo("[" + MyName() + "] block spoke" + (endTurn ? " (turn)" : ": ") + (endTurn ? "" : " " + Shorten(block, 60)));
+                ToolSay(new TextArgs(Sanitize(speakable)));
+                Logger.LogInfo("[" + MyName() + "] block spoke" + (endTurn ? " (turn)" : ": ")
+                    + (endTurn ? "" : Shorten(speakable, 60))
+                    + (thinking.Length > 4 ? "  [thinking kept private: " + Shorten(thinking, 60) + "]" : ""));
                 return true;
             }
             catch (Exception e)
@@ -1994,6 +2252,9 @@ namespace KKLLMNPC
 
         // "cd to bed" / "cd the kitchen" — small models prepend articles/prepositions;
         // the handlers below drop them.
+        private float _lastUnknownNag = -999f;
+        private int _unknownLinesThisCycle; // unknown-command lines seen this turn (escalation)
+
         private string CmdCd(ConsoleLine line)
         {
             if (line.Args == null || line.Args.Length == 0) return "cd where? e.g. cd bed | cd Yipper | cd id:3";
@@ -2130,6 +2391,86 @@ namespace KKLLMNPC
             return FmtResult(r);
         }
 
+        // think — PRIVATE reasoning. The containment channel: the terminal keeps
+        // the thought (history + last_thought) and the chat hears NOTHING, so a
+        // model that wants to reason out loud has somewhere to put it instead of
+        // smuggling prose into the reply (which the response-block detector used
+        // to leak into chat). Budget-free (no game effect), allowed while swallowed.
+        private string CmdThink(ConsoleLine line)
+        {
+            string text = line.Payload;
+            if (string.IsNullOrWhiteSpace(text) && line.Args != null && line.Args.Length > 0)
+                text = string.Join(" ", line.Args);
+            if (string.IsNullOrWhiteSpace(text)) return "think what? e.g. think I should eat first, then water the farm";
+            text = Sanitize(text).Trim();
+            _lastThought = text.Length > 80 ? text.Substring(0, 80) : text;
+            PushHistory("think", text.Length > 60 ? text.Substring(0, 60) : text);
+            Logger.LogInfo("[" + MyName() + "] console think: " + ShortenLine(text, 120));
+            return "noted (private — the chat hears nothing; act with cd/use/… or speak with echo)";
+        }
+
+        // buf — the personal scratch buffer: append/show/clear, or the pipe target
+        // (the executor wires `ls | buf` here as pipeIn). Free + sandboxed (no game
+        // effect), survives context trims, dies with the agent. See the state block.
+        private string CmdBuf(ConsoleLine line, string pipeIn)
+        {
+            if (pipeIn != null)
+            {
+                int before;
+                lock (_bufLock) before = _scratchBuf.Count;
+                BufAppendSink(pipeIn);
+                int after;
+                lock (_bufLock) after = _scratchBuf.Count;
+                return "buf: +" + (after - before) + " line(s) (" + after + "/" + BufMaxLines
+                    + ", oldest drop past the cap) — show with: buf";
+            }
+            if (line.Args != null && line.Args.Length > 0)
+            {
+                string a0 = line.Args[0].ToLowerInvariant();
+                if (a0 == "clear" || a0 == "wipe")
+                {
+                    lock (_bufLock) { _scratchBuf.Clear(); }
+                    return "buf: cleared";
+                }
+            }
+            string payload = line.Payload;
+            if (string.IsNullOrWhiteSpace(payload) && line.Args != null && line.Args.Length > 0)
+                payload = string.Join(" ", line.Args);
+            if (string.IsNullOrWhiteSpace(payload))
+            {
+                lock (_bufLock)
+                {
+                    if (_scratchBuf.Count == 0)
+                        return "(buf is empty — write with: buf <text>, or pipe into it: ls | buf · ls | tee)";
+                    var sb2 = new StringBuilder();
+                    for (int i = 0; i < _scratchBuf.Count; i++)
+                        sb2.Append((i + 1).ToString(CultureInfo.InvariantCulture).PadLeft(3))
+                           .Append("  ").AppendLine(_scratchBuf[i]);
+                    sb2.Append('(').Append(_scratchBuf.Count).Append(" lines, yours alone — append: buf <text> · wipe: buf clear)");
+                    return sb2.ToString();
+                }
+            }
+            payload = Sanitize(payload).Trim();
+            int added = 0;
+            lock (_bufLock)
+            {
+                foreach (var raw in payload.Replace("\r\n", "\n").Split('\n'))
+                {
+                    string t = raw.Trim();
+                    if (t.Length == 0) continue;
+                    if (t.Length > BufMaxLineChars) t = t.Substring(0, BufMaxLineChars);
+                    _scratchBuf.Add(t);
+                    added++;
+                }
+                while (_scratchBuf.Count > BufMaxLines) _scratchBuf.RemoveAt(0);
+            }
+            return added > 0
+                ? "buf: +" + added + " line(s) — show with: buf · wipe with: buf clear"
+                : "buf: nothing to add (empty line)";
+        }
+
+        private string CmdBufNoPipe(ConsoleLine line) { return CmdBuf(line, null); }
+
         private string CmdForget(ConsoleLine line)
         {
             string what = line.Payload;
@@ -2256,6 +2597,91 @@ namespace KKLLMNPC
         private string CmdHelp(ConsoleLine line) { return ConsoleShell.Help(); }
         private string CmdClear(ConsoleLine line) { return "ok"; }
 
+        // calc — scalar arithmetic (coords, timers, counts): free, pure compute.
+        private string CmdCalc(ConsoleLine line)
+        {
+            string expr = line.Payload;
+            if (string.IsNullOrWhiteSpace(expr) && line.Args != null && line.Args.Length > 0)
+                expr = string.Join(" ", line.Args);
+            string err;
+            string result = Calc.Evaluate(expr, out err);
+            if (err != null) return err;
+            return "= " + result;
+        }
+
+        // dist — distance + compass bearing without mental math: dist bed (from
+        // you), dist bed mailbox (between places — remembered place: facts, key
+        // places, players, siblings all resolve), or raw numbers: dist 12 4 40 32
+        // (x z x z) / dist 12 4 (x z from you). Costs a slot (reads the world).
+        private string CmdDist(ConsoleLine line)
+        {
+            if (!IsAlive(_kobold)) return "no body";
+            var a = line.Args ?? new string[0];
+            float n0, n1, n2, n3;
+            if (a.Length == 4
+                && TryParseFloat(a[0], out n0) && TryParseFloat(a[1], out n1)
+                && TryParseFloat(a[2], out n2) && TryParseFloat(a[3], out n3))
+                return DistLine("point", new Vector3(n0, 0f, n1), "point", new Vector3(n2, 0f, n3));
+            if (a.Length == 2 && TryParseFloat(a[0], out n0) && TryParseFloat(a[1], out n1))
+                return DistLine("you", _kobold.transform.position, "point", new Vector3(n0, 0f, n1));
+            var names = new List<string>();
+            foreach (var t in a)
+            {
+                string tok = (t ?? "").Trim();
+                if (tok.Length == 0) continue;
+                float f;
+                if (tok.Length > 0 && float.TryParse(tok, NumberStyles.Float, CultureInfo.InvariantCulture, out f))
+                    continue; // stray number outside the 2/4-number forms
+                names.Add(tok);
+            }
+            if (names.Count == 1)
+            {
+                Vector3? at = FindPlaceByName(names[0]);
+                if (!at.HasValue)
+                    return "can't find '" + names[0] + "' — remember it first (remember place: "
+                        + names[0] + " at x=<N> z=<N>), or try cat places / ps / ls";
+                return DistLine("you", _kobold.transform.position, names[0], at.Value);
+            }
+            if (names.Count == 2)
+            {
+                Vector3? pa = FindPlaceByName(names[0]);
+                if (!pa.HasValue)
+                    return "can't find '" + names[0] + "' — try cat places / ps / ls, or remember place: <name> at x=<N> z=<N>";
+                Vector3? pb = FindPlaceByName(names[1]);
+                if (!pb.HasValue)
+                    return "can't find '" + names[1] + "' — try cat places / ps / ls, or remember place: <name> at x=<N> z=<N>";
+                return DistLine(names[0], pa.Value, names[1], pb.Value);
+            }
+            return "dist what? dist bed · dist bed mailbox · dist 12 4 (x z from you) · dist 12 4 40 32 (x z → x z)";
+        }
+
+        // One dist result line: flat (XZ) meters, 8-way compass, signed deltas so
+        // the numbers can feed straight into remember place: / cd.
+        private string DistLine(string nameA, Vector3 pa, string nameB, Vector3 pb)
+        {
+            Vector3 d = pb - pa; d.y = 0f;
+            float m = d.magnitude;
+            string bearing = m > 0.5f ? " " + compass8(d) : "";
+            return nameA + " → " + nameB + ": " + F(m) + "m" + bearing
+                + " (dx " + (d.x >= 0f ? "+" : "") + F(d.x)
+                + ", dz " + (d.z >= 0f ? "+" : "") + F(d.z) + ")";
+        }
+
+        // man — the in-world manual (Manual.cs): mechanics/world/systems pages the
+        // model reads on demand instead of the prompt carrying every rule every
+        // turn. Bare `man` lists topics; `man <topic>` prints one page (aliases and
+        // unique prefixes resolve: man eat / man farm / man stat).
+        private string CmdMan(ConsoleLine line)
+        {
+            string topic = line.Payload;
+            if (string.IsNullOrWhiteSpace(topic) && line.Args != null && line.Args.Length > 0)
+                topic = string.Join(" ", line.Args);
+            string err;
+            string page = Manual.Page(topic, out err);
+            if (err != null) return err + " — " + page;
+            return page;
+        }
+
         // ------------------------------------------------------------------
         // formatting helpers
         // ------------------------------------------------------------------
@@ -2301,6 +2727,11 @@ namespace KKLLMNPC
                             items.Add(it == null ? "null" : it.ToString());
                         string joined = string.Join("; ", items.ToArray());
                         return joined.Length > 120 ? joined.Substring(0, 120) : joined;
+                    }
+                    if (result is System.Collections.IDictionary)
+                    {
+                        try { string j = Json.Write(result); return j.Length > 240 ? j.Substring(0, 240) : j; }
+                        catch (Exception) { }
                     }
                     string s = result == null ? "null" : result.ToString();
                     return s.Length > 120 ? s.Substring(0, 120) : s;
@@ -2390,7 +2821,13 @@ namespace KKLLMNPC
             }
             catch (Exception)
             {
-                try { return result == null ? "null" : result.ToString(); } catch (Exception) { return "ok"; }
+                try
+                {
+                    if (result is System.Collections.IDictionary)
+                    { try { string j = Json.Write(result); return j.Length > 240 ? j.Substring(0, 240) : j; } catch (Exception) { } }
+                    return result == null ? "null" : result.ToString();
+                }
+                catch (Exception) { return "ok"; }
             }
         }
     }

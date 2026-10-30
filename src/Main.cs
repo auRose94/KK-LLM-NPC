@@ -29,6 +29,16 @@ namespace KKLLMNPC
         // Static logger accessible from other classes (e.g. ModelProbe).
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
 
+        // Unity's overloaded == reports a DESTROYED component as null. This plugin
+        // component IS destroyed — the game kills BepInEx_Manager at t=0 (canary-
+        // verified) — while its C# object, config and instance state remain fully
+        // alive and the mod keeps running from LLMNPCRunner. So every `!LLMNPCPlugin.Alive(plugin)`
+        // check in the codebase misfired (NPCInstance ctor threw ArgumentNullException,
+        // Ollama.Ensure re-inited every tick, PlayerTrail/QuestSense bailed out).
+        // ALL plugin liveness checks must use pure reference null. The runner itself
+        // uses ReferenceEquals for the same reason.
+        internal static bool Alive(LLMNPCPlugin p) => !System.Object.ReferenceEquals(p, null);
+
         // Derive a suffix from the DLL name (e.g. "KKLLMNPC2.dll" → "2").
         internal static string InstanceSuffix
         {
@@ -59,6 +69,9 @@ namespace KKLLMNPC
         // ---- config ----
         internal ConfigEntry<string> _cfgEndpoint;
         internal ConfigEntry<string> _cfgModel;
+        internal ConfigEntry<string> _cfgKvCacheType;
+        internal ConfigEntry<bool> _cfgMtpEnabled;
+        internal ConfigEntry<string> _cfgDraftModel;
         internal ConfigEntry<string> _cfgApiKey;
         internal ConfigEntry<string> _cfgSystem;
         internal ConfigEntry<string> _cfgSystemPromptFile;
@@ -199,6 +212,44 @@ namespace KKLLMNPC
                 }
         }
 
+        // Directed PRIVATE agent-to-agent line (the `whisper` tool). Routes to the
+        // SINGLE sibling whose current chat name matches `targetName` (case-insensitive),
+        // delivering as a whisper so it never broadcasts to the room. A no match is
+        // reported (not swallowed) so the model learns the name was wrong. Duets are
+        // rate-limited per-recipient by BotChatAllowed so two agents can't echo
+        // forever (see NPCInstance.PushWhisper) — the sender also gets a receipt so
+        // it records what it said.
+        internal bool FanoutWhisper(string senderName, string text, string targetName)
+        {
+            if (string.IsNullOrEmpty(senderName) || string.IsNullOrEmpty(targetName)) return false;
+            NPCInstance target = null;
+            lock (_instancesLock)
+            {
+                foreach (var npc in _instances)
+                {
+                    if (npc == null) continue;
+                    try
+                    {
+                        string nm = npc.GetMyName();
+                        if (nm != null && string.Equals(nm, targetName, StringComparison.OrdinalIgnoreCase))
+                        { target = npc; break; }
+                    }
+                    catch (Exception) { }
+                }
+            }
+            if (target == null) return false;
+            try
+            {
+                target.PushWhisper(senderName, text);
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("fanout whisper to " + targetName + " failed: " + e.Message);
+                return false;
+            }
+            return true;
+        }
+
         // A game objective completed (QuestSense saw the scroll swap or empty).
         // The [event] line alone wasn't enough: agents kept grinding dead quests.
         // This delivers per-instance closure — quest-scoped facts are shed and a
@@ -235,6 +286,7 @@ namespace KKLLMNPC
         private float _lastWebRichBuild;
         // Session heartbeat (crash forensics) cadence.
         private float _lastHeartbeat;
+        private LLMNPCRunner _runner;
         // Top-up spawn throttle (SpawnMissingKobolds) + one-time gate log.
         private float _lastSpawnTry;
         private bool _spawnGateLogged;
@@ -291,9 +343,26 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         private void Awake()
         {
+            // SCENE-DEATH FIX (2026-10-24): on the new machine the plugin GameObject
+            // was destroyed at t=0 — OnDisable+OnDestroy fired right after the
+            // chainloader completed, before Update ever ran once, killing every
+            // Update-gated system (WebUI, Ollama watcher, instance reconcile). If
+            // BepInEx's chainloader object is not persistent on this host, this makes
+            // the plugin component survive the boot-scene unload itself. Idempotent.
+            UnityEngine.Object.DontDestroyOnLoad(gameObject);
             _mainContext = SynchronizationContext.Current;
             Log = Logger;
             Json.ErrorLog = msg => { try { Log?.LogWarning(msg); } catch (Exception) { } };
+            // WHO-AM-I (2026-10-24): confirm which GameObject carries the plugin and
+            // how it's flagged — BepInEx 5 hosts plugins directly on its persistent
+            // "BepInEx_Manager" root, so a t=0 death of that object kills every plugin.
+            try
+            {
+                Logger.LogInfo("awake-object: go='" + gameObject.name + "' hideFlags=" + gameObject.hideFlags
+                    + " parent='" + (transform.parent != null ? transform.parent.name : "(root)")
+                    + "' scene='" + gameObject.scene.name + "'");
+            }
+            catch (Exception) { }
             
             // Spectate HUD host (the in-game DEBUG overlay was removed — the WebUI
             // http://127.0.0.1:8338 is the debug surface now; this MonoBehaviour
@@ -302,6 +371,19 @@ namespace KKLLMNPC
             UnityEngine.Object.DontDestroyOnLoad(uiGO);
             uiGO.hideFlags = HideFlags.HideAndDontSave;
             uiGO.AddComponent<SpectateHudUI>();
+            // TICK RE-HOST (2026-10-24): the game's Addressables bootstrap destroys
+            // BepInEx_Manager (canary-verified — Manager GONE at t=0 while this
+            // GameObject survives across AddressableLoadingScene/MainMenu/MainMap).
+            // Every plugin component on it dies before its first Update, killing the
+            // WebUI, the Ollama watcher and instance possession. So the mod's tick
+            // loop lives HERE, on our own persistent GameObject: this component drives
+            // the plugin's RunUpdate/RunFixedUpdate, and real shutdown is wired to the
+            // runner's OnApplicationQuit (the plugin's own OnDestroy fires at t=0 and
+            // must NOT shut the mod down).
+            _runner = uiGO.GetComponent<LLMNPCRunner>();
+            if (_runner == null) _runner = uiGO.AddComponent<LLMNPCRunner>();
+            _runner.Plugin = this;
+            SpectateHudUI.PluginRef = this;
             
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
             // Carry correctness: AI-body grabbers anchor held items on the AGENT'S eye
@@ -318,6 +400,11 @@ namespace KKLLMNPC
             _cfgEndpoint = Config.Bind("LLM", "Endpoint", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions URL. LM Studio default: http://127.0.0.1:1234/v1/chat/completions");
             _cfgModel = Config.Bind("LLM", "Model", "local-model", "Model name to request. LM Studio: use the exact model name from the Developer tab. KoboldCpp: 'local-model' works.");
             _cfgApiKey = Config.Bind("LLM", "ApiKey", "", "Bearer token (may be empty for local)");
+            _cfgKvCacheType = Config.Bind("LLM", "KvCacheType", "", "KV-cache type the ADOPTED backend (Ollama/LMStudio) uses when serving (fp16, q8_0, q4_0, q5_1) - depends on the server; leave blank for the server default. Advisory; not all runners honour per-request overrides.");
+            _cfgMtpEnabled = Config.Bind("LLM", "MtpEnabled", false, "Opt in to Multi-Token Prediction / speculative decoding on the ADOPTED backend (experimental; requires Ollama >= 0.3.x / a draft model pinned under Ollama.DraftModel).");
+            _cfgDraftModel = Config.Bind("LLM", "DraftModel", "", "Name of the smaller draft model used by MTP / speculative decoding (Ollama native /api/chat draft_model). Leave blank to disable multi-draft speculation.");
+            _cfgTimeoutSeconds = Config.Bind("LLM", "TimeoutSeconds", 0,
+                "Chat POST timeout. 0 = automatic: plain turns 120s, thinking families (Qwen 3.5 / GPT-OSS / GLM / R1-class — their CoT burns wall-time before any answer text) 300s. Set >0 to force one bound for every family; a long timeout on a busy local server holds an Ollama parallel slot, so lower it if a second NPC starves.");
             // Bound before the prompt defaults below, which interpolate _cfgStereoIPD.Value.
             _cfgStereo = Config.Bind("Vision", "Stereo", false, "Render left+right eye cameras and stitch into a side-by-side stereo image (requires vision-capable model)");
             _cfgDisableReagentMessages = Config.Bind("General", "DisableReagentMessages", true, "Suppress reagent injection messages in log (default: true)");
@@ -330,15 +417,24 @@ namespace KKLLMNPC
             _cfgStereoIPD = Config.Bind("Vision", "StereoIPD", 0.063f, "Inter-pupillary distance in meters (distance between left and right camera)");
             // ---- little treats (opt-in oddities, all off by default) ----
             _cfgSwallowEnabled = Config.Bind("LittleTreats", "SwallowEnabled", false,
-                "Swallow-vore: releasing a held PERSON (kobold) while looking up (~33°+) swallows them whole instead of dropping — ~2s pull-in, they digest in your stomach for SwallowDigestSeconds, then SwallowEffect decides what comes of it. " +
-                "Held PLAYER bodies can never be swallowed (grief guard). Off by default: the whole LittleTreats category is opt-in.");
+                "Swallow-vore master switch: OFF (default) swallows nothing at all. When ON, consumption is a DELIBERATE BUTTON — a held PERSON you are LOOKING AT becomes consumable by pressing INSERT (instant-teleport: they pop from your grip and straight into the eaten-by body's mouth; the 'drop from the sky' button), and a player can only eat another they're standing within SwallowInsertRange of. Pressing a victim who is already mid-swallow does nothing (no accidental cascades — the old release-on-a-head force-feed path is gone, so a held person can never be grabbed by a second eater by accident). Toggle the button MODE with END (Self = your own mouth; Force = the nearest live kobold nearby, when you are not themselves being eaten). Off by default: the whole LittleTreats category is opt-in.");
             _cfgSwallowDigest = Config.Bind("LittleTreats", "SwallowDigestSeconds", 45f,
                 "Seconds a swallowed kobold sits in the stomach before the effect applies (clamped 5–600). The full cycle adds ~2s swallow-in and ~6s settle.");
             _cfgSwallowLookUpDot = Config.Bind("LittleTreats", "SwallowLookUpDot", 0.94f,
-                "How steeply up the camera must point for the drop to become a swallow: compare the camera-forward y against this (asin = the angle; 0.94 ≈ 70°, 0.97 ≈ 76°, 0.87 ≈ 60°). Default is deliberately near max-up so you can never eat someone by accident. Once the pull-in finishes the swallowed body is hidden (no sticking-out clipping), and in Grow/Destroy modes the consumed body's AI memories are gone from disk too (Grow pours them into the eater; Destroy erases them).");
-            _cfgSwallowForceFeeding = Config.Bind("LittleTreats", "SwallowForceFeeding", true,
-                "Force-feeding: ANY kobold's drop that lands a held PERSON right on/at another kobold's head makes the RECEIVER swallow them (the receiver then follows SwallowEffect's outcome). " +
-                "Requires SwallowEnabled too. Grief guards hold as always: receivers can't be player bodies and victims can't be player bodies; an eater already digesting someone refuses another; and the player's steep look-up self-swallow gesture still wins whenever it matches.");
+                "How steeply up the camera must point for the LOOK-UP self-swallow fallback (not needed when you press the INSERT button): compare the camera-forward y against this (asin = the angle; 0.94 ≈ 70°, 0.97 ≈ 76°, 0.87 ≈ 60°). Default is deliberately near max-up so you can never eat someone by accident. Once the pull-in finishes the swallowed body is hidden (no sticking-out clipping), and in Grow/Destroy modes the consumed body's AI memories are gone from disk too (Grow pours them into the eater; Destroy erases them).");
+            // END button mode: what the INSERT button does. OFF = no button swallow
+            // (nothing consumes anybody, safest default). SELF = a held, looked-at
+            // person teleports into YOUR mouth. FORCE = the same held person teleports
+            // into the nearest other live non-player kobold you're standing near (and
+            // only if that kobold isn't themselves being eaten). Grief guards hold:
+            // receivers can't be player bodies and victims can't be player bodies;
+            // an eater already digesting someone refuses another.
+            _cfgSwallowSwellMode = Config.Bind("LittleTreats", "SwallowSwellMode", SwallowLogic.SwallowSwellMode.Off,
+                "END button mode for the INSERT swallow button: OFF = nothing is consumable, SELF = INSERT teleports a held, looked-at PERSON (within SwallowInsertRange) into YOUR mouth, FORCE = it teleports them into the nearest other live non-player kobold you stand within SwallowInsertRange of (if that kobold is not being eaten). Cycle the END button toggles Self→Force→Off. Requires SwallowEnabled too.");
+            _cfgSwallowInsertRangeMin = Config.Bind("LittleTreats", "SwallowInsertRangeMin", SwallowLogic.DefaultInsertRangeMin,
+                "MINIMUM distance (meters) to the held target when INSERT teleports them: the target must be at least this far away, so a PrecisionGrabber nudge can never read as a deliberate Insert. Clamped to 0.1m..SwallowInsertRangeMax.");
+            _cfgSwallowInsertRangeMax = Config.Bind("LittleTreats", "SwallowInsertRangeMax", SwallowLogic.DefaultInsertRangeMax,
+                "MAXIMUM distance (meters) to the held target when INSERT teleports them: the target must be within this far (default 4m, a kobold's arm's reach + a little). Below SwallowInsertRangeMin or above this, INSERT does nothing. Clamped to SwallowInsertRangeMin..10m.");
             _cfgSwallowEffect = Config.Bind("LittleTreats", "SwallowEffect", SwallowEffect.Egg,
                 "What a fully-digested person becomes: Egg = an egg pops out at your feet carrying KoboldGenes.Mix(your genes, theirs) — plant it in soil and the hatched body is claimed again with their saved persona/facts (genes changed). " +
                 "BellyEgg = their 'Egg' reagent + genes ride in YOUR belly (20 units; nests need ≥5) — sit on a nest and lay THEM, then plant the egg as above. " +
@@ -361,12 +457,15 @@ namespace KKLLMNPC
                 "[SwallowAgentEat] how close the eater must be to swallow you (meters, center-to-center, clamped 1–8; 2.5 ≈ a kobold's arm's reach). The pull-in covers the rest — no grab needed.");
             _cfgWebEnabled = Config.Bind("Web", "Enabled", true,
                 "The mod's debug console over the loopback: a browser page (plus JSON API at /api/state and /api/reports) that shows every instance's goal/facts/history/terminal, the spectate status, and the mod's log — so you (or the dev assistant via curl) can watch and debug mid-session. Loopback-only (127.0.0.1), read-only, and built to answer even while the main thread is wedged. Off = the F6 IMGUI overlay remains the only UI.");
+            _cfgInGameHud = Config.Bind("General", "InGameHud", true,
+                "Compact on-screen status panel (top-left): each live agent's name, current action and thought, plus the world-map build state. The WebUI keeps the full detail; this is the glanceable in-game layer. Toggle off for a clean screen.");
+            CfgInGameHud = _cfgInGameHud;
             _cfgWebPort = Config.Bind("Web", "Port", 8338,
                 "[Web] port to bind the debug console on (127.0.0.1 only). Change it if it collides with another local service.");
             _cfgSwallowPov = Config.Bind("LittleTreats", "SwallowAgentEatPOV", SpectatePov.FirstPerson,
                 "[SwallowAgentEat] where the taken-over camera watches from: FirstPerson (default) = through the eater's OWN eyes — literally their head, with the same eye offset the AI's vision screenshots use, so you see exactly what the AI sees as it plays; ThirdPerson = a follow orbit behind them (pulls in when walls get between you). Applied when the next eat_player begins.");
             _cfgSwallowDestination = Config.Bind("LittleTreats", "SwallowDestination", SwallowDestination.Off,
-                "WHERE a swallowed person goes in, and the master accident-switch: OFF (default) disarms ALL release-triggered swallows — grabbing a kobold with the PrecisionGrabber and bumping heads, or dropping them near another head, just drops them like normal. Mouth/Anal/Pussy/Dick/Nipple arm the trigger and aim the pull at that hole — Dick anchors on the EATER's own dick (cock vore, urethral entry; falls back to the groin for the dickless) — narration names it, the stomach outcome is unchanged. Cycle in-game with F7, say 'vore arm <hole>' in your game chat, or set it in the WebUI settings tab. Function keys are frequently intercepted by desktops/Steam (mostly under Proton) or simply never reach an unfocused window — the chat command is the path that always works. Requires SwallowEnabled too.");
+                "WHERE a swallowed person goes in — the entry hole a held, looked-at PERSON teleports into when you press INSERT (the 'drop from the sky' button): OFF (default) swallows nothing; Mouth/Anal/Pussy/Dick/Nipple aim the pull at that hole — Dick anchors on the EATER's own dick (cock vore, urethral entry; falls back to the groin for the dickless). The entry hole does not change the stomach outcome (egg/belly-egg/grow/destroy follows SwallowEffect); narration names the route and the fate follows the mode (SELF eats into your own mouth; FORCE eats into the nearest other live kobold's). Cycle the hole with PAGE UP / PAGE DOWN in-game, 'vore arm <hole>' in chat, or the WebUI settings tab. Requires SwallowEnabled to arm the INSERT button too. NOTE: entry is now a deliberate button (INSERT), not a release-on-a-head drop — a held person can no longer be grabbed by a second eater by accident.");
             // ---- autonomy (self-directed movement/speech, agent-to-agent chat) ----
             _cfgIdleInitiative = Config.Bind("Autonomy", "IdleInitiativeSeconds", 90f,
                 "After this many seconds with no chat/event addressing the NPC, the mod injects a self-initiative cue: 'this is your own time — pick your own action' (with nearby kobold agents named so they find each other). The LLM then moves/speaks unprompted. 0 = off.");
@@ -499,7 +598,7 @@ namespace KKLLMNPC
             _cfgAutoSwitch = Config.Bind("LLM", "AutoSwitchModel", false,
                 "When context pressure is critical and a larger-context model is available on the server, automatically switch to it (requires KoboldCpp --admin mode).");
             _cfgThinking = Config.Bind("LLM", "Thinking", "auto",
-                "Control the model's hidden REASONING (chain-of-thought) generation. auto = leave the server/model default. off = request suppression so answers start immediately (the biggest latency win on reasoning families, which otherwise burn their whole token floor on invisible analysis): sends think=false (Ollama), chat_template_kwargs {enable_thinking:false} (llama.cpp / vLLM / SGLang, Qwen3-style templates) and reasoning_budget=0 (llama.cpp hybrid models); servers that don't recognize a field skip it. LM Studio / KoboldCpp expose the toggle in their model GUI instead. Leftover reasoning markers are still stripped client-side.");
+                "Control the model's hidden REASONING (chain-of-thought) generation. auto = reasoning families (GPT-OSS / Qwen 3.5 / GLM / R1-class) are SUPPRESSED — their CoT exhausted timeouts and tokens and leaked into chat; plain families keep the server default. off = request suppression so answers start immediately (the biggest latency win on reasoning families, which otherwise burn their whole token floor on invisible analysis): sends think=false (Ollama), chat_template_kwargs {enable_thinking:false} (llama.cpp / vLLM / SGLang, Qwen3-style templates) and reasoning_budget=0 (llama.cpp hybrid models); servers that don't recognize a field skip it. LM Studio / KoboldCpp expose the toggle in their model GUI instead. Leftover reasoning markers are still stripped client-side.");
             _cfgNameSelection = Config.Bind("LLM", "LLMNameSelection", true,
                 "Ask the LLM to choose a name for each body based on personality/gender/species (medium+ models only). Falls back to prefab name on failure.");
             _cfgNamePromptFile = Config.Bind("LLM", "NamePromptFile", "system_prompt_name.txt",
@@ -670,6 +769,17 @@ namespace KKLLMNPC
             // an instance starts when an AI kobold target exists and is removed when
             // its body is destroyed/sold/lost (see ReconcileInstances).
             Logger.LogInfo("KKLLMNPC: ready — instances start when AI kobold targets exist (MaxNPCs=" + Mathf.Clamp(_cfgMaxNPCs.Value, Consts.MinNPCs, Consts.MaxNPCs) + ", SpawnMissingKobolds=" + _cfgSpawnMissing.Value + ").");
+            // LIFECYCLE DIAGNOSTIC (2026-10-24): on the new machine the mod went
+            // silent right after this line — no "main thread captured.", no WebUI,
+            // no Ollama watcher, no heartbeat. Log the component's start state so a
+            // disable/destroy cause is visible in the log itself.
+            try
+            {
+                Logger.LogInfo("awake-state: enabled=" + enabled
+                    + " goActive=" + gameObject.activeInHierarchy
+                    + " ctx=" + (SynchronizationContext.Current != null ? "yes" : "NULL"));
+            }
+            catch (Exception) { }
         }
 
         // ------------------------------------------------------------------
@@ -713,7 +823,10 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // Unity callbacks
         // ------------------------------------------------------------------
-        private void Update()
+        // Driven by LLMNPCRunner (on the mod's own persistent GameObject) — NOT by
+        // Unity directly: the game destroys BepInEx_Manager at t=0, and this plugin
+        // component dies with it before Unity ever ticks it once.
+        internal void RunUpdate()
         {
             // Main-thread heartbeat + phase marker for the hang watchdog (game-time
             // + wall clock together — Beat()).
@@ -772,10 +885,17 @@ namespace KKLLMNPC
             // per-frame call) also honors an Enabled/Port config change within a frame.
             if (_mainReady)
             {
-                try { WebUI.Ensure(this); } catch (Exception) { }
+                // NOT silent: a throw here kills the WebUI or the Ollama watcher with
+                // zero log output — the 2026-10-24 "mod looks dead after chainloader"
+                // session was exactly that (both swallowed, config never gained its
+                // [Ollama] section). Log the failure; Ensure is idempotent so the next
+                // frame retries.
+                try { WebUI.Ensure(this); }
+                catch (Exception e) { try { Logger.LogWarning("webui ensure: " + e.Message); } catch (Exception) { } }
                 // Ollama adoption (external host): pass [LLM].Model so a picker
                 // pick lands in the running LLM. Idempotent, own thread.
-                try { Ollama.Ensure(this, _cfgModel); } catch (Exception) { }
+                try { Ollama.Ensure(this, _cfgModel); }
+                catch (Exception e) { try { Logger.LogWarning("ollama ensure: " + e.Message); } catch (Exception) { } }
             }
 
             // Reconcile the instance pool with available targets: start an instance
@@ -832,13 +952,24 @@ namespace KKLLMNPC
             // Delayed main-thread one-shots (delayed body-memory rechecks, op queues).
             DrainDelayedMainActions();
 
-            // Vore destination hotkey: F7 cycles  OFF -> mouth -> anal -> pussy ->
-            // nipple -> OFF  (the "not an accident" control: with OFF nothing swallows
-            // — no release-look-up self-eat, no drop-near-a-head force-feed). Announce
-            // in chat so it's visible without opening any menu.
-            HandleVoreDestinationHotkey();
-            // F8 cycles the fate (egg -> belly-egg -> grow -> destroy).
-            HandleVoreEffectHotkey();
+            // Swallow-vore controls (all chat-visible announce + persist):
+            //   PAGE UP  cycles the target hole (off → mouth → anal → pussy → dick
+            //            → nipple → off) — the "not an accident" control: with OFF
+            //            nothing swallows.
+            //   PAGE DOWN cycles the fate (egg → belly-egg → grow → destroy).
+            //   INSERT   the deliberate "drop from the sky" consume of a held,
+            //            looked-at person within SwallowInsertRange (self / force).
+            //   END      toggles the swallow MODE (OFF → SELF → FORCE → OFF).
+            // Page Up/Down (not F7/F8) because function keys are intercepted by
+            // desktops/Steam — mostly under Proton — and never reach an unfocused
+            // window; the chat commands below are the always-works path.
+            HandleVoreTargetHotkey();
+            HandleVoreFateHotkey();
+            HandleInsert();
+            HandleEnd();
+            // LANDING VORE: the falling-half of the physics triggers (fall on a
+            // body → they go inside you). Throttled internally; free when disarmed.
+            try { SwallowManager.SouthVoreTick(); } catch (Exception) { }
 
             // WebUI rich per-kobold stat snapshots are built HERE (main thread — gene/
             // transform reads) and served from cache by the HTTP thread.
@@ -891,7 +1022,8 @@ namespace KKLLMNPC
             if (_dllChangedQueued && _mainReady)
             {
                 _dllChangedQueued = false;
-                StartCoroutine(RestartAfterSecond());
+                // coroutine runs on the runner's GO (the plugin's GO is dead by now)
+                _runner.StartCoroutine(RestartAfterSecond());
             }
 
             // Per-instance LLM thread watchdog.
@@ -916,7 +1048,8 @@ namespace KKLLMNPC
             }
         }
 
-        private void FixedUpdate()
+        // Driven by LLMNPCRunner — see RunUpdate.
+        internal void RunFixedUpdate()
         {
             // Main-thread heartbeat (hang watchdog reads it). Wall clock included.
             Beat();
@@ -1016,15 +1149,43 @@ namespace KKLLMNPC
             }
         }
 
-        // F7 cycles the swallow destination (off → mouth → anal → pussy → nipple →
-        // off) — the "never eat someone by accident" control the user asked for.
-        // Announces in the game's chat panel so it's visible without any menu, and
-        // persists to config (ConfigFile.Save) so it survives the session.
-        private void HandleVoreDestinationHotkey()
+        // PAGE UP cycles the swallow TARGET (off → mouth → anal → pussy → dick →
+        // nipple → off) — the "never eat someone by accident" control the user
+        // asked for: with OFF nothing swallows, so a held person you're facing
+        // just drops. Announces in chat + persists, like every vore control.
+        // Key detection that works under both input stacks: legacy UnityEngine.Input
+        // THROWS on new-input-only hosts (the vore handlers' silent catch then reads
+        // as "the buttons do nothing"), so fall back to the new Input System.
+        private static bool _legacyInputBroken;
+        private static bool KeyDownAny(KeyCode kc)
+        {
+            if (!_legacyInputBroken)
+            {
+                try { return Input.GetKeyDown(kc); }
+                catch (Exception)
+                {
+                    _legacyInputBroken = true;
+                    try { Log?.LogWarning("legacy UnityEngine.Input unavailable (new-input-only host) — vore hotkeys fall back to the new Input System"); } catch (Exception) { }
+                }
+            }
+            try { return KeyDownNew(kc); } catch (Exception) { return false; }
+        }
+
+        private static bool KeyDownNew(KeyCode kc)
+        {
+            var kb = UnityEngine.InputSystem.Keyboard.current;
+            if (kb == null) return false;
+            UnityEngine.InputSystem.Key key;
+            if (!System.Enum.TryParse(kc.ToString(), true, out key)) return false;
+            var ctl = kb[key];
+            return ctl != null && ctl.wasPressedThisFrame;
+        }
+
+        private void HandleVoreTargetHotkey()
         {
             try
             {
-                if (!Input.GetKeyDown(KeyCode.F7)) return;
+                if (!KeyDownAny(KeyCode.PageUp)) return;
                 var cfg = _cfgSwallowDestination;
                 if (cfg == null) return;
                 var next = SwallowLogic.NextDestination(cfg.Value);
@@ -1032,12 +1193,12 @@ namespace KKLLMNPC
                 try { Config.Save(); } catch (Exception) { }
                 string line;
                 if (next == SwallowDestination.Off)
-                    line = "[KKLLMNPC] vore OFF — nothing swallows (F7 to arm a destination; agents with their own vore_target still choose their own route)";
+                    line = "[KKLLMNPC] vore OFF — nothing swallows (Page Up to arm a target; agents with their own vore_target still choose their own route)";
                 else
-                    line = "[KKLLMNPC] vore destination: " + SwallowLogic.DestinationLabel(next)
-                        + " — held-person releases can swallow into that hole (F7 cycles; F8 picks the fate)";
+                    line = "[KKLLMNPC] vore target: " + SwallowLogic.DestinationLabel(next)
+                        + " — INSERT swallows a held, looked-at person into that hole (Page Up cycles target; Page Down picks the fate)";
                 try { CheatsProcessor.AppendText(line + "\n"); } catch (Exception) { }
-                try { Logger.LogInfo("vore destination set to '" + SwallowLogic.DestinationLabel(next) + "' (F7)"); } catch (Exception) { }
+                try { Logger.LogInfo("vore target set to '" + SwallowLogic.DestinationLabel(next) + "' (Page Up)"); } catch (Exception) { }
             }
             catch (Exception) { }
         }
@@ -1050,11 +1211,11 @@ namespace KKLLMNPC
         }
 
         // ---- the always-works control path ----
-        // F7/F8 are Function keys: desktops and Steam (especially under Proton)
-        // intercept them, and an unfocused game window never receives them at all
-        // (field report: both keys dead, nothing in the log). Typing in your own
-        // game chat cannot be taken away — same announce + persist as the
-        // hotkeys, consumed here so the agents never hear the control words.
+        // Page Up/Down are Function keys: desktops and Steam (especially under
+        // Proton) intercept them, and an unfocused game window never receives them
+        // at all (field report: both keys dead, nothing in the log). Typing in
+        // your own game chat cannot be taken away — same announce + persist as
+        // the hotkeys, consumed here so the agents never hear the control words.
         private void VoreStateAnnounce()
         {
             var pl = this;
@@ -1069,9 +1230,10 @@ namespace KKLLMNPC
                     fate = SwallowLogic.EffectLabel(pl._cfgSwallowEffect.Value).ToLowerInvariant();
             }
             catch (Exception) { }
-            VoreAnnounce("[KKLLMNPC] vore: " + (masterOn ? "ENABLED (F7/chat arms a hole)" : "DISABLED at the master switch")
+            VoreAnnounce("[KKLLMNPC] vore: " + (masterOn ? "ENABLED (Page Up/chat arms a hole)" : "DISABLED at the master switch")
                 + " · destination = " + target + " · fate = " + fate
-                + " — chat: vore arm <mouth|anal|pussy|dick|nipple|off> / vore fate <egg|bellyegg|grow|destroy|off> / vore cycle / vore state");
+                + " · END mode = " + SwallowLogic.SwallowSwellModeLabel(SwallowManager.SwellMode())
+                + " — Page Up target, Page Down fate, INSERT a held looked-at person, END a mode; chat: vore arm <mouth|anal|pussy|dick|nipple|off> / vore fate <egg|bellyegg|grow|destroy|off> / vore cycle / vore state");
         }
 
         private bool TryVoreCommandFromChat(string msg)
@@ -1169,28 +1331,124 @@ namespace KKLLMNPC
             catch (Exception) { return false; }
         }
 
-        // F8 cycles the swallow FATE (egg → belly-egg → grow → destroy) — the other
-        // half of the player's pair of vore controls; same announce + persist as F7.
-        // Agents set their own fate with their `vore_mode` tool instead.
-        private void HandleVoreEffectHotkey()
+        // PAGE DOWN cycles the swallow FATE (egg → belly-egg → grow → destroy) —
+        // the other half of the player's pair of vore controls; same announce +
+        // persist as Page Up. Agents set their own fate with `vore_mode` instead.
+        private void HandleVoreFateHotkey()
         {
             try
             {
-                if (!Input.GetKeyDown(KeyCode.F8)) return;
+                if (!KeyDownAny(KeyCode.PageDown)) return;
                 var cfg = _cfgSwallowEffect;
                 if (cfg == null) return;
                 var next = SwallowLogic.NextEffect(cfg.Value);
                 cfg.Value = next;
                 try { Config.Save(); } catch (Exception) { }
                 string line = "[KKLLMNPC] vore fate: " + SwallowLogic.EffectLabel(next)
-                    + " — what a finished digestion turns its meal into (F8 cycles)";
+                    + " — what a finished digestion turns its meal into (Page Down cycles; Page Up picks the target)";
                 try { CheatsProcessor.AppendText(line + "\n"); } catch (Exception) { }
-                try { Logger.LogInfo("vore effect set to '" + SwallowLogic.EffectLabel(next) + "' (F8)"); } catch (Exception) { }
+                try { Logger.LogInfo("vore fate set to '" + SwallowLogic.EffectLabel(next) + "' (Page Down)"); } catch (Exception) { }
             }
             catch (Exception) { }
         }
 
+        // END button — cycle the swallow MODE the INSERT button acts on (OFF →
+        // SELF → FORCE → OFF). OFF = nothing is consumable (safe default); SELF =
+        // INSERT teleports a held, looked-at person into YOUR mouth; FORCE = it
+        // teleports them into the nearest other live kobold you stand near
+        // (only if that kobold isn't being eaten). Announces + persists.
+        private void HandleEnd()
+        {
+            try
+            {
+                if (!KeyDownAny(KeyCode.End)) return;
+                var mode = SwallowManager.EndToggleMode();
+                try { Config.Save(); } catch (Exception) { }
+                string line = "[KKLLMNPC] swallow mode: " + SwallowLogic.SwallowSwellModeLabel(mode)
+                    + " — END toggles this (OFF/SELF/FORCE); INSERT teleports a held, looked-at person per this mode (Page Up cycles the target hole)";
+                try { CheatsProcessor.AppendText(line + "\n"); } catch (Exception) { }
+                try { Logger.LogInfo("swallow mode set to '" + SwallowLogic.SwallowSwellModeLabel(mode) + "' (End)"); } catch (Exception) { }
+            }
+            catch (Exception) { }
+        }
+
+        // INSERT button — the deliberate "drop from the sky" consume. Teleports a
+        // held, looked-at PERSON within SwallowInsertRange into the eaten-by body
+        // (SELF mode = your own mouth; FORCE mode = the nearest other live kobold
+        // near you). No-op unless vore is enabled, a target is armed, and a swell
+        // mode (SELF/FORCE) is set. Reports a human-readable status. Main-thread.
+        private void HandleInsert()
+        {
+            try
+            {
+                if (!KeyDownAny(KeyCode.Insert)) return;
+                try
+                {
+                    if (!PlayerPossession.TryGetPlayerInstance(out var pp) || pp.kobold == null) return;
+                    SwallowManager.InsertStatus status = SwallowManager.InsertStatus.Refused;
+                    SwallowManager.TryInsert(pp.kobold, out status);
+                    switch (status)
+                    {
+                        case SwallowManager.InsertStatus.Success:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT — swallowed whole. Fate follows the current fate (Page Down).\n"); } catch (Exception) { }
+                            try { Logger.LogInfo("INSERT: swallowed whole."); } catch (Exception) { }
+                            break;
+                        case SwallowManager.InsertStatus.Disabled:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT — vore is DISABLED (enable SwallowEnabled; END picks a mode).\n"); } catch (Exception) { }
+                            break;
+                        case SwallowManager.InsertStatus.NoBody:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT — you have no body to eat into.\n"); } catch (Exception) { }
+                            break;
+                        case SwallowManager.InsertStatus.NoTarget:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT — no held, looked-at person within SwallowInsertRange.\n"); } catch (Exception) { }
+                            break;
+                        case SwallowManager.InsertStatus.AlreadyInside:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT — that person is already inside someone; no second eater.\n"); } catch (Exception) { }
+                            break;
+                        case SwallowManager.InsertStatus.Refused:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT — nothing happened (hold a person you can see, set a target, and pick a mode with END).\n"); } catch (Exception) { }
+                            break;
+                        case SwallowManager.InsertStatus.NoReceiver:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT (FORCE) — no other live person near you to feed.\n"); } catch (Exception) { }
+                            break;
+                        case SwallowManager.InsertStatus.ReceiverBusy:
+                            try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT (FORCE) — the person nearest you is already eating someone.\n"); } catch (Exception) { }
+                            break;
+                    }
+                }
+                catch (Exception e)
+                {
+                    try { CheatsProcessor.AppendText("[KKLLMNPC] INSERT failed: " + e.Message + "\n"); } catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // LIFECYCLE DIAGNOSTIC (2026-10-24): Update never fired on the new machine —
+        // these make an external disable/destroy visible in the log with a timestamp.
+        private void OnEnable() { try { Logger.LogInfo("lifecycle: OnEnable"); } catch (Exception) { } }
+        private void OnDisable()
+        {
+            // scene name discriminates the two killers: a normal scene name = the GO
+            // died with a scene unload (was never persistent); "DontDestroyOnLoad" =
+            // something called Destroy() on it explicitly (see Patches destroy-guard).
+            string scene = "(unknown)";
+            try { scene = gameObject.scene.name; if (string.IsNullOrEmpty(scene)) scene = "(none)"; } catch (Exception) { scene = "(destroyed?)"; }
+            try { Logger.LogWarning("lifecycle: OnDisable @t=" + Time.unscaledTime.ToString("0.0", CultureInfo.InvariantCulture)
+                + " scene='" + scene + "' — something disabled the plugin component"); } catch (Exception) { }
+        }
+
+        // The game destroys BepInEx_Manager at t=0, so this fires immediately after
+        // startup and is NOT a shutdown signal — the mod keeps running on its own
+        // GameObject (LLMNPCRunner). Real teardown lives in Shutdown(), wired to the
+        // runner's OnApplicationQuit.
         private void OnDestroy()
+        {
+            try { Logger.LogWarning("lifecycle: OnDestroy @t=" + Time.unscaledTime.ToString("0.0", CultureInfo.InvariantCulture) + " (host GO killed — mod continues on KKLLMNPC_UIGameObject)"); } catch (Exception) { }
+        }
+
+        // REAL teardown — only on application quit (see LLMNPCRunner.OnApplicationQuit).
+        internal void Shutdown()
         {
             _running = false;
             _mainReady = false;
@@ -1235,6 +1493,14 @@ namespace KKLLMNPC
 
                 bool isLocal = false;
                 try { var lp = PhotonNetwork.LocalPlayer; isLocal = lp != null && lp.ActorNumber == ev.Sender; } catch (Exception) { }
+                // The sender's actor number — used for drift-immune attribution of
+                // the identity bot's own plain-text lines (whose NickName may have
+                // drifted from the LLM's internal _npcName; see NPCInstance.IsAgentSelf).
+                bool senderIsAgent = false;
+                foreach (var npc in _instances)
+                {
+                    try { if (npc.IsAgentSelf(ev.Sender)) { senderIsAgent = true; break; } } catch (Exception) { }
+                }
 
                 // Swallow digest abort — the no-cheat escape hatch the player types
                 // in chat ("swallow abort", "spit out", …). Only the local player's
@@ -1261,6 +1527,16 @@ namespace KKLLMNPC
                         try { own = npc.IsMySpeech(msg); } catch (Exception) { }
                         if (own) { agentOrigin = true; try { agentName = npc.GetMyName(); } catch (Exception) { } break; }
                     }
+                    // Identity-bot lines send PLAIN TEXT (no "Name:" prefix), so the
+                    // IsMySpeech prefix check above never sees them. The NickName ==
+                    // _npcName compare also fails whenever the live Photon NickName
+                    // has drifted from the LLM's internal _npcName (a rename that
+                    // lagged on the bot's Photon client, or NickName normalization at
+                    // start) — and when both miss, the line fell through to the player
+                    // broadcast path and re-delivered "wrongName: msg" to self +
+                    // siblings. The sender's actor number never drifts, so an exact
+                    // NickName match is enough — and if it isn't found, the actor
+                    // number alone still identifies the speaker as one of us.
                     if (!agentOrigin && senderName != null)
                         foreach (var npc in _instances)
                         {
@@ -1268,6 +1544,22 @@ namespace KKLLMNPC
                             try { myName = npc.GetMyName(); } catch (Exception) { }
                             if (myName != null && string.Equals(senderName, myName, StringComparison.OrdinalIgnoreCase))
                             { agentOrigin = true; agentName = myName; break; }
+                        }
+                    // Actor-number path: no exact NickName match yet the sender's
+                    // actor number is one of OUR identity bots. We know it's an
+                    // agent (so it must NOT fall through to the player broadcast),
+                    // and IsAgentSelf both finds the OWNER instance (so we can name
+                    // it correctly) and is what the delivery loop uses to skip the
+                    // speaker's self-respond.
+                    if (!agentOrigin && senderIsAgent)
+                        foreach (var npc in _instances)
+                        {
+                            try
+                            {
+                                if (npc.IsAgentSelf(ev.Sender))
+                                { agentOrigin = true; agentName = npc.GetMyName(); break; }
+                            }
+                            catch (Exception) { }
                         }
 
                     // Deliver per instance: never self-respond, honor addressing.
@@ -1722,8 +2014,41 @@ namespace KKLLMNPC
     // This MonoBehaviour survives because the spectate HUD is gameplay UX: while
     // a swallow holds the local player they must know why their camera lives
     // behind another kobold and how to get out.
+    // The mod's real tick host. Lives on KKLLMNPC_UIGameObject (DontDestroyOnLoad,
+    // survives the game's Addressables bootstrap that kills BepInEx_Manager), and
+    // drives the plugin's RunUpdate/RunFixedUpdate. See Awake's TICK RE-HOST note.
+    internal class LLMNPCRunner : MonoBehaviour
+    {
+        internal LLMNPCPlugin Plugin;
+
+        private void Update()
+        {
+            // NOTE: never use Unity's `== null` here — the plugin component is
+            // destroyed (its GO was killed at t=0) while its C# object, config and
+            // instance list stay fully alive. ReferenceEquals passes; Unity == fails.
+            var p = Plugin;
+            if (System.Object.ReferenceEquals(p, null)) return;
+            try { p.RunUpdate(); } catch (Exception e) { try { LLMNPCPlugin.Log?.LogWarning("runner update: " + e.Message); } catch (Exception) { } }
+        }
+
+        private void FixedUpdate()
+        {
+            var p = Plugin;
+            if (System.Object.ReferenceEquals(p, null)) return;
+            try { p.RunFixedUpdate(); } catch (Exception e) { try { LLMNPCPlugin.Log?.LogWarning("runner fixed: " + e.Message); } catch (Exception) { } }
+        }
+
+        private void OnApplicationQuit()
+        {
+            var p = Plugin;
+            if (System.Object.ReferenceEquals(p, null)) return;
+            try { p.Shutdown(); } catch (Exception) { }
+        }
+    }
+
     public class SpectateHudUI : MonoBehaviour
     {
+        internal static LLMNPCPlugin PluginRef;
         private void OnGUI()
         {
             try
@@ -1745,9 +2070,53 @@ namespace KKLLMNPC
                 {
                     GUI.skin.label.alignment = TextAnchor.UpperCenter;
                     var wv = new Vector2(Math.Min(760f, Screen.width - 20f), 26f);
-                    var rv = new Rect((Screen.width - wv.x) / 2f, y, wv.x, wv.y);
+                    var rv = new Rect((Screen.width - wv.x) / 2f, y, wv.x, 26f);
                     GUI.Box(rv, string.Empty);
                     GUI.Label(new Rect(rv.x + 4f, rv.y + 2f, rv.x + wv.x - 8f - rv.x, rv.height - 4f), vore);
+                }
+
+                // IN-GAME STATUS HUD (2026-10-24): the old debug overlay was removed in
+                // favor of the WebUI, which left nothing on-screen while playing. This
+                // compact panel shows the live agents' current action/thought so
+                // playtests read at a glance; full detail stays on the WebUI.
+                var cfg = LLMNPCPlugin.CfgInGameHud;
+                if (PluginRef != null && (cfg == null || cfg.Value))
+                {
+                    var lines = new System.Collections.Generic.List<string>();
+                    try
+                    {
+                        lock (PluginRef._instancesLock)
+                        {
+                            foreach (var npc in PluginRef._instances)
+                            {
+                                if (npc == null) continue;
+                                string name = npc.GetMyName() ?? "?";
+                                string act = npc.LastAction ?? "?";
+                                string th = npc.LastThought ?? "";
+                                if (th.Length > 64) th = th.Substring(0, 64) + "…";
+                                lines.Add(name + " — " + act + (th.Length > 0 ? "  |  " + th : ""));
+                            }
+                        }
+                        string map = WorldMap.StatusText();
+                        if (!string.IsNullOrEmpty(map)) lines.Add(map);
+                    }
+                    catch (Exception) { }
+                    if (lines.Count > 0)
+                    {
+                        lines.Add("webui: 127.0.0.1:8338");
+                        var style = new GUIStyle(GUI.skin.label);
+                        style.fontSize = 12;
+                        style.wordWrap = false;
+                        float w = 460f, h = 6f + lines.Count * 17f;
+                        var box = new Rect(8f, 8f, w, h);
+                        GUI.Box(box, string.Empty);
+                        float ly = box.y + 4f;
+                        foreach (var line in lines)
+                        {
+                            GUI.Label(new Rect(box.x + 6f, ly, w - 12f, 17f), line, style);
+                            ly += 17f;
+                        }
+                    }
                 }
             }
             catch (Exception) { }

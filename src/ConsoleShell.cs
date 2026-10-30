@@ -73,6 +73,7 @@ namespace KKLLMNPC
             { "remember", new[] { P("text", "string", "the sticky fact to store") } },
             { "forget",   new[] { P("text", "string", "the fact to drop (prefix match)") } },
             { "goal",     new[] { P("text", "string", "goal text, or 'done', or 'drop [why]'") } },
+            { "skill",    new[] { P("text", "string", "save a reusable procedure: 'add <name> | <step> ; <step>' — run with skill <name>; 'forget <name>' drops one") } },
             { "report",   new[] { P("text", "string", "what is broken/frustrating + what you tried") } },
             { "cd",       new[] { P("target", "string", "place name, a player's name, or id:N") } },
             { "use",      new[] { P("target", "string", "usable name or id:N") } },
@@ -88,6 +89,11 @@ namespace KKLLMNPC
             { "follow",   new[] { P("state", "string", "on|off") } },
             { "sleep",    new[] { P("secs", "string", "seconds to pause that long") } },
             { "plan",     new[] { P("text", "string", "add a step | 'clear' | 'next' (current step done)") } },
+            { "think",    new[] { P("text", "string", "your private reasoning or plan — the terminal keeps it, chat never hears it") } },
+            { "buf",      new[] { P("text", "string", "append a note to your scratch buffer (bare buf shows it; 'clear' wipes)") } },
+            { "calc",     new[] { P("expr", "string", "arithmetic expression, e.g. (12-4)*3 or sqrt(2)") } },
+            { "dist",     new[] { P("from", "string", "place name or x z coords (bare = you)"), P("to", "string", "second place (omit = distance from you)") } },
+            { "man",      new[] { P("topic", "string", "manual page to read (bare man lists topics)") } },
         };
         // no-parameter commands (empty properties).
         private static readonly string[] NoParams =
@@ -161,6 +167,19 @@ namespace KKLLMNPC
         {
             var outp = new List<string>();
             if (string.IsNullOrEmpty(text)) return outp;
+            // Bare act-schema JSON the model emitted WITHOUT tool-call markers (the
+            // {"progress":..., "action":"status", "plan":[{...}]} decision form).
+            // ToolCallMarkupLines only catches JSON wrapped in opens/controllers;
+            // when the whole reply is one JSON act, flatten it to command lines now.
+            try
+            {
+                var parsed = Json.Parse(text.Trim());
+                if (parsed is Dictionary<string, object> || parsed is List<object>)
+                {
+                    if (AddParsed(text.Trim(), outp)) return outp;
+                }
+            }
+            catch (Exception) { }
             bool anyCall = false;
             int i = 0, n = text.Length;
             while (i < n)
@@ -521,6 +540,8 @@ namespace KKLLMNPC
             { "find",       "locate a place (find bed) or probe a direction (find 90)" },
             { "look",       "look left | right | up | down | around | <deg>" },
             { "sonar",      "north-up ASCII map of your surroundings: sonar [filter: W S V U K P | all]" },
+            { "calc",       "arithmetic: calc (12-4)*3 · calc sqrt(2) · calc min(3,9) · abs/round/floor/ceil" },
+            { "dist",       "distance + compass bearing: dist bed | dist bed mailbox | dist 12 4 40 32 (x z x z)" },
 
             // ---- act ----
             { "echo",       "SPEAK out loud: echo <your words> (this is how you talk)" },
@@ -542,6 +563,8 @@ namespace KKLLMNPC
 
             // ---- memory & goals ----
             { "remember",   "store a fact: remember <fact> — STICKY knowledge only: name the thing and its durable place ('bed is upstairs'); viewer-relative facts ('to my left', 'is here') are refused — they go stale the moment anything moves" },
+            { "think",      "reason PRIVATELY: think <your thoughts> — the terminal keeps it, the chat NEVER hears it (to speak, use echo)" },
+            { "buf",        "YOUR scratch buffer: buf <text> appends · buf shows it numbered · buf clear wipes · pipes land in it (ls | buf) — survives context trims, yours alone" },
             { "forget",     "drop a fact: forget <fact>" },
             { "goal",       "set goal: goal <text> | goal done | goal drop [why]" },
             { "skill",      "save a reusable procedure: skill add <name> | <step> ; <step> — run with skill <name>; `cat skills` lists them" },
@@ -559,8 +582,16 @@ namespace KKLLMNPC
             { "head",       "pipe filter: head [-n N] — first N lines (default 10)" },
             { "tail",       "pipe filter: tail [-n N] — last N lines (default 10)" },
             { "wc",         "pipe filter: wc [-w words | -c chars] — counts lines by default" },
-            { "sort",       "pipe filter: sort [-r] — alphabetize (r = reverse)" },
+            { "sort",       "pipe filter: sort [-r] [-n numeric] — alphabetize (r = reverse)" },
             { "uniq",       "pipe filter: uniq [-c] — collapse adjacent duplicates (c = show counts)" },
+            { "sed",        "pipe filter: sed 's/old/new/[g]' — literal substitution (g = every occurrence; quote when spaces)" },
+            { "cut",        "pipe filter: cut -f1 · cut -f2-3 · cut -d: -f1 — select fields (default split: whitespace)" },
+            { "tr",         "pipe filter: tr -d <chars> (delete) · tr <a> <b> (replace one char)" },
+            { "nl",         "pipe filter: number the lines (pick N after it to grab one)" },
+            { "tac",        "pipe filter: reverse the line order" },
+            { "pick",       "pipe filter: pick N — print only line N (1-based)" },
+            { "tee",        "pipe filter: copy the stream into your buf while passing it on — cat places | tee" },
+            { "man",        "read the in-world manual: man [topic] — mechanics/world/systems pages (bare man lists topics)" },
             { "help",       "list all commands" },
             { "clear",      "clear the screen (no game effect)" },
         };
@@ -610,6 +641,8 @@ namespace KKLLMNPC
             // report (AI feedback to the dev) — deliberately NOT aliasing words that
             // prose replies often start with ("problem"/"issue"/"bug"), so thinking
             // out loud never files a report by accident.
+            // "man" is NOT aliased to help: it is its own command — the in-world
+            // manual (see Manual.cs). help stays the command list.
             { "report_issue", "report" }, { "bug_report", "report" }, { "report_bug", "report" },
             { "complain", "report" }, { "complaint", "report" },
             { "people", "ps" }, { "players", "ps" }, { "who", "ps" },
@@ -617,7 +650,9 @@ namespace KKLLMNPC
             { "head", "cat" }, { "read", "cat" }, { "show", "cat" },
             { "survey", "find" }, { "locate", "find" }, { "seek", "find" }, { "search", "find" },
             { "shot", "screenshot" }, { "img", "screenshot" }, { "image", "screenshot" }, { "view", "screenshot" }, { "see", "screenshot" },
-            { "man", "help" }, { "cmds", "help" }, { "commands", "help" }, { "list", "help" }, { "helpme", "help" },
+            { "cmds", "help" }, { "commands", "help" }, { "list", "help" }, { "helpme", "help" },
+            { "scratch", "buf" }, { "notes", "buf" }, { "notepad", "buf" },
+            { "math", "calc" }, { "distance", "dist" }, { "bearing", "dist" },
             { "cls", "clear" }, { "reset_screen", "clear" },
             // legacy salvage (small models trained on the act schema)
             { "crouch", "crouch" }, { "jump", "jump" }, { "turn", "turn" }, { "rotate", "turn" }, { "spin", "turn" },
@@ -641,7 +676,7 @@ namespace KKLLMNPC
         // commands whose argument is a raw payload (speech/fact/goal text)
         private static readonly HashSet<string> PayloadCmds = new HashSet<string>(StringComparer.Ordinal)
         {
-            "echo", "remember", "forget", "goal", "plan", "skill", "report",
+            "echo", "remember", "forget", "goal", "plan", "skill", "report", "think", "buf",
         };
 
         // ------------------------------------------------------------------
@@ -1343,15 +1378,32 @@ namespace KKLLMNPC
             return sb.ToString().TrimEnd();
         }
 
+        // The SMALL-MODEL command surface: a curated ~15-command core that fits in
+        // the context budget every turn, grouped for scannability. The full ~60-command
+        // table is NOT dumped on small models (it drowns them); they reach it via
+        // `help all` or `man`. This is the tiered-help decision point.
+        public static string HelpSmall()
+        {
+            var sb = new StringBuilder();
+            sb.Append("READ:   pwd  whoami  status  ls  ps  cat <facts|goal|places|needs|history>\n");
+            sb.Append("LOOK:   look around | left | right | up | down | <deg>   (sonar = north-up map)\n");
+            sb.Append("MOVE:   cd <place>  run <secs> [left|right]  turn <deg>  follow [on|off]  stop\n");
+            sb.Append("SPEAK:  echo <words>  think <text>   (plan <step> = ordered steps)\n");
+            sb.Append("LEARN:  man <topic>   help all = full command list");
+            return sb.ToString().TrimEnd();
+        }
+
         private static string GroupFor(string cmd)
         {
             switch (cmd)
             {
                 case "ls": case "ps": case "pwd": case "whoami": case "cat": case "status": case "find": case "look": case "sonar":
+                case "calc": case "dist":
                     return "READ (poll the game)";
                 case "echo": case "emote": case "cd": case "use": case "run": case "turn": case "jump": case "crouch": case "exit": case "get": case "drop": case "throw": case "follow": case "stop": case "sleep":
                     return "ACT";
                 case "remember": case "forget": case "goal": case "plan":
+                case "think": case "buf":
                 case "skill":
                     return "MEMORY & GOALS";
                 case "kick": case "masturbate": case "surrender":

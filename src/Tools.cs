@@ -68,12 +68,11 @@ namespace KKLLMNPC
             try { map = BuildSonarMap(DescribeNearby(), _radarFilter); }
             catch (Exception e) { Logger.LogWarning("radar tool: " + e.Message); }
             if (map == null) return new { ok = false, reason = "no_body" };
-            return new Dictionary<string, object>
-            {
-                ["ok"] = true,
-                ["filter"] = _radarFilter != null ? string.Join(",", new List<string>(_radarFilter).ToArray()) : "all",
-                ["map"] = map,
-            };
+            // TOOL RESULTS ARE STRINGS (2026-10-25): a raw Dictionary here printed as
+            // "System.Collections.Generic.Dictionary`2[...]" the moment any caller
+            // stringified it. Tools return text (or JSON-serializable anonymous
+            // objects) — never raw Dictionaries.
+            return "radar [" + (_radarFilter != null ? string.Join(",", new List<string>(_radarFilter).ToArray()) : "all") + "]\n" + map;
         }
 
         // ------------------------------------------------------------------
@@ -439,7 +438,27 @@ namespace KKLLMNPC
                 var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Mechanics", "FarmRegion" };
                 if (ignore.Contains(name.ToLowerInvariant())) return new { ok = false, reason = "ignored_place", tried = name };
                 var hit = FindPlaceByName(name);
-                if (!hit.HasValue) return new { ok = false, reason = "unknown_place", tried = name, note = "try `cat places` — nests/beds/farm plots and watering cans are listed map-wide — or ls for nearby things" };
+                if (!hit.HasValue)
+                {
+                    // SIBLING AGENTS (2026-10-25): an agent's chat name resolves
+                    // through the sibling registry (the same set ps/whoami lists) —
+                    // agents could never travel to each other because agent names
+                    // aren't places. Live position: they move, so re-issue to follow.
+                    // MAIN-THREAD: AgentBodyPosition runs SceneCache.Find (FindObjectsOfType
+                    // + Time read), which is main-thread-only — marshal it like FindPlaceByName.
+                    Vector3? agentPos = null;
+                    try { agentPos = (Vector3?)RunOnMainThread(() => (object)AgentBodyPosition(name), 5000); }
+                    catch (Exception) { return new { ok = false, reason = "main_thread_busy", tried = name, note = "the main thread did not answer in 5s — try again next turn" }; }
+                    if (!agentPos.HasValue)
+                        return new { ok = false, reason = "unknown_place", tried = name, note = "try `cat places` — nests/beds/farm plots and watering cans are listed map-wide — `ps` lists people (players + agents) — or ls for nearby things" };
+                    target = agentPos.Value;
+                    _navTargetName = name;
+                    var arrived = false;
+                    try { arrived = ToolGoToAwaitArrival(target); } catch (Exception) { }
+                    return new { ok = true, to = name, agent = true, note = arrived
+                        ? "you reached " + name + " (they move — re-issue go_to to follow)"
+                        : "walking to " + name + " (another agent — they move; re-issue go_to to keep following)" };
+                }
 
                 target = hit.Value;
                 _navTargetName = name;
@@ -1470,12 +1489,8 @@ namespace KKLLMNPC
             try { Thread.Sleep(250); } catch (Exception) { }
             var held = HeldScan();
             if (held.Count == 0)
-                return new Dictionary<string, object>
-                {
-                    ["ok"] = done,
-                    ["grabbed"] = "",
-                    ["note"] = "grabbed NOTHING — grab takes whatever is ~1m in front of your FACE; aim first (turn/look at the thing), get close, then grab again",
-                };
+                return (done ? "" : "grab failed — ")
+                    + "grabbed NOTHING: grab takes whatever is ~1m in front of your FACE; aim first (turn/look at the thing), get close, then grab again";
             var names = new List<string>();
             string warning = null;
             foreach (var h in held)
@@ -1497,17 +1512,31 @@ namespace KKLLMNPC
             return res;
         }
 
+        // Scan held state on the main thread. HeldScan() reads the grabber's private
+        // `grabbedObjects` list via reflection — that list is mutated every frame on
+        // the main thread, so reading it off-band races the frame that released the
+        // item. A torn `after` (still reports the item after TryDrop released it) makes
+        // a clean drop look "still held" so the model wrongly retries a working drop; a
+        // torn `before` can miss what was actually held. Marshal to the main thread so
+        // both reads see a consistent snapshot. RunOnMainThread short-circuits to the
+        // read directly when we're already on the main thread.
+        private List<HeldInfo> HeldScanMain()
+        {
+            try { return (List<HeldInfo>)RunOnMainThread(() => (object)HeldScan(), 8000); }
+            catch (Exception) { return HeldScan(); }
+        }
+
         // Drop = gentle release. Verified: reports what left the hands; a PERSON still
         // joint-locked after an ordinary drop gets the game's OnReleaseRPC directly
         // (idempotent) so "the AI can't let go" can't happen silently.
         private object ToolDrop()
         {
             if (_grabber == null) return new { ok = false, reason = "no_grabber" };
-            var before = HeldScan();
+            var before = HeldScanMain();
             if (before.Count == 0) return new { ok = true, dropped = "", note = "nothing was in your hands" };
             // Captured INSIDE the marshalled try-drop (main thread): did our drop
-            // turn into a force-feed swallow? The result must tell the truth —
-            // "dropped" would lie when the release became a shove-into-a-mouth.
+            // turn into a swallow (the LOOK-UP self-eat gesture)? The result must
+            // tell the truth — "dropped" would lie when the release became one.
             string[] forceFed = null;
             bool droppedOk = (bool)RunOnMainThread(() =>
             {
@@ -1517,7 +1546,7 @@ namespace KKLLMNPC
                 finally { forceFed = forceFedTmp; }
             });
             try { Thread.Sleep(300); } catch (Exception) { }
-            var after = HeldScan();
+            var after = HeldScanMain();
             foreach (var h in after)
             {
                 if (h.Victim != null) { HardReleaseVictim(h.Victim);
@@ -1545,9 +1574,9 @@ namespace KKLLMNPC
             }
             if (forceFed != null && forceFed.Length > 0)
             {
-                res["force_fed"] = string.Join(", ", forceFed);
+                res["swallowed"] = string.Join(", ", forceFed);
                 if (stillHeld.Count == 0)
-                    res["note"] = "you dropped a person onto another kobold's head — the receiver SWALLOWED them whole (force-feeding). No egg/rebirth is visible yet; the fate of the one you fed follows SwallowEffect — check your next [event] lines";
+                    res["note"] = "your drop turned into a swallow (the LOOK-UP self-eat gesture) — no egg/rebirth is visible yet; the fate of the one you swallowed follows SwallowEffect — check your next [event] lines";
             }
             return res;
         }
@@ -1599,9 +1628,61 @@ namespace KKLLMNPC
                 if (h.Victim != null) HardReleaseVictim(h.Victim);
         }
 
+        // Directed PRIVATE agent-to-agent line (the `whisper` tool) — a DM-style
+        // channel between two NPCs for coordination/planning without broadcasting to
+        // the room (and without leaking into the player's chat). `target` is a sibling
+        // chat name or id:<bodyid> (id: is the registry-backed tie-breaker for when
+        // two kobolds share a name); `text` is the short private message. Success
+        // returns a receipt so the sender knows it landed (or why it didn't), and the
+        // duet cap is enforced so a whisper-war can't peg the rate limiter and push
+        // both agents AFK in messages instead of in-game.
+        private object ToolWhisper(JsonObj p)
+        {
+            string text = p.S("text", p.S("say", p.S("message", p.S("msg", ""))));
+            string target = p.S("target", p.S("to", ""));
+            if (string.IsNullOrWhiteSpace(text))
+                return new { ok = false, reason = "empty", note = "whisper needs text — what you want to say privately to <target>" };
+            string t = text.Trim();
+            if (t.Length > 200) t = t.Substring(0, 200); // keep a whisper short, not a speech
+            // id:<bodyid> is the unambiguous path — resolve by the sibling registry
+            // rather than a name the model may have misremembered.
+            int byId = -1;
+            string nameTarget = target;
+            if (target.StartsWith("id:", StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(target.Substring(3).Trim(), out byId) && byId >= 0)
+            {
+                nameTarget = AgentNameForBody(byId);
+                if (nameTarget == null)
+                    return new { ok = false, reason = "no_sibling", target = target,
+                        note = "no live sibling owns id " + byId + " right now — try a name instead" };
+            }
+            if (string.IsNullOrEmpty(nameTarget))
+                return new { ok = false, reason = "no_target",
+                    note = "whisper needs <target> — the chat name or id:<bodyid> of the sibling you mean" };
+            string from = MyName();
+            bool delivered = false, capped = false;
+            try
+            {
+                // Enforce the duet cap on the SEND side too (not just receipt — a
+                // sender that just whispers forever never plays the game).
+                capped = !BotChatAllowed();
+                if (!capped) delivered = Plugin.FanoutWhisper(from, t, nameTarget);
+            }
+            catch (Exception e) { Logger.LogWarning("whisper failed: " + e.Message); }
+            if (delivered)
+                return new { ok = true, whispered = true, to = nameTarget, text = t,
+                    note = "whispered privately to " + nameTarget + " (not the room) — they'll hear 'you: (whispered to <me>)' next turn" };
+            if (capped)
+                return new { ok = false, reason = "rate_limited", target = nameTarget, text = t,
+                    note = "you've whispered too much recently (duet cap hit) — go act in-game and let the other one respond; echoing forever keeps you both AFK" };
+            return new { ok = false, reason = "no_sibling", target = nameTarget, text = t,
+                note = "no live sibling named '" + nameTarget + "' — check the name, or use id:<bodyid> if they've rebind" };
+        }
+
         private object ToolStatus()
         {
-            return BuildPerception(false);
+            // JSON text, never a raw Dictionary — tool results are strings end to end.
+            try { return Json.Write(BuildPerception(false)); } catch (Exception) { return "{}"; }
         }
     }
 }

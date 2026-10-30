@@ -17,7 +17,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KDIR="${KOBOLDKARE_DIR:-/mnt/gaming/SteamLibrary/steamapps/common/KoboldKare}"
+# Resolve the game install: KOBOLDKARE_DIR wins, else ask Steam for it, else
+# fall back to a legacy default. The Steam lookup reads libraryfolders.vdf +
+# appmanifests, so it survives the game being moved to a new disk/library.
+if [ -n "${KOBOLDKARE_DIR:-}" ]; then
+    KDIR="$KOBOLDKARE_DIR"
+elif [ -x "$SCRIPT_DIR/tools/find_koboldkare.py" ] && KDIR="$(python3 "$SCRIPT_DIR/tools/find_koboldkare.py" 2>/dev/null)" && [ -n "$KDIR" ]; then
+    :
+else
+    KDIR="/mnt/gaming/SteamLibrary/steamapps/common/KoboldKare"
+fi
 MGMT="$KDIR/KoboldKare_Data/Managed"
 CORE="$KDIR/BepInEx/core"
 cd "$SCRIPT_DIR"
@@ -35,9 +44,10 @@ else
     exit 1
 fi
 
-if [ ! -d "$KDIR" ]; then
+if [ ! -d "$KDIR" ] || [ ! -d "$KDIR/KoboldKare_Data" ]; then
     echo "ERROR: KoboldKare not found at $KDIR" >&2
-    echo "Set KOBOLDKARE_DIR to your game install path." >&2
+    echo "The Steam lookup failed to find the game. Set KOBOLDKARE_DIR to your" >&2
+    echo "install path, or run: python3 tools/find_koboldkare.py" >&2
     exit 1
 fi
 
@@ -62,6 +72,7 @@ if [ "$COMPILER" = "mcs" ]; then
       -r:"$MGMT/UnityEngine.TextRenderingModule.dll" \
       -r:"$MGMT/UnityEngine.UnityWebRequestModule.dll" \
       -r:"$MGMT/UnityEngine.InputLegacyModule.dll" \
+      -r:"$MGMT/Unity.InputSystem.dll" \
       -r:"$MGMT/UnityEngine.AudioModule.dll" \
       -r:"$MGMT/UnityEngine.VideoModule.dll" \
       -r:"$MGMT/UnityEngine.ImageConversionModule.dll" \
@@ -105,6 +116,9 @@ elif [ "$COMPILER" = "dotnet" ]; then
     </Reference>
     <Reference Include="0Harmony">
       <HintPath>$(KOBOLDKARE_DIR)/BepInEx/core/0Harmony.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/UnityEngine.InputLegacyModule.dll</HintPath>
     </Reference>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/Assembly-CSharp.dll</HintPath>

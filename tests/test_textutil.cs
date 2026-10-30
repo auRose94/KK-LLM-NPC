@@ -136,6 +136,7 @@ internal static class TestTextUtil
 
         RpPlaceholders();
         RpResponseBlockDetector();
+        ConsoleThoughtContainment();
         Environment.Exit(_failed);
     }
 
@@ -179,5 +180,62 @@ internal static class TestTextUtil
         Assert(!TextUtil.IsRpResponseBlock(null), "null");
         Assert(!TextUtil.IsRpResponseBlock("lone asterisk* no pair"), "lone asterisk not a marker");
         Console.WriteLine("textutil: RpResponseBlockDetector passed");
+    }
+
+    // ---- SpeakablePartOf: voice spans vs planning prose (console thought containment) ----
+
+    static void ConsoleThoughtContainment()
+    {
+        string s, th;
+
+        // Pure RP blocks: everything is voice, nothing contained.
+        s = TextUtil.SpeakablePartOf("\"get in, I'll wait\" *pats the seat*", out th);
+        Assert(s == "\"get in, I'll wait\" *pats the seat*" && th.Length == 0,
+            "canonical block fully spoken, got: " + s + " / " + th);
+        s = TextUtil.SpeakablePartOf("*tail sways*", out th);
+        Assert(s == "*tail sways*" && th.Length == 0, "emote block spoken");
+        s = TextUtil.SpeakablePartOf("hey {{user}}, over here!", out th);
+        Assert(s == "hey {{user}}, over here!", "placeholder block spoken");
+        s = TextUtil.SpeakablePartOf("*Ember blinks open heavy eyelids* \"Ugh... what time is this racket?\"", out th);
+        Assert(s.Contains("*Ember blinks open heavy eyelids*") && s.Contains("\"Ugh... what time is this racket?\""),
+            "wake-up block fully spoken");
+
+        // THE LEAK (observed): planning prose carrying an RP marker — voice kept,
+        // thinking contained.
+        s = TextUtil.SpeakablePartOf("*considers* I need energy first, then the farm", out th);
+        Assert(s == "*considers*" && th.Contains("I need energy"), "starred emote + planning: thinking kept");
+        s = TextUtil.SpeakablePartOf("I should go check the mail. The letter said \"fetch the mail\".", out th);
+        Assert(s.Contains("\"fetch the mail\"") && th.Contains("I should go check the mail"),
+            "quoted letter spoken, planning contained");
+        s = TextUtil.SpeakablePartOf("I need food *and* water", out th);
+        Assert(s.Length == 0 && th.Contains("I need food"), "emphasis stars alone are not voice — all contained");
+        s = TextUtil.SpeakablePartOf("*I should head to the nest first*", out th);
+        Assert(s.Length == 0 && th.Contains("I should head to the nest"), "plan wrapped in stars is contained");
+        s = TextUtil.SpeakablePartOf("let me cd to the kitchen and ls", out th);
+        Assert(s.Length == 0, "command-word thinking contained");
+
+        // Triggered dialogue with a planning preamble still speaks the dialogue.
+        s = TextUtil.SpeakablePartOf("I should go over there. \"Coming!\"", out th);
+        Assert(s == "\"Coming!\"" && th.Contains("I should go over there"), "planning preamble dropped, dialogue kept");
+
+        // Narration is voice (only planning-language prose is contained).
+        s = TextUtil.SpeakablePartOf("Ember bounds over, ears up. \"Hi hi!\"", out th);
+        Assert(s.Contains("Ember bounds over, ears up.") && s.Contains("\"Hi hi!\"") && th.Length == 0,
+            "narration + dialogue fully spoken");
+
+        // Degenerate inputs.
+        s = TextUtil.SpeakablePartOf("", out th); Assert(s == "" && th == "", "empty");
+        s = TextUtil.SpeakablePartOf("check the farm, then bed", out th);
+        Assert(s == "" && th.Contains("check the farm"), "markerless thought → all contained");
+        s = TextUtil.SpeakablePartOf("\"unclosed quote and planning, I should go", out th);
+        Assert(s.Length == 0, "unclosed quote with planning → contained");
+
+        // IsThinkingProse sanity.
+        Assert(TextUtil.IsThinkingProse("I need to find food"), "i need to = thinking");
+        Assert(TextUtil.IsThinkingProse("let me check the farm"), "let me = thinking");
+        Assert(!TextUtil.IsThinkingProse("Ember stretches and yawns"), "narration is not thinking");
+        Assert(!TextUtil.IsThinkingProse(""), "empty not thinking");
+
+        Console.WriteLine("textutil: ConsoleThoughtContainment passed");
     }
 }

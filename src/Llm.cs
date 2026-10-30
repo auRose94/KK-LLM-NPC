@@ -59,7 +59,7 @@ namespace KKLLMNPC
             {
                 var payload = new Dictionary<string, object>
                 {
-                    ["model"] = Val(_cfgModel),
+                    ["model"] = EffectiveModel(),
                     ["messages"] = new object[]
                     {
                         new Dictionary<string, object> { ["role"] = "system", ["content"] =
@@ -315,7 +315,7 @@ namespace KKLLMNPC
                 if (maxTokens > 16384) maxTokens = 16384;
                 var payload = new Dictionary<string, object>
                 {
-                    ["model"] = Val(_cfgModel),
+                    ["model"] = EffectiveModel(),
                     ["messages"] = new object[]
                     {
                         new Dictionary<string, object> { ["role"] = "user", ["content"] = prompt },
@@ -330,6 +330,10 @@ namespace KKLLMNPC
                     ["max_tokens"] = maxTokens,
                     ["stream"] = false,
                 };
+                // Advertised KV-cache / MTP / draft tuning on ADOPTED (Ollama) binaries —
+                // opt-in only; servers without support ignore (or error on) unknown fields,
+                // hence the strict guard checks above in ApplyBackendTuning.
+                ApplyBackendTuning(payload);
                 // force the thinking-off fields REGARDLESS of the operator's [LLM].Thinking
                 var nameThinkOff = ModelFamilies.ThinkingOffPayloadPart();
                 if (nameThinkOff != null)
@@ -346,8 +350,13 @@ namespace KKLLMNPC
                 string body = Json.Write(payload);
 
                 var nameSw = System.Diagnostics.Stopwatch.StartNew();
+                // NAME timeout is family-aware too: the thinking-off knobs don't reach
+                // every server (Ollama ignores chat_template_kwargs for some models),
+                // so a reasoning family still burns its whole CoT here — the flat 40s
+                // died mid-think (log: "name selection: empty content — reasoning:...").
+                int nameTimeout = FamilyProfile != null && FamilyProfile.EmitsThinkBlocks ? 240 : 40;
                 string json = SafeHttp.Post(Endpoint(), body, Val(_cfgApiKey),
-                    retries: 2, timeout: TimeSpan.FromSeconds(40), maxResponseBytes: 64 * 1024,
+                    retries: 2, timeout: TimeSpan.FromSeconds(nameTimeout), maxResponseBytes: 64 * 1024,
                     onError: ReportEndpointError);
                 try { RecordNameTurn(attempt, prompt, json, nameSw.ElapsedMilliseconds); } catch (Exception) { }
                 if (json == null) return null;
@@ -391,7 +400,11 @@ namespace KKLLMNPC
                     }
                     if (string.IsNullOrEmpty(content))
                     {
-                        try { content = msg.GetValueOrDefault("reasoning_content") as string ?? ""; } catch (Exception) { }
+                        // gpt-oss names its channel `reasoning` (a third name next to
+                        // reasoning_content) — and may put the ENTIRE name reply there
+                        // with an empty content. The Name:-line salvage runs below.
+                        try { content = msg.GetValueOrDefault("reasoning_content") as string
+                                             ?? msg.GetValueOrDefault("reasoning") as string ?? ""; } catch (Exception) { }
                     }
                     content = ModelFamilies.StripThinkBlocks(content ?? "");
                     // remember WHY this attempt failed for the retry-instructions:
@@ -405,6 +418,11 @@ namespace KKLLMNPC
                         catch (Exception) { }
                     }
                     content = content.Trim().Trim('"', '\'', ' ', '\n', '\r', '\t');
+                    // Reasoning models bullet their thoughts ("*   Goal: ...") — the
+                    // leading stars/whitespace are format debris, not the name; strip
+                    // them so the validator and salvage see plain lines.
+                    try { content = System.Text.RegularExpressions.Regex.Replace(
+                        content, "(?m)^\\s*\\*\\s*", ""); } catch (Exception) { }
                     // Models saturated on this mod's own contract answer the name ask
                     // with an act-shaped JSON object ({"name":"Ember"}) — or wrap it in
                     // code fences. Parse both shapes before validating.
@@ -441,6 +459,32 @@ namespace KKLLMNPC
                         }
                     }
                     catch (Exception) { }
+                    // FINAL NAME SALVAGE — models that can't stop reasoning still hide
+                    // the real answer inside "Name: X" or a stray token on the last
+                    // line; extract a bare candidate instead of submitting the whole
+                    // monologue, which the registry regex would always reject. Last
+                    // match wins (reasoning families re-read/revise their pick).
+                    try
+                    {
+                        string _nm = null;
+                        var _ms = System.Text.RegularExpressions.Regex.Matches(
+                            content ?? "", @"Name\s*[:=]\s*([A-Za-z][A-Za-z0-9-]{1,13})",
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (_ms.Count > 0) _nm = _ms[_ms.Count - 1].Groups[1].Value;
+                        if (string.IsNullOrEmpty(_nm))
+                        {
+                            var _toks = (content ?? "").Split(new char[] { ' ', '\n', '\r', '\t', ',', '.', ';', ':', '(', ')', '*' }, StringSplitOptions.RemoveEmptyEntries);
+                            foreach (var _t in _toks)
+                            {
+                                string _cand = _t.Trim().Trim('"', '\'', '`').Trim();
+                                if (_cand.Length >= 2 && _cand.Length <= 14
+                                    && System.Text.RegularExpressions.Regex.IsMatch(_cand, @"^[a-zA-Z0-9-]+$"))
+                                    _nm = _cand;
+                            }
+                        }
+                        if (!string.IsNullOrEmpty(_nm)) content = _nm;
+                    }
+                    catch (Exception) { }
                     // Validate: alphanumeric, 2-12 chars (matches the prompt)
                     if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 14
                         && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9-]+$"))
@@ -466,6 +510,36 @@ namespace KKLLMNPC
                     // the token budget gets no salvage: its "Name: X" line may
                     // itself have lost its tail mid-candidate, so it only earns
                     // the bigger-budget re-roll.
+                    // A truncated reply earns salvage only through a COMPLETE final
+                    // "Name: <name>" line (the newline proves the name wasn't cut);
+                    // untruncated replies get the full last-line mining.
+                    string strictFinal = null;
+                    if (truncated && !string.IsNullOrEmpty(content))
+                    {
+                        try
+                        {
+                            foreach (var ln in content.Split('\n'))
+                            {
+                                string l = ln.Trim();
+                                if (l.Length > 6 && (l.StartsWith("Name:", StringComparison.OrdinalIgnoreCase)
+                                    || l.StartsWith("name:", StringComparison.Ordinal)))
+                                {
+                                    string cand = l.Substring(5).Trim().Trim('"', '\'', '.', ' ');
+                                    if (cand.Length >= 2 && cand.Length <= 14
+                                        && System.Text.RegularExpressions.Regex.IsMatch(cand, "^[a-zA-Z0-9-]+$"))
+                                        strictFinal = cand;   // complete line — keep the LAST one
+                                }
+                            }
+                        }
+                        catch (Exception) { }
+                    }
+                    if (strictFinal != null)
+                    {
+                        DataRecord.MarkSalvage();
+                        Logger.LogInfo("[" + MyName() + "] LLM chose name: " + strictFinal + " (salvaged from a completed Name: line in a truncated reasoning reply)");
+                        _lastRejectedNameThink = "";
+                        return strictFinal;
+                    }
                     if (!truncated && !string.IsNullOrEmpty(content))
                     {
                         string salvaged = ModelFamilies.SalvageNameFromCoT(content, taken, species);
@@ -749,10 +823,23 @@ namespace KKLLMNPC
         // still saving the day when a server ignores the knobs. Wired into
         // every call site: act loop, console REPL, comment, self-ask, name
         // selection, vision caption.
+        private static bool _autoSuppressLogged;
         private void ApplyThinkingParams(Dictionary<string, object> payload)
         {
             string mode = _cfgThinking != null ? (_cfgThinking.Value ?? "").Trim().ToLowerInvariant() : "";
-            if (mode != "off") return;
+            // AUTO SUPPRESSES on reasoning families (2026-10-25): their CoT burned the
+            // token floor and the turn timeout before any answer text, and the leftover
+            // reasoning leaked into chat. The act contract needs the JSON, not the
+            // monologue — an operator who WANTS the reasoning opts in with Thinking=on.
+            bool suppress = mode == "off"
+                || (mode != "on" && FamilyProfile != null && FamilyProfile.EmitsThinkBlocks);
+            if (!suppress) return;
+            if (mode != "off" && !_autoSuppressLogged)
+            {
+                _autoSuppressLogged = true;
+                try { Logger.LogInfo("thinking: family '" + (FamilyProfile != null ? FamilyProfile.Family : "?")
+                    + "' reasons by default — CoT suppressed ([LLM].Thinking=on to keep it)"); } catch (Exception) { }
+            }
             var part = ModelFamilies.ThinkingOffPayloadPart();
             if (part == null) return;
             foreach (var kv in part) payload[kv.Key] = kv.Value;
@@ -769,6 +856,7 @@ namespace KKLLMNPC
             {
                 case "say":
                 case "emote":
+                case "whisper": // mind-only private line — usable even when trapped inside a stomach
                 case "remember":
                 case "forget":
                 case "set_goal":
@@ -972,7 +1060,7 @@ namespace KKLLMNPC
 
                 var payload = new Dictionary<string, object>
                 {
-                    ["model"] = Val(_cfgModel),
+                    ["model"] = EffectiveModel(),
                     ["messages"] = new object[]
                     {
                         new Dictionary<string, object> { ["role"] = "system", ["content"] = sysPrompt },
@@ -1132,7 +1220,7 @@ namespace KKLLMNPC
             {
                 ["mode"] = "name",
                 ["npc"] = MyName(),
-                ["model"] = Val(_cfgModel),
+                ["model"] = EffectiveModel(),
                 ["attempt"] = attempt,
                 ["ms"] = ms,
                 ["ok"] = rawResponse != null ? 1 : 0,
@@ -1183,8 +1271,12 @@ namespace KKLLMNPC
                     // slot held hostage in the parallel gate — the third attempt
                     // pinned the gate ~6 minutes while every other NPC starved
                     // (2026-10-12 second-kobold freeze). The next think-tick retries.
+                    // TIMEOUT (2026-10-25): thinking families burn wall-time on their
+                    // CoT before any answer text — a flat 120s killed turns mid-think
+                    // on gpt-oss:120b. Family-aware (Qwen 3.5 / GPT-OSS / GLM / R1 →
+                    // 300s), [LLM].TimeoutSeconds overrides for the operator's box.
                     rawResponse = SafeHttp.Post(Endpoint(), body, Val(_cfgApiKey),
-                        retries: 2, timeout: TimeSpan.FromSeconds(120), maxResponseBytes: 4 * 1024 * 1024,
+                        retries: 2, timeout: TimeSpan.FromSeconds(ChatTimeoutSeconds()), maxResponseBytes: 4 * 1024 * 1024,
                         onRetry: r => Logger.LogDebug("LLM retry: " + r),
                         onError: err => lastError = err);
                     if (rawResponse != null) break;
@@ -1413,12 +1505,21 @@ namespace KKLLMNPC
         // assistant content + any tool_call. Shared by the legacy and console paths.
         // `callsOut` (may be null) receives EVERY tool call in stream order — the
         // native-tools console mode executes them all as command lines.
+        private bool _lastReplyWasPromotedReasoning;
+
         private string ParseChatResponse(string rawResponse, out string toolName, out string toolArgs,
             List<ToolCallRec> callsOut = null)
         {
             toolName = null;
             toolArgs = null;
+            _lastReplyWasPromotedReasoning = false;
             var contentBuilder = new StringBuilder();
+            // Reasoning-channel harvest: gpt-oss (harmony via Ollama) sometimes emits the
+            // ENTIRE reply — act JSON included — in its reasoning channel (`delta.reasoning`
+            // on streams, `message.reasoning` non-streamed) with an empty final content.
+            // Harvested separately; used as content below when no real content arrives, so
+            // the JSON-slicing salvage can still recover the act.
+            var reasoningBuilder = new StringBuilder();
 
             // Try SSE format first: lines prefixed with "data: ".
             bool anySSE = false;
@@ -1440,6 +1541,12 @@ namespace KKLLMNPC
                     if (delta == null) continue;
                     var c = delta.GetValueOrDefault("content") as string;
                     if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                    // gpt-oss (harmony via Ollama) streams its reply as `delta.reasoning` —
+                    // a third field name next to content / reasoning_content — sometimes
+                    // emitting the ENTIRE act in that channel with an empty final content.
+                    var r = delta.GetValueOrDefault("reasoning") as string
+                         ?? delta.GetValueOrDefault("reasoning_content") as string;
+                    if (!string.IsNullOrEmpty(r)) reasoningBuilder.Append(r);
                     var tcs = delta.GetValueOrDefault("tool_calls") as List<object>;
                     if (tcs != null)
                     {
@@ -1469,6 +1576,9 @@ namespace KKLLMNPC
                             {
                                 var c = msg.GetValueOrDefault("content") as string;
                                 if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                                var mr = msg.GetValueOrDefault("reasoning") as string
+                                      ?? msg.GetValueOrDefault("reasoning_content") as string;
+                                if (!string.IsNullOrEmpty(mr)) reasoningBuilder.Append(mr);
                                 var tcs = msg.GetValueOrDefault("tool_calls") as List<object>;
                                 if (tcs != null)
                                 {
@@ -1483,6 +1593,18 @@ namespace KKLLMNPC
                     }
                 }
                 catch (Exception) { }
+            }
+
+            // Reasoning-only reply: no final-channel content arrived, but the model put
+            // its whole answer (often with the act JSON inside) into the reasoning
+            // channel. Promote it to content — Sanitize strips CoT markers, and the
+            // act-parse salvage slices the JSON back out. The promotion is FLAGGED so
+            // the act loop's say-fallback never broadcasts raw thoughts as speech.
+            _lastReplyWasPromotedReasoning = false;
+            if (contentBuilder.Length == 0 && reasoningBuilder.Length > 0)
+            {
+                contentBuilder.Append(Sanitize(reasoningBuilder.ToString()));
+                _lastReplyWasPromotedReasoning = true;
             }
 
             string fullContent = contentBuilder.ToString();
@@ -1530,6 +1652,16 @@ namespace KKLLMNPC
                 // empty reply, prose instead of JSON, or JSON that doesn't parse.
                 // The error is injected back into the NEXT perception as 'model_error'
                 // so it corrects the format instead of repeating it.
+                if (!string.IsNullOrEmpty(content) && _lastReplyWasPromotedReasoning)
+                {
+                    // The whole reply was reasoning-channel text (harvested): speaking it
+                    // broadcast thought blocks into chat. This fallback is for PLAIN-TEXT
+                    // voices; a reasoning-only reply gets a format nudge instead.
+                    _lastThought = content.Length > 80 ? content.Substring(0, 80) : content;
+                    SetModelError("Your reply was hidden reasoning with no answer. Reply with ONLY the compact act JSON ({\"progress\":\"...\",\"action\":\"...\",...}) — no thinking out loud.");
+                    PushHistory("eval", "reasoning-only reply");
+                    return;
+                }
                 if (!string.IsNullOrEmpty(content))
                 {
                     _lastThought = content.Length > 80 ? content.Substring(0, 80) : content;
@@ -1771,7 +1903,7 @@ namespace KKLLMNPC
                              : null;
                     }
                     // Single action like {"walk": {"speed":1}} — treat first known key as action.
-                    foreach (var k in new[] { "go_to", "walk", "follow", "walk_ray", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "throw", "say", "emote", "status", "radar", "report_issue" })
+                    foreach (var k in new[] { "go_to", "walk", "follow", "walk_ray", "survey", "stop", "look", "jump", "exit_station", "crouch", "move_to", "interact", "grab", "drop", "whisper", "throw", "say", "emote", "status", "radar", "report_issue" })
                         if (parsed.ContainsKey(k))
                         {
                             var inner = new Dictionary<string, object> { ["action"] = k, ["thought"] = "implicit" };
@@ -2387,6 +2519,7 @@ namespace KKLLMNPC
                     case "interact": return ToolInteract(p);
                     case "grab": return ToolGrab(p);
                     case "drop": return ToolDrop();
+                    case "whisper": return ToolWhisper(p);
                 case "radar":
                 case "sonar": return ToolRadar(p);
                 case "report_issue":
@@ -2468,7 +2601,7 @@ namespace KKLLMNPC
             // Module-registered tools extend the action enum and the param schema —
             // each module ships its own file, no edits to this method needed.
             var extra = ModuleRegistry.ModuleToolNames();
-            var enumVals = new List<object> { "go_to", "walk", "follow", "stop", "survey", "remember", "look_around", "look", "lookat", "exit_station", "crouch", "interact", "grab", "drop", "throw", "say", "emote", "radar", "report_issue", "status", "none" };
+            var enumVals = new List<object> { "go_to", "walk", "follow", "stop", "survey", "remember", "look_around", "look", "lookat", "exit_station", "crouch", "interact", "grab", "drop", "whisper", "throw", "say", "emote", "radar", "report_issue", "status", "none" };
             foreach (var e in extra) if (!enumVals.Contains(e)) enumVals.Add(e);
 
             var props = new Dictionary<string, object>
@@ -2478,8 +2611,9 @@ namespace KKLLMNPC
                 // movement/say params) first means even a truncated call still acts.
                 ["action"] = new Dictionary<string, object> { ["type"] = "string", ["enum"] = enumVals.ToArray() },
                 ["say"] = Str("say", "optional <10 words — posts to the real in-game chat window AND a speech bubble"),
-                ["text"] = Str("text", "emote: what your body does, spoken as *action* not dialog (e.g. 'curls up by the fire')"),
+                ["text"] = Str("text", "the message body — used by BOTH tools: for say it's spoken aloud; for emote what your body does (spoken as *action*); for whisper what you say privately to <target> (a DM, kept short). Whisper also needs <target>; emote/say don't"),
                 ["name"] = Str("name", "go_to: place to reach by name — 'bed' 'toilet' 'bath' 'nest' 'sex' 'seat' 'door' 'bodyswap', a PLAYER'S chat name (host or from 'people'), or any usable's name"),
+                ["target"] = Str("target", "whisper only: the chat name or id:N of ONE sibling NPC to whisper to privately (like a DM). Use this so the private message goes to the right agent instead of the room"),
                 ["id"] = Num("id", "go_to/interact: the numeric 'id' of a specific object from your 'nearby' or survey result — use this to target an exact object instead of matching by name (e.g. go_to id:3, interact id:2)"),
                 ["at"] = Num("at", "go_to: stop this many meters SHORT of the target (default 1 — so you reach the object, not bump it; 0 = go right up to it)"),
                 ["heading_deg"] = Num("heading_deg", "survey: absolute world yaw to look toward (omit = your current facing)"),
@@ -2509,5 +2643,43 @@ namespace KKLLMNPC
         private Dictionary<string, object> Bool(string n, string d) { return new Dictionary<string, object> { ["type"] = new object[] { "boolean", "null" }, ["description"] = d }; }
 
         private Dictionary<string, object> Str(string n, string d) { return new Dictionary<string, object> { ["type"] = new object[] { "string", "null" }, ["description"] = d }; }
+
+        // Apply opt-in KV-cache / MTP / draft-model tuning to an OpenAI-compatible
+        // LLM payload. All guarded: a runner that does not support a knob (Ollama
+        // versions, LM Studio, KoboldCpp) simply drops unknown fields or rejects the
+        // request, so the operator opts in deliberately.
+        internal void ApplyBackendTuning(Dictionary<string, object> payload)
+        {
+            if (payload == null) return;
+            try
+            {
+                string kv = (_cfgKvCacheType != null) ? _cfgKvCacheType.Value : null;
+                bool mtp = (_cfgMtpEnabled != null) && _cfgMtpEnabled.Value;
+                string draft = (_cfgDraftModel != null) ? _cfgDraftModel.Value : null;
+                bool hasKv = !string.IsNullOrWhiteSpace(kv);
+                bool hasDraft = !string.IsNullOrWhiteSpace(draft);
+                if (hasKv)
+                {
+                    var opts = new Dictionary<string, object>();
+                    opts["kv_cache_type"] = kv.Trim();
+                    payload["options"] = opts;
+                }
+                if (mtp || hasDraft)
+                {
+                    object o;
+                    payload.TryGetValue("options", out o);
+                    Dictionary<string, object> opts = o as Dictionary<string, object>;
+                    if (opts == null)
+                    {
+                        opts = new Dictionary<string, object>();
+                        payload["options"] = opts;
+                    }
+                    if (hasDraft) opts["draft_model"] = draft.Trim();
+                    if (mtp) opts["mtp"] = true;
+                }
+            }
+            catch (Exception) { }
+        }
+
     }
 }

@@ -85,7 +85,7 @@ namespace KKLLMNPC.Tests
             Assert(ModelFamilies.Classify("mistral-7b-instruct").Family == "mistral", "mistral id -> mistral");
             Assert(ModelFamilies.Classify("SmolLM2-1.7B").Family == "smollm", "SmolLM2 -> smollm");
             Assert(ModelFamilies.Classify("llava-13b").Family == "vision", "llava -> vision");
-            Assert(ModelFamilies.Classify("gpt-oss-20b").Family == "llama", "gpt-oss -> llama-generic");
+            Assert(ModelFamilies.Classify("gpt-oss-20b").Family == "gpt-oss", "gpt-oss -> gpt-oss (harmony family)");
             Assert(ModelFamilies.Classify("ling-annette-9b").Family == "", "unmatched finetune -> generic (empty family)");
             Assert(ModelFamilies.Classify("").Family == "", "empty id -> generic");
             Assert(ModelFamilies.Classify(null).Family == "", "null id -> generic");

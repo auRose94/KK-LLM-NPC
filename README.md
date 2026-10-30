@@ -8,7 +8,8 @@ and reacts to the world continuously, as if a player was at the wheel.
 
 ## Requirements
 
-- **BepInEx 5.4x** in the game install.
+- **BepInEx 5.4x** — pre-bundled in every release zip (BepInEx 5.4.22.0), so you
+  don't install it separately.
 - **An OpenAI-compatible chat-completions server** — LM Studio, Ollama, llama.cpp,
   KoboldCpp, vLLM — serving whatever LLM should play the NPC. Where it runs is
   your call, three good options:
@@ -68,6 +69,18 @@ next. Bash-style names are chosen so even small models already know them from sh
 Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `interact`→`use`,
 `walk`→`run`, `exit_station`→`exit`, `grab`→`get`, `set_goal`→`goal`, …).
 
+**Tiered command surface.** Smaller models get a lean ~15-command core in the system
+prompt every turn (READ / LOOK / MOVE / SPEAK / GOALS / LEARN); the full ~60-command
+table is one command away via `help all` or `man <topic>`. This keeps the small-model
+context budget light where confusion actually happens, instead of dumping the whole
+table on every model.
+
+**Failure escalation.** When a command fails or a model repeats the same failing command,
+the terminal escalates: the stuck detector escalates its hint (try different approaches /
+`cat places` / `ls` / `help` / `man`), and on a hard cap it ends the turn so the model
+can't burn the whole cycle repeating itself. Unknown commands get an escalating "type
+`help`" nudge instead of silence.
+
 | Group | Commands |
 |-------|----------|
 | **Read (poll the game)** | `ls` (nearby), `ps` (who's around — players AND fellow agent NPCs), `pwd` (where + facing in compass words), `whoami` (me), `cat facts\|goal\|chat\|needs\|history\|stations\|map\|body\|hold\|player\|quest`, `status` (one-line snapshot incl. coins + awake time + holding + quest), `find <place\|deg>`, `sonar [filter]` (north-up ASCII map — never rotates), `look left\|right\|up\|down\|around\|<deg>` |
@@ -75,7 +88,7 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
 | **Memory & goals** | `remember <fact>`, `forget <fact>`, `goal <text>\|done\|drop`, `plan <step>\|\|next\|clear` (goal's step ladder — see Planning) |
 | **Economy** | `buy [name\|id:N]` — purchase whatever's within reach: machine contracts, the kobold dispenser, shop items. The NPC spends its OWN coins (shown in status/economy perception). |
 | **Module tools** | `thrust`, `erection`, `mount`, `unmount`, `orgasm`, `plant`, `water`, `harvest`, `plant_egg`, `feed_blender`, `grind`, `rename` (positional args: `target`, `amount`) |
-| **Misc** | `screenshot` (on-demand vision), `report <what's broken>` (files a dev bug note — AI feedback), `help` (list commands), `clear` |
+| **Misc** | `screenshot` (on-demand vision), `skill add <name> | <step> ; <step>` (reusable procedure — see Skills), `report <what's broken>` (files a dev bug note — AI feedback), `help` (list commands), `clear` |
 
 ### Speech adaptation
 
@@ -238,31 +251,83 @@ Legacy `act` names still work as aliases (`say`→`echo`, `go_to`→`cd`, `inter
   given up and restored when the same body is claimed in a later session; world reload
   no longer means total amnesia. (Bodyswaps still keep the mind in place.)
 - **Endpoint health** — a dead/offline LLM server backs off between ticks (5→30s) instead
-  of hammering retries; the state anchor tells the NPC itself and the F6 overlay shows
+  of hammering retries; the state anchor tells the NPC itself and the WebUI shows
   the live status.
-- **Debug overlay (F6)** — live state, the NPC's console transcript ("what did it type,
-  what came back"), the latest vision caption, all config keys editable in-game, and a
-  per-instance say-box that injects a line into one named NPC.
+- **Debug console in the browser (`[Web]`)** — the in-game F6 IMGUI overlay was removed;
+  the browser page on the loopback (default `http://127.0.0.1:8338/`) is the debug surface
+  now: live state, the NPC's console transcript ("what did it type, what came back"), the
+  latest vision caption, all config keys editable in-game, and a per-instance say-box that
+  injects a line into one named NPC.
 - **Distinct name per body** (from the kobold's own name + instance suffix), says it in chat.
 - **Attributed chat** (opt-in) — a second Photon client makes its chat render as `KoboldName: text`
   to everyone, not attributed to the plugin owner.
 
+### Movement & navigation
+
+The model feels **inside the world** because it can walk around and pivot its head to look,
+not just teleport to goals. Every primitive is a console command:
+
+- **Walk** — `run [secs] [left|right]` is a short, time-bounded step (default 2s; `run 3`
+  walks ~3s, `run 3 left` strafes). It is *not* a teleport — the body keeps walking until
+  the seconds elapse, so `stop` halts it.
+- **Pivot your head to look** — `look around` turns and returns what's in each direction
+  (front/left/right… with names + distances); `look left|right|up|down` pivot 90°/25°;
+  `look <deg>` an exact angle. `sonar` is a north-up map (`^` is your facing).
+- **Go somewhere** — `cd <place>` / `cd id:N` plans the real route (stairs/ramps, whole
+  scene) and walks it; `look around` when you arrive.
+- **Walk-and-look loop** — to actually feel a room, the model alternates:
+  `look around; run 3; look around; run 3`.
+
+A fresh agent wakes with **built-in navigation routines** it can run by name — `skill
+explore` (walk + look), `skill scan` (look + `ls` + `sonar`), `skill look around` — so it
+doesn't have to author them first. These are normal skills (see below): they compose the
+existing `run`/`turn`/`look`/`cd` primitives into a taught pattern, and the `man movement`
+page teaches the walk-and-look loop.
+
+### Skills
+
+`skill add <name> | <step> ; <step>` saves a reusable procedure — steps must be real
+commands separated by `;` — and `skill <name>` runs them as one turn. `cat skills` lists
+them; `skill forget <name>` drops one. Skills **save with the agent's memories**, **transfer**
+when it is swallowed and absorbed (the eater inherits them), and **ride the rebirth copy**
+(a hatched child egg wakes with its parent's skills). A fresh agent seeds a few built-in
+navigation routines (`look around`, `scan`, `explore`) only when its skill box is empty, so
+a saved or absorbed set always wins.
+
 ## Install
 
-Get a prebuilt zip from the GitHub **Releases** page
-(`KKLLMNPC-<version>_win/_linux/_macos.zip` — the payload is the same IL plugin on
-every OS; the platforms differ only in which BepInEx 5 build your KoboldKare host
-needs, and the zips know it: each carries an `INSTALL-<platform>.md`). BepInEx 5.4.22+
-for your OS is required and not bundled.
+Each release zip is a **complete drop-in** — BepInEx 5.4.22.0 is pre-bundled, so you
+don't install it separately.
 
-Or from source: `./build.sh` compiles against your game install and deploys
-(`KKLLMNPC.dll` + the prompt files) into `BepInEx/plugins/`; `./make_release.sh`
-builds the per-platform release zips + release notes into `dist/`.
-First launch writes `BepInEx/config/com.kk.llmnpc.cfg`.
+1. Get the prebuilt zip for your platform from the GitHub **Releases** page
+   (`KKLLMNPC-<version>_win.zip` / `_linux.zip` / `_macos.zip`; the payload is the same
+   IL plugin on every OS — the platforms differ only in which BepInEx build your
+   KoboldKare host needs, and each zip carries an `INSTALL-<platform>.md`).
+2. **Unzip it over your `KoboldKare` folder.** It drops a full `BepInEx/` tree
+   (core, managed, doorstop) plus `BepInEx/plugins/` (the mod DLL + prompt files) into
+   the game root.
+3. **Launch the game.** First run writes `BepInEx/config/com.kk.llmnpc.cfg`; the debug
+   console opens at `http://127.0.0.1:8338/`.
 
-`build.sh` also ships the prompt files (see `system_prompt_*.txt`) into
-`BepInEx/plugins/`. There is no build-time model download — the external host holds
-its own models locally (see below).
+You also need an OpenAI-compatible chat server reachable from the game machine (Ollama,
+LM Studio, llama.cpp, vLLM, a hosted endpoint — see the AI server section below).
+
+### Building from source
+
+`./build.sh` compiles the plugin against your game install and deploys
+(`KKLLMNPC.dll` + the prompt files) into `BepInEx/plugins/`; `./make_release.sh` builds
+the per-platform release zips (with BepInEx bundled) + release notes into `dist/`.
+
+```bash
+./build.sh                       # compile + deploy into your game's BepInEx/plugins/
+./make_release.sh                # package dist/KKLLMNPC-<version>_*.zip (BepInEx bundled)
+# offline release (no BepInEx download):
+BUNDLE_BEPINEX=0 ./make_release.sh --no-build
+```
+
+`build.sh` also ships the prompt files (`system_prompt_*.txt`) into `BepInEx/plugins/`.
+There is no build-time model download — the external host holds its own models locally
+(see below). On Windows, see the PowerShell build notes under **Build**.
 
 ## The AI server (external host)
 
@@ -500,16 +565,6 @@ mcs -target:library -out:KKLLMNPC.dll src/*.cs \
   -r:"C:\path\to\KoboldKare\KoboldKare_Data\Managed\*.dll"
 ```
 
-### Multi-instance
-
-```bash
-# Instance 1 (default)
-./build.sh
-
-# Instance 2 (deployed as KKLLMNPC2.dll)
-# Modify build.sh to accept an instance count parameter
-```
-
 ## Tests
 
 All tests run with zero external dependencies (pure C# + mono):
@@ -545,7 +600,6 @@ MIT — see [LICENSE.txt](LICENSE.txt).
 - [CONFIG.md](docs/CONFIG.md) — Complete configuration reference
 - [VORE.md](docs/VORE.md) — The full swallow-vore / spectate mechanics (opt-in, all OFF by default)
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Architecture overview
-- [MODELS.md](docs/MODELS.md) — Ranked model compatibility list + benchmark plan
 - [MODELS.md](docs/MODELS.md) — Ranked model compatibility list + benchmark plan
 - [training/README.md](training/README.md) — Fine-tune a game-native model: record your own sessions (`[DataRecord]`), extract the dataset, eval + train (Qwen / Gemma4-QAT dual-track)
 - [CHANGELOG.md](CHANGELOG.md) — Release history
