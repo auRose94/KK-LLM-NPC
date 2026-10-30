@@ -394,6 +394,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on every row), rendered on tab entry only — polls never clobber a value you're typing; a ↻
   refresh button re-reads config.
 
+## [1.2.0] - 2026-10-30
+
+### Added
+
+- **Bundled BepInEx in the release.** Each per-platform release zip now ships the
+  pinned BepInEx 5.4.22.0 (core/managed/doorstop) merged around the plugin's
+  `plugins/` — the release is a complete drop-in: unzip over your KoboldKare
+  folder and launch. `make_release.sh` fetches + extracts the pinned BepInEx into
+  each stage tree; `BUNDLE_BEPINEX=0` / `--no-bepinex` skips the download for
+  offline builds.
+- **Tiered command surface for small models.** Small models get a lean ~15-command
+  core in the system prompt every turn (READ / LOOK / MOVE / SPEAK / GOALS /
+  LEARN); the full ~60-command table stays one command away via `help all` or
+  `man <topic>`, keeping the small-model context budget light where confusion
+  actually happens.
+- **Built-in navigation routines.** A fresh agent wakes with `look around`, `scan`
+  and `explore` skills it can run by name — `skill explore` walks + looks,
+  `skill scan` combines look + `ls` + `sonar`. They reuse the existing
+  `run`/`turn`/`look`/`cd` primitives (no new physics) and only fill an empty
+  skill box, so a saved or absorbed set always wins.
+- **`man movement` page** teaching the walk-and-look loop (`look around; run 3;
+  look around; run 3`), plus aliases (`walk`/`look`/`move`/`navigate`/`travel`).
+- **`skill` command wired.** It was documented everywhere (help, persona, manual,
+  tool schema) but never dispatched — any model trying it got "unknown command".
+  It now runs, with a proper `text` tool parameter.
+
+### Changed
+
+- **Progressive failure escalation.** The stuck-detector now escalates its hint
+  (try different approaches → `cat places`/`ls`/`help`/`man`) and ends the turn on
+  a hard cap so a model can't burn the whole cycle repeating the same failing
+  command. Unknown commands get an escalating "type `help`" nudge instead of
+  45 s of silence.
+- **README presentation.** Rewrote `## Install` into numbered quickstart steps
+  reflecting the bundled BepInEx; fixed the duplicated `docs/MODELS.md` entry and
+  the contradictory F6-debug-overlay bullets (the WebUI at `127.0.0.1:8338` is the
+  debug surface now); dropped the aspirational Multi-instance stub; added
+  Command-surface, Movement & navigation, and Skills sections.
+
 ## [Unreleased]
 
 ## [1.1.0] - 2026-10-12
