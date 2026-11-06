@@ -95,9 +95,9 @@ namespace KKLLMNPC.Tests
 
         public static void TestParseTruncated()
         {
-            // Truncated JSON should return null (graceful degradation)
-            var result = Json.Parse("{\"name\":\"test");
-            // May return partial result or null — both are acceptable
+            // Truncated JSON should not throw (graceful degradation);
+            // may return a partial result or null — both are acceptable.
+            Json.Parse("{\"name\":\"test");
         }
 
         public static void TestParseWhitespace()
@@ -186,6 +186,199 @@ namespace KKLLMNPC.Tests
             if (obj.Has("missing")) throw new Exception("Has(missing) should be false");
         }
 
+        // --- Writer tests: collection shapes that reach tool results (2026-11-04) ---
+        // Json.Write is the one choke point every tool response flows through; before
+        // the IDictionary/KeyValuePair handling, any dict whose value type wasn't
+        // object serialized its entries as KeyValuePair structs via ToString()
+        // ("[k, System.Collections.Generic.List`1[System.String]]") — the type-name
+        // garbage the agent saw instead of JSON. These tests call the real writer.
+
+        private const string TypeNameLeak = "System.";
+
+        private static void AssertNoTypeLeak(string json)
+        {
+            if (json.Contains(TypeNameLeak)) throw new Exception("type name leaked into JSON: " + json);
+        }
+
+        public static void TestWriteDictStringValues()
+        {
+            var dict = new Dictionary<string, string> { ["a"] = "1", ["b"] = "2" };
+            var result = Json.Write(dict);
+            if (result != "{\"a\":\"1\",\"b\":\"2\"}") throw new Exception("Dictionary<string,string> misshapen: " + result);
+        }
+
+        public static void TestWriteDictNestedList()
+        {
+            var dict = new Dictionary<string, List<string>> { ["k"] = new List<string> { "x", "y" } };
+            var result = Json.Write(dict);
+            if (result != "{\"k\":[\"x\",\"y\"]}") throw new Exception("Dictionary<string,List<string>> misshapen: " + result);
+            AssertNoTypeLeak(result);
+        }
+
+        public static void TestWriteDictMixedValues()
+        {
+            var dict = new Dictionary<string, int> { ["hp"] = 5, ["age"] = 3 };
+            var result = Json.Write(dict);
+            if (result != "{\"hp\":5,\"age\":3}") throw new Exception("Dictionary<string,int> misshapen: " + result);
+        }
+
+        public static void TestWriteHashtable()
+        {
+            var ht = new System.Collections.Hashtable { ["h"] = "v" };
+            var result = Json.Write(ht);
+            if (result != "{\"h\":\"v\"}") throw new Exception("Hashtable misshapen: " + result);
+            AssertNoTypeLeak(result);
+        }
+
+        public static void TestWriteKeyValuePair()
+        {
+            var kv = new KeyValuePair<string, int>("hp", 5);
+            var result = Json.Write(kv);
+            if (!result.Contains("\"hp\"") || !result.Contains(":5") || result[0] != '{')
+                throw new Exception("KeyValuePair should be an object with the pair data: " + result);
+            AssertNoTypeLeak(result);
+        }
+
+        public static void TestWriteStringArray()
+        {
+            var result = Json.Write(new[] { "x", "y" });
+            if (result != "[\"x\",\"y\"]") throw new Exception("string[] misshapen: " + result);
+        }
+
+        public static void TestWriteMixedArray()
+        {
+            var result = Json.Write(new object[] { 1, "two", true, null });
+            if (result != "[1,\"two\",true,null]") throw new Exception("object[] misshapen: " + result);
+        }
+
+        public static void TestWriteEnumAndChar()
+        {
+            if (Json.Write(TestMode.Run) != "\"Run\"") throw new Exception("Enum should stringify as its name");
+            if (Json.Write('a') != "\"a\"") throw new Exception("char should stringify as a string");
+        }
+
+        public static void TestWriteStructFields()
+        {
+            var result = Json.Write(new Vec2 { x = 1.5f, y = 2.5f });
+            if (!result.Contains("\"x\":1.5") || !result.Contains("\"y\":2.5"))
+                throw new Exception("struct public fields should serialize: " + result);
+        }
+
+        public static void TestWriteCyclicTerminates()
+        {
+            var a = new Dictionary<string, object>();
+            a["self"] = a; // cyclic — must terminate, not stack-overflow
+            var result = Json.Write(a);
+            if (string.IsNullOrEmpty(result) || result[0] != '{')
+                throw new Exception("cyclic dict should still produce an object: " + result);
+            if (!result.Contains("…")) throw new Exception("cyclic dict should end in the depth-cap marker");
+        }
+
+        public static void TestRoundTripDictStringValues()
+        {
+            var original = new Dictionary<string, string> { ["a"] = "1", ["b"] = "two" };
+            var parsed = Json.Parse(Json.Write(original)) as Dictionary<string, object>;
+            if (parsed == null) throw new Exception("Dictionary<string,string> round-trip should parse to a dict (was a list of garbage before the fix)");
+            if ((parsed["a"] as string) != "1" || (parsed["b"] as string) != "two")
+                throw new Exception("Dictionary<string,string> round-trip values mismatch");
+        }
+
+        public static void TestTextNeverLeaksTypeNames()
+        {
+            // Json.Text is the single-value helper the console formatter and tool
+            // briefs use — collections render as JSON, never "System.Collections…".
+            if (Json.Text(null) != "") throw new Exception("Text(null) should be empty");
+            if (Json.Text("plain") != "plain") throw new Exception("Text(string) should pass through");
+            if (Json.Text(5) != "5") throw new Exception("Text(primitive) should stringify");
+            var list = new List<string> { "x", "y" };
+            var t = Json.Text(list);
+            if (t != "[\"x\",\"y\"]") throw new Exception("Text(list) should render JSON: " + t);
+            var nested = new Dictionary<string, object> { ["k"] = list };
+            var t2 = Json.Text(nested);
+            AssertNoTypeLeak(t2);
+            if (!t2.Contains("\"k\"")) throw new Exception("Text(dict) should render JSON: " + t2);
+        }
+
+        // --- Parser tests: \uXXXX escapes (2026-11-04) ---
+        // Go-based OpenAI-compatible servers (Ollama, OpenAI) HTML-escape <, >, &
+        // as \u003c/\u003e/\u0026 in every response content string. ParseStr had
+        // no \u case, so those arrived as literal "u003c" text — the field bug
+        // where a model echoing the name prompt's "Name: <the name>" line got
+        // registered as the NAME "u003cthe" (clean alphanumerics to the salvage
+        // regex). These tests compile against the real src/Json.cs.
+
+        public static void TestParseUnicodeAngleBracket()
+        {
+            // The exact Ollama-escaped shape of the echoed name template.
+            var result = Json.Parse("\"Name: \\u003cthe name>\"") as string;
+            if (result != "Name: <the name>") throw new Exception("\\u003c should decode to '<', got: " + result);
+        }
+
+        public static void TestParseUnicodeGoEscapes()
+        {
+            // Go encoding/json escapes all three HTML chars; hex case must not matter.
+            var result = Json.Parse("\"\\u003c\\u003e\\u0026 \\u0041\\u00e9\\u00C9\"") as string;
+            if (result != "<>& AéÉ") throw new Exception("Go HTML escapes / mixed hex case misshapen: " + result);
+        }
+
+        public static void TestParseUnicodeSurrogatePair()
+        {
+            // Astral characters arrive as two \u escapes — must decode to one
+            // UTF-16 pair, not strand a lone high surrogate.
+            var result = Json.Parse("\"\\ud83d\\ude00\"") as string;
+            if (result == null || result.Length != 2 || !char.IsSurrogatePair(result[0], result[1]))
+                throw new Exception("surrogate pair should decode to a paired UTF-16 unit");
+            // And survive a write→parse round-trip.
+            var rt = Json.Parse(Json.Write(result)) as string;
+            if (rt != result) throw new Exception("surrogate pair round-trip mismatch: " + rt);
+        }
+
+        public static void TestParseUnicodeMalformedStaysLiteral()
+        {
+            // Lenient convention: bad hex is echoed as literal text, never throws.
+            var r1 = Json.Parse("\"a\\uZZZZb\"") as string;
+            if (r1 != "auZZZZb") throw new Exception("\\uZZZZ should stay literal, got: " + r1);
+            var r2 = Json.Parse("\"\\u003x\"") as string;
+            if (r2 != "u003x") throw new Exception("partial hex should stay literal, got: " + r2);
+            var r3 = Json.Parse("\"\\u00\"") as string;
+            if (r3 != "u00") throw new Exception("truncated \\u at end of string should stay literal, got: " + r3);
+        }
+
+        public static void TestParseBAndF()
+        {
+            // \b and \f were decoded as literal 'b'/'f'; WriteStr emits them for
+            // control chars, so the reader must match the writer.
+            var result = Json.Parse("\"a\\bb\\fc\"") as string;
+            if (result != "a\bb\fc") throw new Exception("\\b/\\f should decode, got: " + result);
+        }
+
+        public static void TestWriteControlCharRoundTrip()
+        {
+            // WriteStr escapes control chars as \u00xx — the parser must read its
+            // own output back (this loop was broken before the \u decode).
+            string original = "a\u0001b";
+            string json = Json.Write(original);
+            if (json != "\"a\\u0001b\"") throw new Exception("writer should emit \\u0001, got: " + json);
+            var parsed = Json.Parse(json) as string;
+            if (parsed != original) throw new Exception("control-char round-trip mismatch: " + parsed);
+        }
+
+        public static void TestParseOllamaNameReplyShape()
+        {
+            // The full server response shape that produced the "u003cthe" name.
+            var root = Json.Parse("{\"choices\":[{\"message\":{\"content\":\"Name: \\u003cthe name>\"}}]}")
+                as Dictionary<string, object>;
+            if (root == null) throw new Exception("response shape should parse to a dict");
+            var choices = root["choices"] as List<object>;
+            var msg = (choices[0] as Dictionary<string, object>)["message"] as Dictionary<string, object>;
+            var content = msg["content"] as string;
+            if (content != "Name: <the name>") throw new Exception("Ollama reply content misshapen: " + content);
+        }
+
+        private enum TestMode { Idle, Run }
+
+        private struct Vec2 { public float x; public float y; }
+
         // Run every test above, print a summary, return the failure count (0 = pass).
         // This is the standalone entry point (see tests/test_json_standalone.cs shim).
         public static int RunAll()
@@ -198,6 +391,13 @@ namespace KKLLMNPC.Tests
                 TestWriteNull, TestWriteString, TestWriteBool, TestWriteFloat,
                 TestWriteAnonymous, TestWriteDictionary, TestWriteList, TestRoundTrip,
                 TestJsonObjAccessors,
+                TestWriteDictStringValues, TestWriteDictNestedList, TestWriteDictMixedValues,
+                TestWriteHashtable, TestWriteKeyValuePair, TestWriteStringArray,
+                TestWriteMixedArray, TestWriteEnumAndChar, TestWriteStructFields,
+                TestWriteCyclicTerminates, TestRoundTripDictStringValues, TestTextNeverLeaksTypeNames,
+                TestParseUnicodeAngleBracket, TestParseUnicodeGoEscapes, TestParseUnicodeSurrogatePair,
+                TestParseUnicodeMalformedStaysLiteral, TestParseBAndF, TestWriteControlCharRoundTrip,
+                TestParseOllamaNameReplyShape,
             };
             int passed = 0, failed = 0;
             Console.WriteLine("=== KKLLMNPC Json tests ===");

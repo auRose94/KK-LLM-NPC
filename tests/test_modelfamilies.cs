@@ -360,6 +360,25 @@ namespace KKLLMNPC.Tests
                 "mid-sentence candidate -> null");
             Assert(ModelFamilies.SalvageNameFromCoT("", taken, species) == null, "empty -> null");
             Assert(ModelFamilies.SalvageNameFromCoT(null, taken, species) == null, "null -> null");
+
+            // 2026-11-04 playtest regression: kobolds were NAMED "no", "maybe",
+            // "idea", "list", "check" — words out of the thinking. The old whole-
+            // content token scan in ChooseNameWithLLM picked them verbatim; the
+            // stopword-guarded miner must reject every one of them as a bare
+            // last-line token.
+            Assert(ModelFamilies.SalvageNameFromCoT("no", taken, species) == null, "thinking word 'no' -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("maybe", taken, species) == null, "thinking word 'maybe' -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("idea", taken, species) == null, "thinking word 'idea' -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("list", taken, species) == null, "thinking word 'list' -> null");
+            Assert(ModelFamilies.SalvageNameFromCoT("check", taken, species) == null, "thinking word 'check' -> null");
+            // And the multi-word tail of a cut-off monologue mines nothing.
+            Assert(ModelFamilies.SalvageNameFromCoT(
+                "I should find the bed. Hmm, maybe I should check the list", taken, species) == null,
+                "cut-off reasoning tail -> null");
+            // ...while a real conclusion in the same reply shape still lands.
+            Assert(ModelFamilies.SalvageNameFromCoT(
+                "Hmm, maybe I should check the list. I'll call her Vixlyn", taken, species) == "Vixlyn",
+                "conclusion after reasoning still mined");
         }
 
         // ------------------------------------------------------------------

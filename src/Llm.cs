@@ -33,8 +33,20 @@ namespace KKLLMNPC
         private void MaybeCreativeCommentary(string perceptionJson)
         {
             if (_cfgCommentEvery == null || _cfgCommentEvery.Value <= 0) return;
+            if (_commentaryBusy)
+            {
+                // A commentary HTTP call is still in flight. Unlike vision this had NO
+                // busy guard, so a slow server let a new worker spawn every due tick —
+                // threads + concurrent requests stacking up past the ParallelCalls
+                // gate (the field "second-kobold freeze"). Skip until one finishes;
+                // wedged-flag reset mirrors VisionHungTimeout.
+                if (Time.unscaledTime - _commentaryStartTime > Consts.CommentaryHungTimeout) _commentaryBusy = false;
+                else return;
+            }
             if (_tick - _lastCommentaryTick < Math.Max(1, _cfgCommentEvery.Value)) return;
             _lastCommentaryTick = _tick;
+            _commentaryBusy = true;
+            _commentaryStartTime = Time.unscaledTime;
             string percep = perceptionJson ?? "{}"; // captured for the worker
             var t = new Thread(() => CreativeCommentaryWorker(percep)) { IsBackground = true, Name = "KKLLMNPC-Comment" };
             t.Start();
@@ -55,6 +67,7 @@ namespace KKLLMNPC
         // then say it out loud. No act schema — pure voice.
         private void CreativeCommentaryWorker(string percep)
         {
+            _commentaryBusy = false; // worker done — a new one may start next due tick
             try
             {
                 var payload = new Dictionary<string, object>
@@ -236,12 +249,17 @@ namespace KKLLMNPC
         // Reasoning families (qwen-style unmarked "Thinking Process:" walls) are
         // ALLOWED to think here — fighting it just burned the budget three re-rolls
         // in a row and shipped fallback names. The protocol is think-then-answer:
-        // the reply must END with the "Name: <the name>" line, which the validator
+        // the reply must END with the "Name: Nyxa" line, which the validator
         // and SalvageNameFromCoT mine from the end.
+        //
+        // The example is a CONCRETE name, never an angle-bracket placeholder:
+        // models echo the placeholder verbatim, and a server-side \u003c escape
+        // of the echoed "<" (Go servers HTML-escape JSON strings) once shipped
+        // the registered name "u003cthe".
         internal static readonly string NamePromptTemplateBuiltin =
             "Name one kobold character. Gender: {gender}. Species: {species}. Personality: {traits}. {taken}" +
-            "Think as much as you need — reasoning is welcome. However your reply MUST end with one final line of the exact form: Name: <the name> — " +
-            "<the name> is ONE name only: 2-12 letters or digits, no spaces, no punctuation, nothing after that line. " +
+            "Think as much as you need — reasoning is welcome. However your reply MUST end with one final line of the exact form: Name: Nyxa " +
+            "(\"Nyxa\" is an example, not a suggestion — invent your own name). The name is ONE name only: 2-12 letters or digits, no spaces, no punctuation, nothing after that line. " +
             "Never the species name with a number attached (like Kobold2) — invent an actual name.";
 
         // The name-prompt chat template: [LLM] NamePromptFile when present,
@@ -297,7 +315,7 @@ namespace KKLLMNPC
                 // want time to think about it") — demand the answer NOW, with the
                 // exact final-line shape, and forbid any reasoning at all.
                 if (attempt >= 4)
-                    prompt += "\nTIME IS UP — no more thinking, no questions, no waiting. Answer immediately with exactly one final line of the form: Name: <one word>.";
+                    prompt += "\nTIME IS UP — no more thinking, no questions, no waiting. Answer immediately with exactly one final line of the form: Name: Nyxa (invent your own name — never the example).";
 
                 // Naming now WELCOMES reasoning (the prompt asks only for the final
                 // "Name:" line) — give think families room to finish think-then-
@@ -344,9 +362,9 @@ namespace KKLLMNPC
                 // verbatim (abridged) so the re-roll corrects instead of re-burning
                 // the same monologue — the field reports why the last reply failed
                 if (_lastRejectedNameThink.Length > 0)
-                    prompt = prompt + "\n(Your last reply was rejected because it never ended with the required 'Name: <one name>' line. "
-                        + "Its reasoning was: " + Shorten(_lastRejectedNameThink, 400) + ")\n" 
-                        + "Use that conclusion. Reply with the reasoning ALREADY DONE: end your reply with the lone final line: Name: <one name> — nothing after it.";
+                    prompt = prompt + "\n(Your last reply was rejected because it never ended with the required final 'Name:' line. "
+                        + "Its reasoning was: " + Shorten(_lastRejectedNameThink, 400) + ")\n"
+                        + "Use that conclusion. Reply with the reasoning ALREADY DONE: end your reply with the lone final line: Name: Nyxa (your own invented name — never the example) — nothing after it.";
                 string body = Json.Write(payload);
 
                 var nameSw = System.Diagnostics.Stopwatch.StartNew();
@@ -459,32 +477,30 @@ namespace KKLLMNPC
                         }
                     }
                     catch (Exception) { }
-                    // FINAL NAME SALVAGE — models that can't stop reasoning still hide
-                    // the real answer inside "Name: X" or a stray token on the last
-                    // line; extract a bare candidate instead of submitting the whole
-                    // monologue, which the registry regex would always reject. Last
-                    // match wins (reasoning families re-read/revise their pick).
-                    try
+                    // FINAL NAME SALVAGE — a completed reply's real "Name: X" contract
+                    // line, wherever reasoning hides it. Two hard rules, both born of
+                    // the 2026-11-04 playtest (kobolds named "no", "maybe", "idea",
+                    // "kobold", "list" — words out of the thinking):
+                    //  - A TRUNCATED reply (finish_reason=length) earns nothing here:
+                    //    its "Name:" line may have lost its tail mid-candidate, and the
+                    //    last word of a cut-off monologue is a THINKING word, not a
+                    //    name. The complete-line check below (strictFinal) is the only
+                    //    salvage a cut reply gets; otherwise it re-rolls with a bigger
+                    //    budget.
+                    //  - No bare-token scanning of the whole reply. That mining exists
+                    //    downstream (SalvageNameFromCoT) end-anchored and stopword-
+                    //    guarded, and only on COMPLETE replies.
+                    if (!truncated && !string.IsNullOrEmpty(content))
                     {
-                        string _nm = null;
-                        var _ms = System.Text.RegularExpressions.Regex.Matches(
-                            content ?? "", @"Name\s*[:=]\s*([A-Za-z][A-Za-z0-9-]{1,13})",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                        if (_ms.Count > 0) _nm = _ms[_ms.Count - 1].Groups[1].Value;
-                        if (string.IsNullOrEmpty(_nm))
+                        try
                         {
-                            var _toks = (content ?? "").Split(new char[] { ' ', '\n', '\r', '\t', ',', '.', ';', ':', '(', ')', '*' }, StringSplitOptions.RemoveEmptyEntries);
-                            foreach (var _t in _toks)
-                            {
-                                string _cand = _t.Trim().Trim('"', '\'', '`').Trim();
-                                if (_cand.Length >= 2 && _cand.Length <= 14
-                                    && System.Text.RegularExpressions.Regex.IsMatch(_cand, @"^[a-zA-Z0-9-]+$"))
-                                    _nm = _cand;
-                            }
+                            var _ms = System.Text.RegularExpressions.Regex.Matches(
+                                content, @"Name\s*[:=]\s*([A-Za-z][A-Za-z0-9-]{1,13})",
+                                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                            if (_ms.Count > 0) content = _ms[_ms.Count - 1].Groups[1].Value;
                         }
-                        if (!string.IsNullOrEmpty(_nm)) content = _nm;
+                        catch (Exception) { }
                     }
-                    catch (Exception) { }
                     // Validate: alphanumeric, 2-12 chars (matches the prompt)
                     if (!string.IsNullOrEmpty(content) && content.Length >= 2 && content.Length <= 14
                         && System.Text.RegularExpressions.Regex.IsMatch(content, @"^[a-zA-Z0-9-]+$"))
@@ -518,11 +534,15 @@ namespace KKLLMNPC
                     {
                         try
                         {
-                            foreach (var ln in content.Split('\n'))
+                            var _lines = content.Split('\n');
+                            // A cut reply's LAST line is the cut one — a "Name:" there
+                            // may have lost its tail ("Name: Ny"). Only a line FOLLOWED
+                            // by a newline (not the final split element) is provably
+                            // complete; keep the LAST such match (re-reads revise).
+                            for (int _i = 0; _i < _lines.Length - 1; _i++)
                             {
-                                string l = ln.Trim();
-                                if (l.Length > 6 && (l.StartsWith("Name:", StringComparison.OrdinalIgnoreCase)
-                                    || l.StartsWith("name:", StringComparison.Ordinal)))
+                                string l = _lines[_i].Trim();
+                                if (l.Length > 6 && l.StartsWith("Name:", StringComparison.OrdinalIgnoreCase))
                                 {
                                     string cand = l.Substring(5).Trim().Trim('"', '\'', '.', ' ');
                                     if (cand.Length >= 2 && cand.Length <= 14
@@ -1285,12 +1305,22 @@ namespace KKLLMNPC
                     if (category == "model_unloaded")
                     {
                         // Nothing warm to answer with (model switched away / unloaded).
-                        // NOT a payload problem — wait for the server to reload and
-                        // retry the identical payload. Bounded so a genuinely dead
-                        // server still fails the tick.
-                        if (++unloadedTries > 3) { NoteEndpointFail(); return null; }
-                        Logger.LogWarning("[" + MyName() + "] " + Shorten(lastError, 120) + " — model reloading?; waiting 4s and retrying unchanged (" + unloadedTries + "/3)");
-                        try { Thread.Sleep(4000); } catch (Exception) { }
+                        // NOT a payload problem — a payload fix won't help. The old code
+                        // re-POSTed the identical body up to 3× with 4s sleeps, holding a
+                        // ParallelCalls gate slot for up to 12s and hammering a server
+                        // that is mid-reload (a reload takes seconds; each retry re-stalls
+                        // it — the field "models unload" spiral). Now: one quick in-call
+                        // retry covers a fast reload; if that still fails we bail to the
+                        // next tick and let the endpoint breaker back off the whole NPC,
+                        // freeing the gate slot instead of holding it hostage.
+                        if (++unloadedTries > 1)
+                        {
+                            Logger.LogWarning("[" + MyName() + "] " + Shorten(lastError, 120) + " — model unloaded; deferring to next tick (endpoint breaker will back off)");
+                            NoteEndpointFail();
+                            return null;
+                        }
+                        Logger.LogWarning("[" + MyName() + "] " + Shorten(lastError, 120) + " — model reloading?; one quick retry unchanged");
+                        try { Thread.Sleep(2000); } catch (Exception) { }
                         lastError = null;
                         continue;
                     }

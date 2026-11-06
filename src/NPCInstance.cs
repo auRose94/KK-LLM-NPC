@@ -675,6 +675,10 @@ namespace KKLLMNPC
         private volatile bool _visionBusy;
         private float _visionStartTime;
         private int _lastVisionTick = -999;
+        // Commentary worker busy guard (mirrors _visionBusy): without it a slow
+        // server let commentary threads stack up past the ParallelCalls gate.
+        private volatile bool _commentaryBusy;
+        private float _commentaryStartTime;
         private bool _visionModelLoggedOnce;
         private int _visionShot;
         private volatile bool _needImageAfterBump;
@@ -1202,6 +1206,7 @@ namespace KKLLMNPC
             if (_consoleRecentCmds != null) _consoleRecentCmds.Clear();
             lock (_bufLock) { _scratchBuf.Clear(); } // the scratch buffer is session/personal — dies with the identity
             _lastTurnStampT = 0f; _turnClockLine = null;
+            _lastClockRebuildT = 0f; _lastEmittedAnchor = null; // fresh boot: emit a real anchor
             _pendingShotB64 = null;
             _consoleSlept = false;
             _sleepUntilTime = 0f;

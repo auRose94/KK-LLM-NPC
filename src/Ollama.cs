@@ -59,12 +59,12 @@ namespace KKLLMNPC
             if (LLMNPCPlugin.Alive(_plugin)) return;
             _plugin = plugin;
             _cfgLlmModel = cfgLlmModel;
-            _cfgEnabled = plugin.Config.Bind("Ollama", "Enabled", false,
-                "Adopt an externally-running Ollama (the game can't launch one under Proton). Off = don't touch Ollama; use [LLM].Endpoint like any other server.");
+            _cfgEnabled = plugin.Config.Bind("Ollama", "Enabled", true,
+                "Adopt an externally-running Ollama (the game can't launch one under Proton). ON by default: the mod watches your Ollama for models and can route the action model through it. Off = don't touch Ollama; use [LLM].Endpoint like any other server. With no Ollama running it just idles (healthy=false), so a fresh install is unaffected.");
             _cfgEndpoint = plugin.Config.Bind("Ollama", "Endpoint", "http://127.0.0.1:11434",
                 "Ollama base URL (host:port). A full /v1/chat/completions suffix is accepted and stripped. The WebUI 'AI server' tab installs models here with `ollama pull <model>` then `ollama run <model>`.");
-            _cfgAutoEndpoint = plugin.Config.Bind("Ollama", "AutoEndpoint", false,
-                "When an Ollama is adopted + healthy, route LLM + vision-fallback POSTs to it regardless of [LLM].Endpoint (hand-off: no config editing after a restart). Off = the configured endpoint stays the truth.");
+            _cfgAutoEndpoint = plugin.Config.Bind("Ollama", "AutoEndpoint", true,
+                "When an Ollama is adopted + healthy, route LLM + vision-fallback POSTs to it regardless of [LLM].Endpoint (hand-off: no config editing after a restart). ON by default so the adopted Ollama is the live endpoint; Off = the configured endpoint stays the truth.");
             _cfgPollInterval = plugin.Config.Bind("Ollama", "PollIntervalSec", 10,
                 "How often the watcher probes the Ollama /api/tags + /api/show when enabled.");
             _cfgSelectedModel = plugin.Config.Bind("Ollama", "SelectedModel", "",

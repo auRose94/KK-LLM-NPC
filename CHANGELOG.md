@@ -5,6 +5,182 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Changed (2026-11-05 — new default profile: rapid, immersive, Ollama-first)
+
+The shipped defaults now reflect a real, well-played setup — tuned for rapid
+response, deep immersion, better tool-calling/roleplay, and general helpfulness.
+**No existing config file is touched** (BepInEx only writes a key on first
+launch or when missing), so this only changes what a fresh install boots with.
+
+- **Ollama is now the default host.** `[Ollama] Enabled` and `AutoEndpoint`
+  ship ON: the mod watches your Ollama for models and routes the action model
+  through it (the hand-off the WebUI's AI-server tab has always offered). With
+  no Ollama running it just idles (`healthy=false`), so a fresh install without
+  Ollama is unaffected — `[LLM].Endpoint` remains the fallback. The default
+  `Model` string is still the neutral `local-model` (not pinned to any one
+  model); see the model ranking below.
+- **Faster, livelier turns.** `ThinkInterval` 0.4 → **0.1 s** (rapid response),
+  `Temperature` 0.3 → **0.8** (more varied roleplay), `PlanStepDelay` 0.35 →
+  **2 s**, `PlanMaxSteps` 8 → **2** (decisive single-step plans).
+- **More immersive perception.** `MaxTokens` 1024 → **18096**,
+  `ImageEveryNTicks` 6 → **2**, `[Vision] Stereo` off → **on** (harmless on a
+  text-only model — the image is dropped when the server can't see),
+  `RayCount` 9 → **18**, `RayRange` 25 → **32**, `RadarSize` 10 → **30**,
+  `RadarScale` 1.2 → **0.25 m/cell** (finer, wider sonar).
+- **Console + concurrency.** `[Console] MaxRounds` 3 → **5**,
+  `[Console] MaxTokens` 256 → **4096** (more back-and-forth, roomier command
+  output for better tool-calling), `ParallelCalls` 2 → **8** (multi-NPC /
+  multi-slot servers; lower it to ~2 on a single-GPU serial box).
+- **`MaxNPCs`** 1 → **4** (more kobolds on the LLM at once).
+- **The opt-in adult features stay OFF by default.** `SwallowEnabled`,
+  `SwallowAgentEat`, and `SwallowPlayerVictims` are unchanged (still false) —
+  that OFF-by-default safety pillar is deliberate and untouched.
+- **Ornith recommended higher.** `ornith-1.5:35b` moved up to the 🟡2 tier in
+  [docs/MODELS.md](docs/MODELS.md) as the default-recommended model — a
+  user report of rapid responses, deep immersion, strong tool-calling +
+  roleplay, and notably good handling of the game's adult subject matter. It's
+  text-only (no vision), so pair a vision model via `[VisionModel]` for
+  first-person frames.
+- `IdentityBot` stays OFF by default (multiplayer "safe default" — unrelated to
+  the qualities above).
+
+### Fixed (2026-11-04 — server stability, `ps` target visibility, "now" event flood)
+
+- **`ps` now lists every other kobold in the room, not just players and
+  named agent siblings.** `DescribePeople` (Senses.cs) previously `continue`'d
+  past any wild/unclaimed kobold and any claimed-but-nameless body, so a tasked
+  target that was a wild NPC (or an agent whose name hadn't registered yet) was
+  invisible to `ps` — "go eat Flint" failed because Flint wasn't on the list.
+  The list is now built in two passes (addressable agent siblings first so the
+  8-entry cap can't starve them behind a crowd of wild bodies), and every other
+  kobold is listed and classified — player / agent / wild — never silently
+  dropped. The old `[ps census]` debug re-scan (which existed only to diagnose
+  this very drop) is removed since an empty result now genuinely means no one
+  else is present.
+- **Commentary worker can no longer stack threads under a slow server.**
+  `MaybeCreativeCommentary` (Llm.cs) started a fresh worker thread every due
+  tick with no busy guard — a slow model let commentary threads accumulate,
+  each holding an HTTP call and a full payload, pushing concurrent requests
+  past the `ParallelCalls` gate (the field "second-kobold freeze"). It now
+  mirrors the vision worker's `_visionBusy` guard with a 2-minute wedged-flag
+  reset.
+- **The `model_unloaded` retry no longer hammers a reloading server.** The
+  retry loop re-POSTed the identical payload up to 3× with 4s sleeps, holding a
+  gate slot for up to 12s and re-stalling a server mid-reload (a reload takes
+  seconds — each retry extended it). Now: one quick in-call retry covers a fast
+  reload; if that still fails the tick defers to the next one and the endpoint
+  breaker backs off the whole NPC, freeing the gate slot.
+- **Console "now events" no longer flood the log/transcript.** Every tick,
+  `ConsoleTurn` re-pasted the entire state anchor (clock + goal + needs + …) as
+  a fresh `user` message even when nothing changed — the per-tick "now" dump.
+  The `now:` clock string is now rebuilt only every 5s (its per-second advance
+  was defeating any dedup), and the anchor is re-emitted only when it or fresh
+  events actually changed since the last turn; an idle tick sends a bare poll
+  so the model is still prompted to act while the last real anchor stays in the
+  transcript for context.
+
+### Fixed (2026-11-04 — \uXXXX escape parsing, name-prompt echo)
+
+- **`Json.Parse` now decodes `\uXXXX` string escapes.** The hand-rolled string
+  parser handled `\n \r \t \" \\ \/` but not `\u` — and Go-based
+  OpenAI-compatible servers (Ollama, OpenAI) HTML-escape `<`, `>`, `&` as
+  `\u003c`/`\u003e`/`\u0026` in every response string. Those arrived as literal
+  "u003c" text: a model echoing the name prompt's mandated "Name: <the name>"
+  line got registered as the NAME "u003cthe" — clean alphanumerics to the
+  salvage regex, so it validated and stuck. The same gap hid inline `<think>`
+  tags from `StripThinkBlocks` ("u003cthu003e") and broke `Json.Write` →
+  `Json.Parse` round-trips of control characters, which the writer emits as
+  `\u00xx`. Escapes now decode (including surrogate pairs); malformed hex stays
+  literal, per the parser's lenient convention.
+- **The name prompt's mandated final line no longer shows a placeholder.**
+  With the parser fixed, an echoed `Name: <the name>` fails validation and
+  re-rolls — but the echo still burned the attempt. The mandated line (builtin
+  template, shipped `system_prompt_name.txt`, TIME-IS-UP reminder, and the
+  retry-with-memory instructions) now shows a concrete example —
+  `Name: Nyxa (invent your own name — never the example)` — so no
+  angle-bracket placeholder remains anywhere in the name flow. Echoes of the
+  example itself can't collide: `NameRegistry.TryReserve` re-rolls duplicates.
+- 7 new parser tests in `tests/test_json.cs` (`\u003c/\u003e/\u0026`, mixed
+  hex case, surrogate pair, malformed-escape literal fallback, `\b`/`\f`
+  decode, writer→reader control-char round-trip, and the Ollama response
+  shape that produced "u003cthe").
+
+### Fixed (2026-11-04 — swallow direction + thinking-word names)
+
+- **The predator is no longer told it is the meal.** `SwallowManager` flagged
+  the EATER's NPC with `Swallowed` during a conversion (a grab-suppression
+  hack) — but `Swallowed` is the victim state: the eater's console refused
+  every body command with "you are deep inside someone's body", and the state
+  anchor said "YOU ARE INSIDE SOMEONE'S BODY (a swallowed guest…)" every turn
+  while it was DIGESTING someone else. The states are now separate: a new
+  `NPCInstance.Digesting` flag carries the one gate the eater actually needs
+  (`ModGrab`'s per-frame grabber must not steal floor items mid-conversion),
+  while the eater's console, movement, camera, arousal and anchor stay
+  first-person honest — its meal awareness comes from the correctly-worded
+  `[conversion]` events and the anchor's belly-guest line. End/abort teardown
+  clears the new flag (the old hack's stuck-flag risk is preserved in reverse).
+- **Names are no longer picked out of the thinking.** The name-flow's first
+  salvage scanned the WHOLE reply for the last `[a-zA-Z0-9-]` token — the last
+  word of an unmarked reasoning monologue ("…maybe I should check the list")
+  became the kobold's name: field-observed names "no", "maybe", "idea",
+  "kobold", "list". That scan is gone: a completed reply earns its `Name: X`
+  contract line (last match wins), unmarked-CoT mining stays with
+  `SalvageNameFromCoT` (end-anchored + stopword-guarded, complete replies
+  only), and a TRUNCATED reply (finish_reason=length) now earns nothing from
+  the early passes — only a `Name:` line FOLLOWED by a newline (provably
+  complete before the cut) via `strictFinal`; everything else re-rolls with a
+  bigger budget. The playtest words joined `CoTStopwords`. 8 new regression
+  tests in `tests/test_modelfamilies.cs` lock the garbage words → null while
+  real conclusions still land.
+
+### Fixed (2026-11-04 — tool-result JSON serialization)
+
+- **Tool responses no longer degrade to .NET type names.** `Json.Write` — the
+  one choke point every tool result, WebUI op, and training record flows
+  through — only handled `Dictionary<string, object>`; any other map shape
+  fell into the generic `IEnumerable` branch, where each entry's
+  `KeyValuePair`/`DictionaryEntry` struct failed the class-only reflection
+  check and serialized via `ToString()` — `Dictionary<string,string>` came out
+  as `["[a, 1]","[b, 2]"]`, `Dictionary<string,List<string>>` as
+  `["[k, System.Collections.Generic.List`1[System.String]]"]`, `Hashtable` as
+  `["System.Collections.DictionaryEntry"]`. Downstream, `ToDict`'s
+  write→parse round-trip then recovered a list instead of a dict, so the agent
+  saw mangled text or raw type names where it expected JSON data. The writer
+  is now a proper depth-capped map/array/object builder: any `IDictionary`
+  (generic and non-generic, keys stringified), `KeyValuePair<K,V>` as
+  `{"key":…,"value":…}`, public-field structs (Unity `Vector3` → `x/y/z`), and
+  explicit `char`/enum/`DateTime` handling. Cyclic shapes terminate at a depth
+  cap instead of stack-overflowing.
+- **The remaining `ToString()` leak sites at the formatter edges got the same
+  guarantee** via a new `Json.Text` single-value helper: the console result
+  formatter's perception-dict getter `G` and scan-value loop, the tool-log
+  args brief, and the legacy act-parser's `CleanValue` — a dict/list value
+  there used to render the type name into terminal output and the tool log.
+- **The playtest's "echo System.Collections.Generic.Dictionary`2[…]" parrot
+  loop is traced to its real root and fixed.** The salvage path
+  (`ConsoleShell.ExpandArgDict`) flattens a recovered tool call's arguments
+  into a command line; act-schema replies put the arguments in a `params`
+  DICT (`{"action":"say","params":{"text":"Hello! I am No."}}`), and that
+  dict hit `ToString()` — the recovered line became
+  `say System.Collections.Generic.Dictionary`2[System.String,System.Object]`,
+  entered the transcript as an assistant message, and the model copied it for
+  turns. `params` now flattens one level into real arguments
+  (`echo Hello! I am No.`), and any other dict/list arg value renders as JSON
+  data instead of a type name. 4 regression tests in
+  `tests/test_console_shell.cs` lock the shapes.
+- **The WebUI terminal's "user: System.Object[]" rows are fixed** — a display
+  bug, not a model-facing one. Screenshot-attached messages carry multipart
+  content (a text part + an image part in an `object[]`); the web terminal's
+  `Convert.ToString(content)` rendered the array's ToString — the bare type
+  name — exactly where `use` had just turned the body and the auto-screenshot
+  fired. The terminal now flattens through `ConsoleMsgText` (the same
+  text+`[N image(s)]` shape the in-game Mind overlay uses), so the debug view
+  shows what the model actually read. The LLM request path was already
+  correct (the fixed `Json.Write` serializes the parts array properly).
+- 12 new writer tests in `tests/test_json.cs` (string/int value dicts, nested
+  lists, Hashtable, KeyValuePair, arrays, enum/char, struct fields, cyclic
+  depth cap, round-trips, `Json.Text`) — all compile-only against `Json.cs`.
+
 ### Added (2026-10-14 — behavior-hardening round)
 
 - **Quest lifecycle is closed out.** QuestSense now tracks the objective OBJECT

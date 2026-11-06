@@ -21,7 +21,7 @@ file can't silently never run.
 
 | Suite | File | Tests | What it covers |
 |-------|------|-------|----------------|
-| `json` | `test_json.cs` + `test_json_standalone.cs` | 22 | Json parser/writer (null, bool, int, float, string, object, array, nested, truncated, whitespace, round-trip) |
+| `json` | `test_json.cs` + `test_json_standalone.cs` | 41 | Json parser/writer (null, bool, int, float, string, object, array, nested, truncated, whitespace, round-trip; `\uXXXX` escapes incl. surrogate pairs + malformed fallback, `\b`/`\f`, writer control-char round-trip; writer collection shapes, type-leak guard) |
 | `pathcore` | `test_pathcore.cs` | 33 | A* solver, PathPolicy.ShouldReplan (14 cases), adaptive cell sizing, auto floor detection |
 | `goalresolver` | `test_goalresolver.cs` | 30 | Goal snapping: fast path, expanding-ring search, MaxRadius cutoff, height tiebreak, tie-break order, bounds/edge cases |
 | `contextcore` | `test_contextcore.cs` | 109 | Compaction escalation ladder, de-escalation, streak reset, per-budget dynamic limits + floors, token estimation, fact merging, history summarization |

@@ -1426,65 +1426,95 @@ namespace KKLLMNPC
         // Other players in the room (host + remote), each with their chat name, the
         // body/mesh they wear, and their distance/bearing. Distinct from 'player'
         // (host only) so the model never merges them.
+        // One people-entry dict for `ps` / the state anchor. asAgent=true marks an
+        // addressable LLM sibling (name + bearing + last action); a wild kobold is
+        // still listed (so a target the model was told to deal with is visible) but
+        // flagged as not addressable by name.
+        private Dictionary<string, object> MakePeopleEntry(Kobold k, string nick, bool asAgent)
+        {
+            Vector3 d = k.transform.position - _kobold.transform.position;
+            string name = nick;
+            if (string.IsNullOrEmpty(name)) name = CleanName(k.name);
+            var entry = new Dictionary<string, object>
+            {
+                ["name"] = name,
+                ["body"] = CleanName(k.name),
+                ["d"] = F(d.magnitude),
+                ["dir"] = RelBearing(d),
+                ["dir_deg"] = F(RelBearingDeg(d)),
+                ["who"] = asAgent
+                    ? "another agent kobold (an LLM NPC) — a person like you; address them with: their name + a comma"
+                    : "a wild kobold (not an agent you can name/address) — approach it directly if you need it",
+            };
+            if (asAgent)
+            {
+                // Who's-who: a sibling's live WHAT — their last action, so "Kira is
+                // walking toward the farm" instead of just a name. Instance read is
+                // in-process.
+                string doing = null;
+                try
+                {
+                    var other = Plugin.InstanceForBody(k);
+                    if (other != null && other != this) doing = other._lastAction;
+                }
+                catch (Exception) { }
+                if (!string.IsNullOrEmpty(doing) && doing != "none") entry["doing"] = doing;
+            }
+            return entry;
+        }
+
+        // Other kobolds in the room (host, remote players, fellow agents, wild).
+        // Two passes so the 8-entry cap can't starve addressable agent siblings out
+        // behind a crowd of wild bodies: pass 1 lists claimed LLM siblings first,
+        // pass 2 fills the rest with players then wild kobolds. Every other kobold is
+        // listed (classified) — none is silently dropped, which is what made a tasked
+        // target ("go eat Flint") invisible when Flint was a wild or not-yet-named body.
         private List<object> DescribePeople()
         {
             var list = new List<object>();
             if (!IsAlive(_kobold)) return list;
             try
             {
+                var kobolds = SceneCache.Find<Kobold>(2f);
+                if (kobolds == null) return list;
                 string hostName = null;
                 try { if (PlayerPossession.TryGetPlayerInstance(out var pp) && pp.kobold != null) hostName = pp.kobold.name; } catch (Exception) { }
-                foreach (var k in SceneCache.Find<Kobold>(2f))
+
+                // PASS 1 — addressable agent siblings (claimed by an LLM), named or not.
+                foreach (var k in kobolds)
                 {
                     if (k == null || k == _kobold) continue;
+                    if (!string.IsNullOrEmpty(KoboldOwnerNick(k))) continue; // a player, not an agent
+                    int kId = k.GetInstanceID();
+                    if (!LLMNPCPlugin.IsClaimedByAnyLLM(kId)) continue; // wild — handled in pass 2
+                    string agentName = AgentNameForBody(kId);
+                    if (string.IsNullOrEmpty(agentName) || string.Equals(agentName, MyName(), StringComparison.OrdinalIgnoreCase))
+                        agentName = CleanName(k.name); // claimed but not yet named — still reachable by body name
+                    list.Add(MakePeopleEntry(k, agentName, asAgent: true));
+                    if (list.Count >= 8) return list;
+                }
+
+                // PASS 2 — players, then wild kobolds (classified, never dropped).
+                foreach (var k in kobolds)
+                {
+                    if (list.Count >= 8) break;
+                    if (k == null || k == _kobold) continue;
                     string nick = KoboldOwnerNick(k);
-                    if (string.IsNullOrEmpty(nick))
+                    if (!string.IsNullOrEmpty(nick))
                     {
-                        // A fellow AGENT (one of this plugin's NPC bodies) is visible by
-                        // its chat name — siblings can address each other in chat.
-                        int kId = k.GetInstanceID();
-                        if (!LLMNPCPlugin.IsClaimedByAnyLLM(kId)) continue; // wild/AI body
-                        string agentName = AgentNameForBody(kId);
-                        if (string.IsNullOrEmpty(agentName) || string.Equals(agentName, MyName(), StringComparison.OrdinalIgnoreCase)) continue;
-                        nick = agentName;
-                        Vector3 da = k.transform.position - _kobold.transform.position;
-                        // Who's-who: a sibling's live WHAT — their last action + a
-                        // world bearing, so "Kira is walking toward the farm, 12m SE"
-                        // instead of just a name. Instance read is in-process.
-                        string doing = null;
-                        try
-                        {
-                            var other = Plugin.InstanceForBody(k);
-                            if (other != null && other != this) doing = other._lastAction;
-                        }
-                        catch (Exception) { }
-                        var entryWho = new Dictionary<string, object>
-                        {
-                            ["name"] = nick,
-                            ["body"] = CleanName(k.name),
-                            ["d"] = F(da.magnitude),
-                            ["dir"] = RelBearing(da),
-                            ["dir_deg"] = F(RelBearingDeg(da)),
-                            ["who"] = "another agent kobold (an LLM NPC) — a person like you; address them with: their name + a comma",
-                        };
-                        if (!string.IsNullOrEmpty(doing) && doing != "none") entryWho["doing"] = doing;
-                        list.Add(entryWho);
-                        if (list.Count >= 8) break;
+                        bool isHost = hostName != null && string.Equals(k.name, hostName, StringComparison.Ordinal);
+                        var entry = MakePeopleEntry(k, nick, asAgent: false);
+                        entry["who"] = isHost
+                            ? "the HOST player (your player)"
+                            : "another player in the room (their avatar; mesh " + CleanName(k.name) + ")";
+                        list.Add(entry);
                         continue;
                     }
-                    Vector3 d = k.transform.position - _kobold.transform.position;
-                    bool isHost = hostName != null && string.Equals(k.name, hostName, StringComparison.Ordinal);
-                    var entry = new Dictionary<string, object>
-                    {
-                        ["name"] = nick,
-                        ["body"] = CleanName(k.name),
-                        ["d"] = F(d.magnitude),
-                        ["dir"] = RelBearing(d),
-                        ["dir_deg"] = F(RelBearingDeg(d)),
-                        ["who"] = isHost ? "the HOST player (your player)" : "another player in the room (their avatar; mesh " + CleanName(k.name) + ")",
-                    };
-                    list.Add(entry);
-                    if (list.Count >= 8) break;
+                    // Wild / unclaimed kobold.
+                    bool claimed = LLMNPCPlugin.IsClaimedByAnyLLM(k.GetInstanceID());
+                    string name = claimed ? (AgentNameForBody(k.GetInstanceID()) ?? CleanName(k.name)) : CleanName(k.name);
+                    if (string.Equals(name, MyName(), StringComparison.OrdinalIgnoreCase)) continue;
+                    list.Add(MakePeopleEntry(k, name, asAgent: claimed));
                 }
             }
             catch (Exception e) { Logger.LogWarning("people: " + e.Message); }

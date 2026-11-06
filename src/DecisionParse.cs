@@ -162,10 +162,11 @@ namespace KKLLMNPC
         // Coerce a JSON value to a clean ASCII string, trimming whitespace. A blank or null value
         // becomes null so the caller can treat "field absent" the same as "empty" — the guard
         // above then rejects a decision that's missing its mandatory task.
+        // Nested dict/list values render as JSON via Json.Text, never a .NET type name.
         private static string CleanValue(object o)
         {
             if (o == null) return null;
-            string s = o.ToString();
+            string s = Json.Text(o);
             return string.IsNullOrEmpty(s) ? null : s.Trim();
         }
     }

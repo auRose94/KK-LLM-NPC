@@ -198,10 +198,12 @@ namespace KKLLMNPC
             // A swallowed body's LLM loop keeps running (it can still speak), so its
             // grabber prefix still fires every frame — but its hands are inside a
             // stomach and reach nothing. Block the grab here so the model can't pick
-            // up floor items from inside the eater. (return false = prefix fully
+            // up floor items from inside the eater. A DIGESTING body (the predator
+            // mid-conversion) is blocked too — its per-frame grabber used to steal
+            // floor items all through the meal. (return false = prefix fully
             // handled, vanilla TryGrab does nothing — the opposite of the fallthrough
             // `return true` the rest of this method uses.)
-            try { if (npc.Swallowed) return false; } catch (Exception) { }
+            try { if (npc.Swallowed || npc.Digesting) return false; } catch (Exception) { }
             try
             {
                 var c = GrabGrabberCache(__instance);

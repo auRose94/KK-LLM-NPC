@@ -71,6 +71,14 @@ namespace KKLLMNPC
         // can't get lost in thought ("now: 00:14:32 (+2m07s since your last turn…)").
         private float _lastTurnStampT;
         private string _turnClockLine;
+        // TURN-CLOCK + ANCHOR DEDUP (2026-11-04): the per-tick user message re-pasted
+        // the whole state anchor (clock + goal + needs + …) every ~0.4s even when
+        // nothing changed — the "now events" log/transcript flood. The clock string is
+        // rebuilt only at ClockRebuildInterval so its per-second churn can't defeat the
+        // anchor dedup; the anchor itself is re-emitted only when it (or fresh events)
+        // changed since the last turn.
+        private float _lastClockRebuildT;
+        private string _lastEmittedAnchor;
 
         // ------------------------------------------------------------------
         // SCRATCH BUFFER — the agent's personal, sandboxed notepad. Pure text,
@@ -830,7 +838,12 @@ namespace KKLLMNPC
                 float stampNow = Time.unscaledTime;
                 float sinceLast = _lastTurnStampT > 0f ? stampNow - _lastTurnStampT : 0f;
                 _lastTurnStampT = stampNow;
+                // Rebuild the clock string only every ClockRebuildInterval seconds — its
+                // per-second advance otherwise defeats the anchor dedup below (the model
+                // still reads the same time, just a few seconds stale).
+                if (_lastClockRebuildT <= 0f || stampNow - _lastClockRebuildT >= Consts.ClockRebuildInterval)
                 {
+                    _lastClockRebuildT = stampNow;
                     float elapsed = stampNow - _sessionStartTime;
                     if (elapsed < 0f) elapsed = 0f;
                     int hh = (int)(elapsed / 3600f), mm = (int)((elapsed % 3600f) / 60f), ss = (int)(elapsed % 60f);
@@ -852,8 +865,29 @@ namespace KKLLMNPC
                 MaybeAutoScreenshot();
 
                 // World events (player chat, reagent events) + state anchor + prompt.
+                // events MUST be drained every tick (the queues are consumed) even when
+                // we skip re-emitting the anchor — otherwise events would be lost.
                 string events = DrainConsoleEvents();
-                string userText = events + StateAnchorLine() + "$\n";
+                string anchor = StateAnchorLine();
+
+                // DEDUP (2026-11-04): only re-paste the full state anchor when it (or
+                // fresh events) actually changed since the last turn. An idle tick where
+                // nothing moved sends a bare poll so the model is still prompted to act —
+                // the last real anchor stays in the transcript for context — but the
+                // bulky anchor isn't re-sent every ~0.4s. That per-tick re-emission was
+                // the "now events" flood (the log/transcript grew a full state dump each
+                // tick whether or not anything changed).
+                string userText;
+                bool anchorChanged = !string.Equals(anchor, _lastEmittedAnchor, StringComparison.Ordinal);
+                if (events.Length > 0 || anchorChanged)
+                {
+                    userText = events + anchor + "$\n";
+                    _lastEmittedAnchor = anchor;
+                }
+                else
+                {
+                    userText = "$\n"; // bare poll: nothing new since the last turn
+                }
                 AddConsoleMsg("user", userText);
                 TrimConsoleConversation(); // tick-boundary trim: the idle ENTER loop (empty replies short-circuit every other trim call) must never outgrow the window
 
@@ -870,8 +904,9 @@ namespace KKLLMNPC
                 // ("$ ls" + output rows + even the state anchor) instead of speaking.
                 // Copied lines are dropped before parsing so they can't re-execute (an
                 // anchor copy once got stored as the literal goal "(none yet) | awake:
-                // 0h03m" and echoed in every later anchor).
-                _echoSet = LastUserLineSet(events + StateAnchorLine());
+                // 0h03m" and echoed in every later anchor). Track the lines actually
+                // emitted (the dedup may have sent a bare poll).
+                _echoSet = LastUserLineSet(userText);
 
                 for (int round = 0; round < maxRounds && _running; round++)
                 {
@@ -1821,29 +1856,9 @@ namespace KKLLMNPC
                 }
             }
             string outp = sb.ToString().TrimEnd();
-            if (outp.Length == 0)
-            {
-                // CENSUS (2026-10-25): "the other agents are not in ps" needs the skip
-                // REASON per body — log the classification at debug so one reproduction
-                // names the failing gate (nick? claim? name lookup?).
-                try
-                {
-                    var kobolds = SceneCache.Find<Kobold>(2f);
-                    int n = 0;
-                    foreach (var k in kobolds)
-                    {
-                        if (k == null || k == _kobold) continue;
-                        n++;
-                        string nick = KoboldOwnerNick(k);
-                        bool claimed = LLMNPCPlugin.IsClaimedByAnyLLM(k.GetInstanceID());
-                        string agentName = claimed ? AgentNameForBody(k.GetInstanceID()) : null;
-                        Logger.LogDebug("[ps census] '" + CleanName(k.name) + "' nick=" + (nick ?? "null")
-                            + " claimed=" + claimed + " agentName=" + (agentName ?? "null"));
-                    }
-                    Logger.LogDebug("[ps census] scene kobolds scanned: " + n);
-                }
-                catch (Exception) { }
-            }
+            // DescribePeople now lists every other kobold in the scene (classified as
+            // player / agent / wild), so an empty result means there genuinely are no
+            // others — no census re-scan needed.
             return outp.Length > 0 ? outp : "no one else in the room";
         }
 
@@ -2685,12 +2700,13 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // formatting helpers
         // ------------------------------------------------------------------
-        // Safe string get from a perception/entry dict (values may be float/string/null).
+        // Safe string get from a perception/entry dict (values may be float/string/null;
+        // dict/list values render as JSON via Json.Text, never a .NET type name).
         private static string G(Dictionary<string, object> d, string key)
         {
             object v;
             if (d == null || !d.TryGetValue(key, out v) || v == null) return "";
-            return v.ToString();
+            return Json.Text(v);
         }
 
         // Any tool result (anonymous type or dict) → Dictionary, via the Json round-trip.
@@ -2761,7 +2777,9 @@ namespace KKLLMNPC
                         var sb3 = new StringBuilder();
                         foreach (var kv in scan)
                         {
-                            string val = kv.Value == null ? "" : kv.Value.ToString();
+                            // Json.Text, not ToString(): a scan value may be a dict/list
+                            // ("System.Collections…" garbage reached the terminal that way).
+                            string val = Json.Text(kv.Value);
                             if (val.Length == 0) continue;
                             sb3.Append("  ").Append(kv.Key).Append(": ").Append(Shorten(val, 80)).Append('\n');
                         }

@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.2.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.2.3")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -398,7 +398,7 @@ namespace KKLLMNPC
             try { ModuleRegistry.Scan(); } catch (Exception e) { Logger.LogWarning("module scan: " + e.Message); }
 
             _cfgEndpoint = Config.Bind("LLM", "Endpoint", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions URL. LM Studio default: http://127.0.0.1:1234/v1/chat/completions");
-            _cfgModel = Config.Bind("LLM", "Model", "local-model", "Model name to request. LM Studio: use the exact model name from the Developer tab. KoboldCpp: 'local-model' works.");
+            _cfgModel = Config.Bind("LLM", "Model", "local-model", "Model name to request. Ollama: 'local-model' or an installed tag like 'ornith-1.5:35b'. LM Studio: use the exact model name from the Developer tab. KoboldCpp: 'local-model' works.");
             _cfgApiKey = Config.Bind("LLM", "ApiKey", "", "Bearer token (may be empty for local)");
             _cfgKvCacheType = Config.Bind("LLM", "KvCacheType", "", "KV-cache type the ADOPTED backend (Ollama/LMStudio) uses when serving (fp16, q8_0, q4_0, q5_1) - depends on the server; leave blank for the server default. Advisory; not all runners honour per-request overrides.");
             _cfgMtpEnabled = Config.Bind("LLM", "MtpEnabled", false, "Opt in to Multi-Token Prediction / speculative decoding on the ADOPTED backend (experimental; requires Ollama >= 0.3.x / a draft model pinned under Ollama.DraftModel).");
@@ -406,10 +406,10 @@ namespace KKLLMNPC
             _cfgTimeoutSeconds = Config.Bind("LLM", "TimeoutSeconds", 0,
                 "Chat POST timeout. 0 = automatic: plain turns 120s, thinking families (Qwen 3.5 / GPT-OSS / GLM / R1-class — their CoT burns wall-time before any answer text) 300s. Set >0 to force one bound for every family; a long timeout on a busy local server holds an Ollama parallel slot, so lower it if a second NPC starves.");
             // Bound before the prompt defaults below, which interpolate _cfgStereoIPD.Value.
-            _cfgStereo = Config.Bind("Vision", "Stereo", false, "Render left+right eye cameras and stitch into a side-by-side stereo image (requires vision-capable model)");
+            _cfgStereo = Config.Bind("Vision", "Stereo", true, "Render left+right eye cameras and stitch into a side-by-side stereo image (requires vision-capable model; harmless on a text-only model — images are dropped when the server can't see)");
             _cfgDisableReagentMessages = Config.Bind("General", "DisableReagentMessages", true, "Suppress reagent injection messages in log (default: true)");
             _cfgVision = Config.Bind("Vision", "Enabled", false, "Background vision CAPTION pass. When false the action model sees the first-person image directly instead of a caption (default: off — direct image is more useful than a lossy caption). Turn on only if your action model can't read images.");
-            _cfgMaxNPCs = Config.Bind("General", "MaxNPCs", 1, "Maximum number of entities the LLM can possess simultaneously (1-" + Consts.MaxNPCs + ")");
+            _cfgMaxNPCs = Config.Bind("General", "MaxNPCs", 4, "Maximum number of entities the LLM can possess simultaneously (1-" + Consts.MaxNPCs + ")");
             _cfgSpawnMissing = Config.Bind("General", "SpawnMissingKobolds", false,
                 "When the world has fewer free AI kobolds than MaxNPCs, spawn new AI kobold bodies (random genes, like the in-game dispenser) so the pool can fill up. " +
                 "Default OFF: the pool waits for bodies to show up naturally (deliveries, breeding, other mods) and claims each one as it appears. " +
@@ -519,16 +519,16 @@ namespace KKLLMNPC
                 "TOOLS: go_to(name or id or x,z, at) [PATHFINDING — use for ALL travel], walk(duration,turn_deg,run,strafe) [strafe=+right/-left; short nudges and squeezes only, never long trips], walk_ray(ray/ray_deg), survey(heading_deg,range) [probe a direction for what's there + ids], radar(filter) [re-print the north-up sonar map and set a persistent glyph filter: W,S,V,U,K,P letters or kind words, e.g. radar(filter='U,P') shows only stations+players; 'all' clears], look_around(sweep), look(yaw,pitch), jump, exit_station, crouch(0..1), move_to(x,z) [straight line, no pathfinding — avoid; prefer go_to], interact(id optional), grab(multi), drop, deliver(target) [walk carrying the held item to the context target, release there], throw [hurl/activate what you hold: throws items in view direction ~10 m/s, sprays the water bucket, squirts the can, fires tools; look to aim, jump right before for range], vore_target(target) [YOUR own entry hole for swallows you start: mouth|anal|pussy|dick|nipple; no-arg = ask; 'off' = follow the human again], vore_mode(mode) [YOUR own fate for your meals: egg|bellyegg|grow|destroy; no-arg = ask; 'off' = follow the human again], eat_player [SwallowAgentEat: swallow the LOCAL PLAYER whole when they're close — see EATING THE PLAYER], say, emote(text) [*body language* — a non-speech action line], buy(name or id) [buy the purchasable within reach: machine contract, kobold dispenser, or shop item — your OWN coins, shown in economy perception], remember(mem=fact) [facts are STICKY knowledge — name the thing and its durable place or lesson ('bed is upstairs', 'the blender is in the kitchen', 'the mail machine sells kobolds — never near it'); viewer-relative facts ('to my left', 'behind me', 'the door is here') are REFUSED — they go stale the moment anything moves], report_issue(msg) [when a tool keeps failing, an output contradicts reality, or something frustrates you and you can't work around it — file ONE line for the human maintainers: what broke + what you tried; they read it between sessions; don't spam it], status, none. 'plan' lets you queue up to 8 actions with 'wait' pauses. Keep moving; don't idle. " +
                   "LEGEND — rays: k=entity p=player u=usable w=wall s=low sill/window (step-over, harmless) v=window/glass (solid, don't walk through it) n=nothing; rows p=d(own)/l(evel)/u(p); named hits report bounds (w/l/h = meters across/forward/tall, and x/y/z + f = world position and facing degrees); big tall w=wall, small h=furniture, k/p=living. radar glyphs: @ you, arrow=facing, W=wall S=sill V=window U=usable K=other-entity P=player .=clear — north-up, never rotates. look_around scans the view and lists what's in each sector. IMPORTANT: walls, ceilings, floors, beams, sills and distant furniture are just BACKGROUND architecture — never comment on, narrate, or get excited about them; they matter only when they actually block your path or a target (then 'ground'/'clearance'/'blocked' say so). ",
                 "System persona prompt (blank = use built-in default)");
-            _cfgThinkInterval = Config.Bind("LLM", "ThinkInterval", 0.4f, "Seconds between perception/decision cycles");
+            _cfgThinkInterval = Config.Bind("LLM", "ThinkInterval", 0.1f, "Seconds between perception/decision cycles");
             _cfgSendImage = Config.Bind("LLM", "SendImage", true, "Attach a first-person JPEG to the action call when useful (vision model required)");
-            _cfgImageEvery = Config.Bind("LLM", "ImageEveryNTicks", 6, "Baseline: attach an image every N ticks even without a trigger");
+            _cfgImageEvery = Config.Bind("LLM", "ImageEveryNTicks", 2, "Baseline: attach an image every N ticks even without a trigger");
             _cfgImageOnBump = Config.Bind("LLM", "ImageOnBump", true, "Attach a fresh image right after blocked/bump so the model sees what stopped it");
             _cfgImageOnTurn = Config.Bind("LLM", "ImageOnTurn", true, "Attach an image after large turns (>=30 deg) so it sees the new view");
             _cfgImageHistory = Config.Bind("LLM", "ImageHistory", 3, "Number of past frames to attach alongside the current one (0 = current only)");
-            _cfgMaxTokens = Config.Bind("LLM", "MaxTokens", 1024, "Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON)");
-            _cfgTemperature = Config.Bind("LLM", "Temperature", 0.3f, "Sampling temperature (lower = faster, more deterministic)");
-            _cfgStepDelay = Config.Bind("LLM", "PlanStepDelay", 0.35f, "Seconds between each action in a chained plan");
-            _cfgMaxPlan = Config.Bind("LLM", "PlanMaxSteps", 8, "Max actions the model may queue in one response (hard cap)");
+            _cfgMaxTokens = Config.Bind("LLM", "MaxTokens", 18096, "Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON)");
+            _cfgTemperature = Config.Bind("LLM", "Temperature", 0.8f, "Sampling temperature (lower = faster, more deterministic; 0.8 = livelier roleplay)");
+            _cfgStepDelay = Config.Bind("LLM", "PlanStepDelay", 2f, "Seconds between each action in a chained plan");
+            _cfgMaxPlan = Config.Bind("LLM", "PlanMaxSteps", 2, "Max actions the model may queue in one response (hard cap)");
             _cfgCommentEvery = Config.Bind("LLM", "CommentEveryNTicks", 5, "Every N ticks, invite a free 'comment' — the model voices its own take on surroundings (0 = off)");
             _cfgCommentTemp = Config.Bind("LLM", "CommentTemp", 0.9f, "Sampling temperature for free commentary");
             _cfgChatLogLines = Config.Bind("LLM", "ChatLogLines", 20, "Feed the last N lines of the game's chat log to the model each turn (full conversation + NPC speech). 0 = off");
@@ -574,12 +574,12 @@ namespace KKLLMNPC
             _cfgVisTemperature = Config.Bind("VisionModel", "Temperature", 0.2f,
                 "Sampling temperature for the spatial caption pass (was hardcoded 0.2). Spatial-reasoner models like ZDTaichu want this at 0 — their card recommends temp 0 + top_p 0.95 + top_k 20 for grounding (they don't emit top_k/top_p through chat APIs unless the server exposes them).");
             _cfgVisionDebug = Config.Bind("Vision", "DebugDumpFrames", true, "Write the exact JPEG given to the vision model to BepInEx/plugins/KKLLMNPC_frames/ so you can inspect what the NPC 'sees'");
-            _cfgRayCount = Config.Bind("Senses", "RayCount", 9, "Number of rays across the frustum fan");
-            _cfgRayRange = Config.Bind("Senses", "RayRange", 25f, "Raycast range (m)");
+            _cfgRayCount = Config.Bind("Senses", "RayCount", 18, "Number of rays across the frustum fan");
+            _cfgRayRange = Config.Bind("Senses", "RayRange", 32f, "Raycast range (m)");
             _cfgAutoFindRange = Config.Bind("Senses", "AutoFindRange", 60f, "Radius to look for an entity to hijack");
             _cfgRadarEnabled = Config.Bind("Senses", "RadarEnabled", true, "Add the north-up ASCII sonar map to perception (top edge is ALWAYS north/+Z — it never rotates with facing; the facing arrow beside @ shows current heading). Off = smaller payload + avoids models misreading radar symbols (wall 'W', entity 'K') as living figures staring at them");
-            _cfgRadarSize = Config.Bind("Senses", "RadarSize", 10, "Radar half-grid size in cells (grid is a (2*N+1) square)");
-            _cfgRadarScale = Config.Bind("Senses", "RadarScale", 1.2f, "Radar meters per cell");
+            _cfgRadarSize = Config.Bind("Senses", "RadarSize", 30, "Radar half-grid size in cells (grid is a (2*N+1) square)");
+            _cfgRadarScale = Config.Bind("Senses", "RadarScale", 0.25f, "Radar meters per cell");
             _cfgAIReportLog = Config.Bind("Debug", "AIReportLog", true,
                 "AI bug reports: when an NPC calls report/report_issue('what's broken'), append a block (message + position + facing + its last tool calls) to BepInEx/config/kkllmnpc_ai_reports.log. Read it between sessions — it's the agents telling you which tools frustrate them. Off = reports only reach the BepInEx console log.");
             _cfgImageSize = Config.Bind("Senses", "ImageSize", 192, "Square first-person render size (px)");
@@ -607,7 +607,7 @@ namespace KKLLMNPC
                 "Ticks before a fact decays out of context if the model hasn't re-asserted it (0 = facts never decay). ~900 ≈ several minutes; lower = faster forgetting. World-map facts the model re-remembers survive.");
             _cfgFactMaxAge = Config.Bind("Memory", "FactMaxAgeHours", 72f,
                 "Cross-session age prune (HOURS of real time): a fact not re-remembered within this many hours drops from memory even across saves — finished business stops haunting new sessions. 0 = off. Exempt: identity notes (me:/name:) and the latest player_wants. Old save files get their fact ages backfilled from each record's save stamp, so the first boot after updating already cleans up.");
-            _cfgParallelCalls = Config.Bind("LLM", "ParallelCalls", 2,
+            _cfgParallelCalls = Config.Bind("LLM", "ParallelCalls", 8,
                 "Max simultaneous LLM HTTP calls made toward the endpoint by the whole mod (every NPC competes for a serial local server otherwise — the burst was the source of most 'WebException(Timeout)' log spam; extra calls queue). 0 = unlimited. 2 is right for llama.cpp/KoboldCpp/solo-GPU LM Studio; raise for >1-slot servers.");
             _cfgIdentityBot = Config.Bind("Multiplayer", "IdentityBot", false,
                 "Run a second Photon client in the room under the NPC's own name so its chat renders as 'KoboldName: text' to EVERYONE (not attributed to you). OFF = safe default (chat shows 'YourName: KoboldName: text' to others). Opt-in: adds a room player, may affect player count / host logic.");
@@ -626,9 +626,9 @@ namespace KKLLMNPC
             // to return to the legacy push-perception loop.
             _cfgConsoleEnabled = Config.Bind("Console", "Enabled", true,
                 "Bash-like console mode (default ON): the model polls the game with commands (ls, cd, use, echo...) instead of receiving a big perception payload each tick. echo = speak. Set false for the legacy push-perception loop.");
-            _cfgConsoleMaxRounds = Config.Bind("Console", "MaxRounds", 3,
+            _cfgConsoleMaxRounds = Config.Bind("Console", "MaxRounds", 5,
                 "Max command rounds per think cycle (each round = one LLM call after reading the output). 1 = single shot, higher = more back-and-forth exploration.");
-            _cfgConsoleMaxTokens = Config.Bind("Console", "MaxTokens", 256,
+            _cfgConsoleMaxTokens = Config.Bind("Console", "MaxTokens", 4096,
                 "Max tokens per console reply (command lines are short — low is fast)");
             _cfgConsoleHistory = Config.Bind("Console", "HistoryMessages", 30,
                 "Rolling conversation window size (messages kept, system prompt always kept)");

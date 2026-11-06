@@ -154,6 +154,15 @@ namespace KKLLMNPC
         public const int VisionMaxCaptionTokens = 80;
         public const int VisionFrameCleanupMax = 40;
 
+        // ---- Commentary (unprompted musing worker) ----
+        public const float CommentaryHungTimeout = 120f;    // reset a wedged commentary flag after 2 min
+
+        // ---- Turn clock / anchor dedup ----
+        // Seconds between rebuilds of the "now:" clock line. The per-tick user message
+        // re-pastes the whole state anchor; if the clock string advanced every second
+        // it would defeat the anchor dedup, so we refresh it only on this coarse cadence.
+        public const float ClockRebuildInterval = 5f;
+
         // ---- Horniness ----
         public const float HornyClimbThreshold = 0.01f;
         public const float HornyStimDriven = 0.15f;

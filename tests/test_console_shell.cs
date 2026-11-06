@@ -620,6 +620,23 @@ static class ConsoleShellTests
         Assert(ConsoleShell.ToolCallToLine("nope", "{}") == null, "unknown tool name → null");
         // tool-name "id" vs args id:
         Assert(ConsoleShell.ToolCallToLine("use", "{\"id\":3}") == "use id:3", "id arg → id:3");
+
+        // Act-schema "params" is the argument container: it must flatten to real
+        // args, never stringify as the .NET type name. The 2026-11-04 playtest
+        // looped "echo System.Collections.Generic.Dictionary`2[...]" for turns
+        // because the params dict hit ToString() and the model parroted the line.
+        Assert(ConsoleShell.ToolCallToLine("say", "{\"action\":\"say\",\"params\":{\"text\":\"Hello! I am No.\"}}")
+            == "echo Hello! I am No.", "act-schema params dict flattens (no type name)");
+        Assert(ConsoleShell.ToolCallToLine("goal", "{\"action\":\"goal\",\"params\":{\"goal\":\"rest at bed\"}}")
+            == "goal rest at bed", "goal params flatten");
+        // Any other dict/list arg value renders as JSON data — a type name here
+        // would ride into the transcript as if the model had said it.
+        string dictArg = ConsoleShell.ToolCallToLine("goal", "{\"action\":\"goal\",\"data\":{\"k\":\"v\"}}");
+        Assert(dictArg != null && dictArg.Contains("{\"k\":\"v\"}") && !dictArg.Contains("System.Collections"),
+            "dict arg value renders as JSON, not a type name");
+        string listArg = ConsoleShell.ToolCallToLine("echo", "{\"action\":\"echo\",\"tags\":[\"a\",\"b\"]}");
+        Assert(listArg != null && listArg.Contains("[\"a\",\"b\"]") && !listArg.Contains("System.Collections"),
+            "list arg value renders as JSON, not a type name");
     }
 
     // ---- ConsoleTools.ToolCallMarkupLines: inline tool-call JSON recovery ----

@@ -7,18 +7,18 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
 | `Endpoint` | `http://127.0.0.1:11434/v1/chat/completions` | — | OpenAI-compatible chat completions URL. LM Studio default: `http://127.0.0.1:1234/v1/chat/completions` |
-| `Model` | `local-model` | — | Model name to request. LM Studio: use the exact model name from the Developer tab. KoboldCpp: `local-model` works. |
+| `Model` | `local-model` | — | Model name to request. Ollama: `local-model` or an installed tag like `ornith-1.5:35b` (the default-recommended model — see [docs/MODELS.md](MODELS.md)). LM Studio: use the exact model name from the Developer tab. KoboldCpp: `local-model` works. |
 | `ApiKey` | *(empty)* | — | Bearer token (may be empty for local servers) |
 | `SystemPrompt` | *(built-in)* | — | Override the default system prompt. A customized value always wins; otherwise `SystemPromptFile` is used if readable. |
 | `SystemPromptFile` | `system_prompt_default.txt` | — | Path to the full system prompt (relative to game dir, plugin dir, or CWD). Overrides the built-in prompt; ships in this repo. |
-| `ThinkInterval` | `0.4` | 0.05–10s | Seconds between perception/decision cycles |
+| `ThinkInterval` | `0.1` | 0.05–10s | Seconds between perception/decision cycles |
 | `Thinking` | `auto` | `auto`, `off` | Control the model's hidden reasoning (chain-of-thought). `off` requests suppression so answers start immediately — the biggest latency win on reasoning families, which otherwise burn their whole token floor on invisible analysis. Sends `think=false` (Ollama), `chat_template_kwargs {enable_thinking:false}` (llama.cpp / vLLM / SGLang, Qwen3-style templates) and `reasoning_budget=0` (llama.cpp hybrid models); servers that don't recognize a field skip it. LM Studio / KoboldCpp expose the toggle in their per-model GUI instead. Leftover reasoning markers are still stripped client-side. |
-| `MaxTokens` | `1024` | 64–32768 | Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON). Reasoning families automatically get a floor of `1024 + headroom` (Qwen/Bonsai/GLM +512 · Nemotron/Granite +768 · deepseek-style reasoners +1024 · unknown +256); your explicit value always stands when it is higher. |
-| `Temperature` | `0.3` | 0–2 | Sampling temperature (lower = faster, more deterministic) |
-| `PlanStepDelay` | `0.35` | 0.05–5s | Seconds between each action in a chained plan |
-| `PlanMaxSteps` | `8` | 1–8 | Max actions the model may queue in one response (hard cap) |
+| `MaxTokens` | `18096` | 64–32768 | Max response tokens (reasoning models burn tokens on analysis before the action — too low and the action dies mid-JSON). Reasoning families automatically get a floor of `18096 + headroom` (Qwen/Bonsai/GLM +512 · Nemotron/Granite +768 · deepseek-style reasoners +1024 · unknown +256); your explicit value always stands when it is higher. |
+| `Temperature` | `0.8` | 0–2 | Sampling temperature (lower = faster, more deterministic; 0.8 = livelier roleplay) |
+| `PlanStepDelay` | `2` | 0.05–5s | Seconds between each action in a chained plan |
+| `PlanMaxSteps` | `2` | 1–8 | Max actions the model may queue in one response (hard cap) |
 | `SendImage` | `true` | bool | Attach a first-person JPEG to the action call when useful (vision model required) |
-| `ImageEveryNTicks` | `6` | ≥1 | Baseline: attach an image every N ticks even without a trigger |
+| `ImageEveryNTicks` | `2` | ≥1 | Baseline: attach an image every N ticks even without a trigger |
 | `ImageOnBump` | `true` | bool | Attach a fresh image right after blocked/bump so the model sees what stopped it |
 | `ImageOnTurn` | `true` | bool | Attach an image after large turns (≥30 deg) so it sees the new view |
 | `ImageHistory` | `3` | 0–10 | Number of past frames to attach alongside the current one (0 = current only) |
@@ -34,7 +34,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
-| `ParallelCalls` | `2` | 0–8 | Max simultaneous LLM HTTP calls the whole mod makes toward the endpoint. Local llama.cpp/KoboldCpp/solo-GPU LM Studio servers answer serially — with several NPCs posting at once, burst calls starved into `WebException(Timeout)` warnings (the dominant log noise). Extra calls now QUEUE inside the mod (fail-open after two minutes). `0` = unlimited; raise it for multi-slot servers. |
+| `ParallelCalls` | `8` | 0–8 | Max simultaneous LLM HTTP calls the whole mod makes toward the endpoint. Local llama.cpp/KoboldCpp/solo-GPU LM Studio servers answer serially — with several NPCs posting at once, burst calls starved into `WebException(Timeout)` warnings (the dominant log noise). Extra calls now QUEUE inside the mod (fail-open after two minutes). `0` = unlimited. Default raised to 8 for multi-NPC / multi-slot servers; lower it (e.g. 2) for a single-GPU serial box to avoid timeouts. |
 
 ### External host (Ollama)
 
@@ -42,23 +42,26 @@ The mod talks to any OpenAI-compatible endpoint via `[LLM].Endpoint` (above). Fo
 box, **Ollama** is the recommended host: it ships its own model library and an OpenAI-compatible
 `/api/chat` interface, and — because the game can't launch a GPU server under Steam Proton —
 the mod can **adopt** an already-running Ollama as its live endpoint instead of the
-hard-coded `[LLM].Endpoint`, and hot-swap the served model without touching config. Enable it
-with the toggle in the WebUI's **AI server** tab, or set `[Ollama].Enabled` here:
+hard-coded `[LLM].Endpoint`, and hot-swap the served model without touching config. Adoption is
+**ON by default** (v1.2.3): the mod watches your Ollama for models and, with `AutoEndpoint` on
+(also default), routes the action model through it. Turn it off entirely with `[Ollama].Enabled`
+if you'd rather point `[LLM].Endpoint` at any server. With no Ollama running it just idles
+(`healthy=false`) — a fresh install is unaffected. Toggle it in the WebUI's **AI server** tab:
 
 ```ini
 [Ollama]
-Enabled      = false           ; adopt an externally-running Ollama as the live endpoint
+Enabled      = true            ; adopt an externally-running Ollama as the live endpoint (default ON)
 Endpoint     = http://127.0.0.1:11434
-AutoEndpoint = false           ; route LLM + vision-fallback POSTs to the adopted Ollama
+AutoEndpoint = true            ; route LLM + vision-fallback POSTs to the adopted Ollama (default ON)
 SelectedModel=                ; what 'Use this model' picked; also writes [LLM].Model
 PollIntervalSec = 10
 ```
 
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
-| `Enabled` | `false` | bool | Adopt an externally-running Ollama. Off = don't touch Ollama; use `[LLM].Endpoint` like any other server. |
+| `Enabled` | `true` | bool | Adopt an externally-running Ollama. ON by default (v1.2.3): the mod watches your Ollama for models and can route the action model through it. Off = don't touch Ollama; use `[LLM].Endpoint` like any other server. Idles harmlessly when no Ollama is running. |
 | `Endpoint` | `http://127.0.0.1:11434` | — | Ollama base URL (host:port). A full `/v1/chat/completions` suffix is accepted and stripped. The WebUI tab installs models here with `ollama pull <model>` then `ollama run <model>`. |
-| `AutoEndpoint` | `false` | bool | When an Ollama is adopted + healthy, route LLM + vision-fallback POSTs to it regardless of `[LLM].Endpoint` (hand-off with no config editing after a restart). Off = the configured endpoint stays the truth. |
+| `AutoEndpoint` | `true` | bool | When an Ollama is adopted + healthy, route LLM + vision-fallback POSTs to it regardless of `[LLM].Endpoint` (hand-off with no config editing after a restart). ON by default so the adopted Ollama is the live endpoint. Off = the configured endpoint stays the truth. |
 | `PollIntervalSec` | `10` | — | How often the watcher probes the Ollama `/api/tags` + `/api/show`. |
 | `SelectedModel` | *(empty)* | — | The Ollama model the WebUI 'Use this model' picked. Writing this also writes `[LLM].Model` so it takes effect on the next chat POST. Empty = use the model Ollama is currently serving. |
 
@@ -75,7 +78,7 @@ so pointing back at any other endpoint is a one-line config change.
 | `Prompt` | *(built-in)* | — | Scene-report + navigation instruction for the vision pass |
 | `PromptFile` | `system_prompt_vision.txt` | — | Chat template for the vision caption pass (relative to game dir, plugin dir, or CWD). Placeholder `{stereo}` expands to the stereo-vision clause (only when `Enabled` is on, with `StereoIPD`). An existing file overrides the built-in text; ships in this repo. A customized `Prompt` still wins over the file. |
 | `DebugDumpFrames` | `true` | bool | Write the exact JPEG given to the vision model to `BepInEx/plugins/KKLLMNPC_frames/` for inspection |
-| `Stereo` | `false` | bool | Render left+right eye cameras and stitch into a side-by-side stereo image (requires vision-capable model) |
+| `Stereo` | `true` | bool | Render left+right eye cameras and stitch into a side-by-side stereo image (ON by default; requires a vision-capable model — harmless on a text-only model, the image is dropped when the server can't see) |
 | `StereoIPD` | `0.063` | — | Inter-pupillary distance in meters (distance between left and right camera) |
 
 ## [VisionModel] — Separate Vision Model
@@ -92,12 +95,12 @@ so pointing back at any other endpoint is a one-line config change.
 
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
-| `RayCount` | `9` | ≥2 | Number of rays across the frustum fan |
-| `RayRange` | `25` | 1–100m | Raycast range (m) |
+| `RayCount` | `18` | ≥2 | Number of rays across the frustum fan |
+| `RayRange` | `32` | 1–100m | Raycast range (m) |
 | `AutoFindRange` | `60` | 1–500m | Radius to look for an entity to hijack |
 | `RadarEnabled` | `true` | bool | Add the north-up ASCII sonar map to perception (top edge is ALWAYS north/+Z — it never rotates with facing; the facing arrow beside `@` shows heading). Off = smaller payload + avoids models misreading radar symbols (wall 'W', entity 'K') as living figures |
-| `RadarSize` | `10` | 3–30 | Radar half-grid size in cells (grid is a (2*N+1) square) |
-| `RadarScale` | `1.2` | 0.1–10m | Radar meters per cell |
+| `RadarSize` | `30` | 3–30 | Radar half-grid size in cells (grid is a (2*N+1) square) |
+| `RadarScale` | `0.25` | 0.1–10m | Radar meters per cell |
 | `ImageSize` | `192` | 32–2048px | Square first-person render size (px) |
 | `ImageQuality` | `50` | 1–100 | JPEG quality (lower = smaller file, faster transfer) |
 | `CameraNearClip` | `0.10` | 0.01–10m | Camera near clip (m) — raise if you see the inside of the head |
@@ -157,8 +160,8 @@ so pointing back at any other endpoint is a one-line config change.
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
 | `Enabled` | `true` | bool | Bash-like console mode: the model polls the game with commands (`ls`, `cd`, `use`, `echo`…) instead of receiving a big perception payload each tick — smaller payloads, no overload, and it asks for exactly the data it needs. `echo` = speak. `false` = legacy push-perception act-JSON loop. |
-| `MaxRounds` | `3` | 1–8 | Command rounds per think cycle (each round = one LLM call after reading the output). |
-| `MaxTokens` | `256` | — | Max tokens per console reply (command lines are short — low is fast). |
+| `MaxRounds` | `5` | 1–8 | Command rounds per think cycle (each round = one LLM call after reading the output). |
+| `MaxTokens` | `4096` | — | Max tokens per console reply (command lines are short — low is fast). |
 | `HistoryMessages` | `30` | 6–120 | Rolling conversation window (system prompt always kept). When the window trims, the dropped span is replaced by one compact `[session memory]` digest (first/last highlights) instead of vanishing — the story survives context trims. |
 | `NativeTools` | `true` | bool | Declare the console commands as an OpenAI tools array in every console request. Tool-aware servers (llama.cpp --jinja, LM Studio, vLLM, Ollama, KoboldCpp) then return real `tool_calls` — deterministic commands with real arguments, one call per command, a multi-call reply executed as a multi-command turn — instead of garbled `<tool_call>` markup in free text. Servers without tool support ignore the field or are fenced off automatically on the first 400 (300 s pause), with the text parsers + markup salvage as the fallback. Disable if your server errors on unknown payload fields. |
 | `AutoScreenshotTicks` | `6` | 0– | Attach the NPC's first-person view automatically every N turns (vision-capable models, when it actually moved/turned; also right after a stuck streak). With `[DataRecord] Enabled`, text-only runtime models ALSO capture at this cadence for the training record (`frame_ref` on the turn) — payloads stay text-only. |
@@ -175,7 +178,7 @@ so pointing back at any other endpoint is a one-line config change.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `MaxNPCs` | `1` | Maximum number of entities the LLM can possess simultaneously (1–8) |
+| `MaxNPCs` | `4` | Maximum number of entities the LLM can possess simultaneously (1–8) |
 | `SpawnMissingKobolds` | `false` | When the world has fewer free AI kobolds than `MaxNPCs`, spawn fresh AI kobold bodies (random genes, like the in-game dispenser) so the pool can fill up. A vanilla world only ever holds the starting pair — more kobolds otherwise come only from paid deliveries or breeding. Default OFF: the pool just waits for bodies to appear naturally (deliveries, breeding, other mods) and claims each one as it appears. Spawned kobolds are ordinary room objects and persist in the farm save. Needs the master client (always the local player in single player). |
 | `DisableReagentMessages` | `true` | Suppress reagent injection messages in log |
 | `BlockedScenes` | `MainMenu,Loading,ErrorScene` | Comma-separated scene names where the LLM stays idle |

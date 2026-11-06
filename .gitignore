@@ -3,3 +3,5 @@ KKLLMNPC.dll
 .vscode/*dist/
 dist/*
 __pycache__/
+.bepinex-cache/
+.zcode/
