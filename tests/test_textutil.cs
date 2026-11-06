@@ -137,7 +137,33 @@ internal static class TestTextUtil
         RpPlaceholders();
         RpResponseBlockDetector();
         ConsoleThoughtContainment();
+        SanitizeShorten();
         Environment.Exit(_failed);
+    }
+
+    // ---- Sanitize + Shorten (moved here from Llm.cs/Console.cs for the headless turn engine) ----
+
+    static void SanitizeShorten()
+    {
+        // Sanitize: paired surrogates pass, lone ones become '?'.
+        string pair = "ok \U0001F600 end"; // valid emoji surrogate pair (😀)
+        Assert(TextUtil.Sanitize(pair) == pair, "paired surrogate passthrough");
+        string lone = "a" + (char)0xD800 + "b"; // lone high surrogate
+        Assert(TextUtil.Sanitize(lone) == "a?b", "lone high surrogate -> ?");
+        string loneLow = "a" + (char)0xDC00 + "b"; // lone low surrogate
+        Assert(TextUtil.Sanitize(loneLow) == "a?b", "lone low surrogate -> ?");
+        Assert(TextUtil.Sanitize(null) == null && TextUtil.Sanitize("") == "", "null/empty passthrough");
+        Assert(TextUtil.Sanitize("plain") == "plain", "plain passthrough");
+
+        // Shorten: newline collapse + ellipsis cap.
+        Assert(TextUtil.Shorten("two\nlines", 40) == "two lines", "newline collapsed");
+        Assert(TextUtil.Shorten("a\r\nb", 40) == "a  b", "CR and LF each collapsed (CRLF → two spaces)");
+        string long1 = new string('x', 50);
+        Assert(TextUtil.Shorten(long1, 10) == new string('x', 10) + "...", "long string capped with ellipsis");
+        Assert(TextUtil.Shorten("short", 10) == "short", "short string untouched");
+        Assert(TextUtil.Shorten(null, 10) == "", "null -> empty");
+
+        Console.WriteLine("textutil: SanitizeShorten passed");
     }
 
     // ---- {{user}}/{{char}} RP placeholder substitution ----

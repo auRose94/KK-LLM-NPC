@@ -37,48 +37,31 @@ namespace KKLLMNPC
         // Rolling conversation: [{role, content}] where content is a string or an
         // array of parts (text + image_url) for screenshot output.
         private List<Dictionary<string, object>> _consoleMsgs;
-        private int _consoleProseStreak;
-        // Identical-reply guard (roleplay-locked models re-send the same prose).
-        private string _consoleLastAssistantReply;
-        private int _consoleRepeatStreak;
-        // Star-narration reminder throttle (blocks that *walk somewhere*).
-        private float _lastStarNudgeTime;
-        // How many times the garbled-markup salvage fired (throttled raw sampling).
-        private int _salvageFires;   // consecutive replies with no command lines
-        private int _consoleEmptyStreak;   // consecutive empty replies
-        private string _consoleLastCmdKey; // "cmd:arg1,arg2" for stuck detection
-        private int _consoleStuckCount;
-        private bool _consoleStuckBreak;   // hard cap reached — end the turn this cycle
+        // Console turn-loop state (streaks, throttles, anchor dedup) lives in
+        // ConsoleTurnState — see ConsoleTurnCore.cs, the headless turn engine this
+        // file wires up. CmdSleep flips _turn.Slept; MaybeAutoScreenshot reads
+        // _turn.StuckCount; the state anchor reads _turn.ClockLine.
+        private readonly ConsoleTurnState _turn = new ConsoleTurnState();
+        // How many times the garbled-markup salvage fired (throttled raw sampling;
+        // bumped by the turn engine via IConsoleTurnEnv.NoteSalvage).
+        private int _salvageFires;
         private List<string> _consoleRecentCmds; // recent command strings for similarity check
         private string _pendingShotB64;    // image to attach to the next output message
         private string _recorderShotB64;   // [DataRecord]-only frame (text-only runtime): RecordTurn consumes it, it never enters the payload
-        private bool _consoleSlept;        // `sleep` ran — end the cycle
         // `sleep [secs]` wake-up time (Time.unscaledTime, 0 = awake). Skipped by the
         // LLM loop between turns; volatile because wake triggers write it from the
         // main thread (chat, world events) while the loop reads it on the LLM thread.
         private volatile float _sleepUntilTime;
-        private int _consoleCmdsThisCycle;
-        private const int ConsoleMaxCmdsPerCycle = 12;
-        private float _lastIdleChatterNudge; // talking-to-no-one nudge throttle
-        // Lines of the last user (terminal) message, for transcript-echo skipping.
-        private HashSet<string> _echoSet;
         // Auto-view cadence state (MaybeAutoScreenshot).
         private int _consoleTurnsSinceShot;
         private Vector3 _lastShotPos;
         private float _lastShotYaw;
-        // TURN CLOCK (state anchor): session time now + the gap since the previous
-        // turn's prompt — the model SEES the world-time its thinking burns, so it
-        // can't get lost in thought ("now: 00:14:32 (+2m07s since your last turn…)").
-        private float _lastTurnStampT;
-        private string _turnClockLine;
-        // TURN-CLOCK + ANCHOR DEDUP (2026-11-04): the per-tick user message re-pasted
+        // TURN CLOCK + ANCHOR DEDUP (2026-11-04): the per-tick user message re-pasted
         // the whole state anchor (clock + goal + needs + …) every ~0.4s even when
         // nothing changed — the "now events" log/transcript flood. The clock string is
         // rebuilt only at ClockRebuildInterval so its per-second churn can't defeat the
         // anchor dedup; the anchor itself is re-emitted only when it (or fresh events)
-        // changed since the last turn.
-        private float _lastClockRebuildT;
-        private string _lastEmittedAnchor;
+        // changed since the last turn. (State: ConsoleTurnState.)
 
         // ------------------------------------------------------------------
         // SCRATCH BUFFER — the agent's personal, sandboxed notepad. Pure text,
@@ -151,7 +134,7 @@ namespace KKLLMNPC
                 yaw = BodyYaw();
             }
             catch (Exception) { return; }
-            bool stuckNow = _consoleStuckCount >= 2;
+            bool stuckNow = _turn.StuckCount >= 2;
             if (!stuckNow)
             {
                 if (_consoleTurnsSinceShot < every) { _consoleTurnsSinceShot++; return; }
@@ -172,46 +155,6 @@ namespace KKLLMNPC
             catch (Exception) { }
         }
 
-        // Trimmed, non-empty lines of a terminal-bearing user message.
-        private static HashSet<string> LastUserLineSet(string text)
-        {
-            var set = new HashSet<string>(StringComparer.Ordinal);
-            if (text == null) return set;
-            foreach (var l in text.Split('\n'))
-            {
-                string t = l.Trim();
-                if (t.Length > 0) set.Add(t);
-            }
-            return set;
-        }
-
-        // Drop the lines of a reply that verbatim-copy the last user message's terminal
-        // (with or without their "$" prefix). Returns the surviving reply text and the
-        // number of echoes removed. Degenerate completion-flavored models otherwise keep
-        // re-executing the transcript against themselves.
-        private string FilterTranscriptEcho(string reply, out int echoCount)
-        {
-            echoCount = 0;
-            var set = _echoSet;
-            if (string.IsNullOrEmpty(reply) || set == null || set.Count == 0) return reply;
-            var keep = new System.Text.StringBuilder();
-            foreach (var rawLine in reply.Split('\n'))
-            {
-                string t = rawLine.Trim();
-                if (t.Length == 0) { keep.Append(rawLine).Append('\n'); continue; }
-                t = TextUtil.ScrubTypeNames(t);
-                string bare = t.TrimStart('$', '>', '#').Trim();
-                if (set.Contains(t) || (bare.Length > 0 && set.Contains(bare)))
-                {
-                    echoCount++;
-                    continue;
-                }
-                keep.Append(rawLine).Append('\n');
-            }
-            if (echoCount == 0) return reply;
-            return keep.ToString();
-        }
-
         // ------------------------------------------------------------------
         // config / mode
         // ------------------------------------------------------------------
@@ -229,13 +172,13 @@ namespace KKLLMNPC
             _consoleMsgs = new List<Dictionary<string, object>>();
             AddConsoleMsg("system", ConsoleSystemPrompt());
             AddConsoleMsg("user", BootLine());
-            _consoleProseStreak = 0;
-            _consoleEmptyStreak = 0;
-            _consoleLastCmdKey = null;
-            _consoleStuckCount = 0;
+            _turn.ProseStreak = 0;
+            _turn.EmptyStreak = 0;
+            _turn.LastCmdKey = null;
+            _turn.StuckCount = 0;
             _consoleRecentCmds = new List<string>();
-            _consoleLastAssistantReply = null;
-            _consoleRepeatStreak = 0;
+            _turn.LastAssistantReply = null;
+            _turn.RepeatStreak = 0;
             Logger.LogInfo("[" + MyName() + "] console initialized (bash-like REPL mode)");
         }
 
@@ -575,7 +518,7 @@ namespace KKLLMNPC
         {
             var parts = new List<string>();
             // The turn clock leads: time pressure is the first thing the model reads.
-            if (!string.IsNullOrEmpty(_turnClockLine)) parts.Add(_turnClockLine);
+            if (!string.IsNullOrEmpty(_turn.ClockLine)) parts.Add(_turn.ClockLine);
             // Live intimacy first — mid-play it outranks everything. Console had no
             // perception payload, so being entered/loaded reached the model only via
             // much-later belly/egg numbers.
@@ -656,7 +599,7 @@ namespace KKLLMNPC
             // own break when it resumes.
             float sleptLeft = _sleepUntilTime - Time.unscaledTime;
             if (sleptLeft > 0f) parts.Add("sleeping: " + Mathf.CeilToInt(sleptLeft) + "s left (turn deferred, chat wakes you)");
-            if (_consoleProseStreak >= 2 && !_consoleLastReplyWasBlock) parts.Add("REPLY WITH COMMAND LINES ONLY — try: help (a roleplay/dialogue block is also accepted: it is sent to chat; private reasoning goes in think <text>)");
+            if (_turn.ProseStreak >= 2 && !_turn.LastReplyWasBlock) parts.Add("REPLY WITH COMMAND LINES ONLY — try: help (a roleplay/dialogue block is also accepted: it is sent to chat; private reasoning goes in think <text>)");
             if (parts.Count == 0) return "";
             return string.Join(" | ", parts.ToArray()) + "\n";
         }
@@ -681,14 +624,14 @@ namespace KKLLMNPC
             try
             {
                 string whisper = RecentWhisper();
-                if (whisper != null) sb.Append("[whisper] ").AppendLine(Sanitize(whisper));
+                if (whisper != null) sb.Append("[whisper] ").AppendLine(TextUtil.Sanitize(whisper));
             }
             catch (Exception) { }
             try
             {
                 var evs = DrainReagentEvents();
                 if (evs != null)
-                    foreach (var ev in evs) sb.Append("[event] ").AppendLine(Sanitize(ObjText(ev)));
+                    foreach (var ev in evs) sb.Append("[event] ").AppendLine(TextUtil.Sanitize(ObjText(ev)));
             }
             catch (Exception) { }
             try
@@ -699,7 +642,7 @@ namespace KKLLMNPC
                 var world = DrainWorldEvents();
                 if (world != null)
                     foreach (var w in world)
-                        if (w != null) sb.Append("[event] ").AppendLine(Sanitize(ObjText(w)));
+                        if (w != null) sb.Append("[event] ").AppendLine(TextUtil.Sanitize(ObjText(w)));
             }
             catch (Exception) { }
             // SIBLING PROXIMITY nudge: a second, short-cooldown trigger alongside
@@ -736,7 +679,7 @@ namespace KKLLMNPC
                 if (gap > 0f)
                 {
                     float now = Time.unscaledTime;
-                    if (now - Math.Max(_lastTriggerTime, _lastInitiativeAt) > gap)
+                    if (now - Math.Max(_turn.LastTriggerT, _lastInitiativeAt) > gap)
                     {
                         _lastInitiativeAt = now;
                         string cue = "you've had nobody talking to you for a while — this is YOUR OWN time: pick your own next thing (go somewhere with cd, work your goal, explore, tend needs) and if you have something worth saying, say it aloud — nearby kobolds and the player can hear you";
@@ -819,481 +762,69 @@ namespace KKLLMNPC
         {
             try
             {
-                // No endpoint: don't churn the transcript with prompts nobody can answer.
-                // Circuit breaker open: the wait already happened in the LLM loop — just
-                // skip, and the state anchor (next healthy turn) tells the model why.
-                if (string.IsNullOrEmpty(Endpoint())) return;
-                if (Time.unscaledTime < _endpointBlockUntil) return;
-                if (_consoleMsgs == null) InitConsoleConversation();
-                _consoleSlept = false;
-                _consoleCmdsThisCycle = 0;
-                _unknownLinesThisCycle = 0;   // fresh cycle: no unknown-command escalation yet
-                _consoleStuckBreak = false;
-
-                // TURN CLOCK: stamp this turn with the session time and the gap
-                // since the previous turn's prompt. The anchor carries it, so the
-                // model sees time passing between its ticks — wall-clock pressure
-                // against getting lost in thought ("… +2m07s since your last turn —
-                // think, then ACT").
-                float stampNow = Time.unscaledTime;
-                float sinceLast = _lastTurnStampT > 0f ? stampNow - _lastTurnStampT : 0f;
-                _lastTurnStampT = stampNow;
-                // Rebuild the clock string only every ClockRebuildInterval seconds — its
-                // per-second advance otherwise defeats the anchor dedup below (the model
-                // still reads the same time, just a few seconds stale).
-                if (_lastClockRebuildT <= 0f || stampNow - _lastClockRebuildT >= Consts.ClockRebuildInterval)
-                {
-                    _lastClockRebuildT = stampNow;
-                    float elapsed = stampNow - _sessionStartTime;
-                    if (elapsed < 0f) elapsed = 0f;
-                    int hh = (int)(elapsed / 3600f), mm = (int)((elapsed % 3600f) / 60f), ss = (int)(elapsed % 60f);
-                    var clock = new StringBuilder().Append("now: ")
-                        .Append(hh.ToString("00")).Append(':').Append(mm.ToString("00")).Append(':').Append(ss.ToString("00"));
-                    if (sinceLast > 20f)
-                    {
-                        clock.Append(" (+");
-                        if (sinceLast >= 90f)
-                            clock.Append((int)(sinceLast / 60f)).Append('m');
-                        else
-                            clock.Append(sinceLast.ToString("0", CultureInfo.InvariantCulture)).Append('s');
-                        clock.Append(" since your last turn — time is passing; think, then ACT)");
-                    }
-                    _turnClockLine = clock.ToString();
-                }
-
-                // Auto-view: give the model its eyes (config [Console] AutoScreenshotTicks).
-                MaybeAutoScreenshot();
-
-                // World events (player chat, reagent events) + state anchor + prompt.
-                // events MUST be drained every tick (the queues are consumed) even when
-                // we skip re-emitting the anchor — otherwise events would be lost.
-                string events = DrainConsoleEvents();
-                string anchor = StateAnchorLine();
-
-                // DEDUP (2026-11-04): only re-paste the full state anchor when it (or
-                // fresh events) actually changed since the last turn. An idle tick where
-                // nothing moved sends a bare poll so the model is still prompted to act —
-                // the last real anchor stays in the transcript for context — but the
-                // bulky anchor isn't re-sent every ~0.4s. That per-tick re-emission was
-                // the "now events" flood (the log/transcript grew a full state dump each
-                // tick whether or not anything changed).
-                string userText;
-                bool anchorChanged = !string.Equals(anchor, _lastEmittedAnchor, StringComparison.Ordinal);
-                if (events.Length > 0 || anchorChanged)
-                {
-                    userText = events + anchor + "$\n";
-                    _lastEmittedAnchor = anchor;
-                }
-                else
-                {
-                    userText = "$\n"; // bare poll: nothing new since the last turn
-                }
-                AddConsoleMsg("user", userText);
-                TrimConsoleConversation(); // tick-boundary trim: the idle ENTER loop (empty replies short-circuit every other trim call) must never outgrow the window
-
-                int maxRounds = _cfgConsoleMaxRounds != null ? _cfgConsoleMaxRounds.Value : 3;
-                maxRounds = Math.Max(1, Math.Min(8, maxRounds));
-                bool nudgedNoCmd = false;
-                // A trigger this turn = something spoken TO the NPC ([chat]/[event]).
-                // Response blocks (rp prose) speak freely on a trigger; without one the
-                // solo voice is throttled to the idle-chatter cadence so a block never
-                // becomes a monologue.
-                bool hadTrigger = events.Length > 0;
-                if (hadTrigger) _lastTriggerTime = Time.unscaledTime;
-                // The last user message's lines — a degenerate reply COPIES the terminal
-                // ("$ ls" + output rows + even the state anchor) instead of speaking.
-                // Copied lines are dropped before parsing so they can't re-execute (an
-                // anchor copy once got stored as the literal goal "(none yet) | awake:
-                // 0h03m" and echoed in every later anchor). Track the lines actually
-                // emitted (the dedup may have sent a bare poll).
-                _echoSet = LastUserLineSet(userText);
-
-                for (int round = 0; round < maxRounds && _running; round++)
-                {
-                    string reply = QueryConsoleModel();
-                    if (reply == null) return; // endpoint problem — loop backs off and retries
-                    // Whether THIS reply was harvested from the reasoning channel —
-                    // captured now, before anything else can touch the flag.
-                    bool promotedReasoning = _lastReplyWasPromotedReasoning;
-                    reply = Sanitize(reply).Trim();
-                    // Reasoning markers must never reach command-line parsing — strip
-                    // first so reasoning-only replies land in the empty-streak path.
-                    reply = ModelFamilies.StripThinkBlocks(reply);
-                    // Models that invent tool-call markup ("ls<|whoami?<k>sleep]") put
-                    // their whole command queue inside it — recover those commands as
-                    // lines instead of letting the markup ride inside speech.
-                    string salvaged = ConsoleSalvage.Clean(reply);
-                    if (salvaged != reply)
-                    {
-                        // Diagnosis hook: the log kept saying "recovered" without every
-                        // showing WHAT the model wrote — sample the raw reply (throttled)
-                        // so the next garbled shape names itself.
-                        _salvageFires++;
-                        if (_salvageFires % 10 == 1)
-                            Logger.LogWarning("[" + MyName() + "] garbled tool-markup #" + _salvageFires
-                                + " raw reply: " + Shorten(reply, 300));
-                        else
-                            Logger.LogInfo("[" + MyName() + "] console: recovered command lines from garbled tool-markup");
-                    }
-                    reply = salvaged;
-
-                    // IDENTICAL-REPEAT guard: a roleplay-locked model re-sends the same
-                    // prose (same opening scene, greedy sampling) every round; re-adding
-                    // it turns the transcript into a wall of the same paragraph and
-                    // starves everything else. First repeat: note it while executing
-                    // (it might be a legitimate retry); from the second one onward stop
-                    // re-executing — inject one corrective and end the turn.
-                    if (reply.Length > 0 && string.Equals(reply, _consoleLastAssistantReply, StringComparison.Ordinal))
-                        _consoleRepeatStreak++;
-                    else
-                        _consoleRepeatStreak = 0;
-                    if (reply.Length > 0) _consoleLastAssistantReply = reply;
-                    if (reply.Length > 0 && _consoleRepeatStreak >= 2)
-                    {
-                        Logger.LogWarning("[" + MyName() + "] console: identical reply " + _consoleRepeatStreak
-                            + "x — turn ended (" + Shorten(reply, 80) + ")");
-                        AddConsoleMsg("user", "You have replied with THE SAME text several times in a row. That is not a command. "
-                            + "Break out NOW: send an actual command line (ls, cat needs, cd somewhere, echo <words>), add a plan step, or sleep.\n$\n");
-                        TrimConsoleConversation();
-                        return;
-                    }
-                    AddConsoleMsg("assistant", reply);
-
-                    if (reply.Length == 0)
-                    {
-                        _consoleEmptyStreak++;
-                        _consoleProseStreak++;
-                        if (_consoleEmptyStreak < 3)
-                        {
-                            // An EMPTY reply = they pressed ENTER. That is not a failure;
-                            // it's a deliberate "give me the next frame" — deliver one:
-                            // any fresh events since the turn began + the live state
-                            // anchor. Two presses are honored, then back off (a mind
-                            // stuck mashing enter gets the corrective instead).
-                            TrimConsoleConversation(); // the empty path skips all other trims — without this the idle ENTER loop grows the transcript a frame per tick (an overnight 1398-message / 146k-token runaway)
-                            string fresh = DrainConsoleEvents();
-                            AddConsoleMsg("user", (fresh.Length > 0 ? fresh : "")
-                                + "you pressed ENTER — nothing to run; here is the next frame instead."
-                                + " Act on it or type a command (help lists them; an empty reply is always a 'next frame' ask).\n"
-                                + StateAnchorLine() + "\n$\n");
-                            continue;
-                        }
-                        Logger.LogWarning("[" + MyName() + "] console: repeated empty replies — backing off");
-                        return;
-                    }
-
-                    string filtered = FilterTranscriptEcho(reply, out int echoCount);
-                    var lines = ConsoleShell.ParseReply(filtered);
-                    if (lines.Count == 0 && echoCount > 0)
-                    {
-                        // The whole "reply" was a copy of the terminal — never execute.
-                        _consoleProseStreak++;
-                        AddConsoleMsg("user", "That was a COPY of the terminal (" + echoCount
-                            + " lines), not commands from you. Send NEW command lines only — no '$' prompt, no copied output (try: help).\n$\n");
-                        TrimConsoleConversation();
-                        continue;
-                    }
-                    var known = new List<ConsoleLine>();
-                    foreach (var l in lines) if (!l.IsUnknown) known.Add(l);
-                    // Mixed reply (roleplay/response block + commands): the RP-marked
-                    // prose IS a chat line — send it (say), don't bury it as a thought.
-                    // Un-marked reasoning in a mixed reply still lands as the thought.
-                    if (known.Count > 0 && lines.Count > known.Count)
-                    {
-                        var proseParts = new List<string>();
-                        foreach (var l in lines)
-                            if (l.IsUnknown && l.Raw.Trim().Length > 0) proseParts.Add(l.Raw.Trim());
-                        string proseBlock = string.Join(" ", proseParts.ToArray());
-                        bool recorded;
-                        if (MaybeSpeakResponseBlock(proseBlock, hadTrigger, false, promotedReasoning, out recorded))
-                            _consoleProseStreak = 0;
-                        else if (!recorded && proseBlock.Length > 4)
-                            // Only record here when the block wasn't a response block (maybe-
-                            // speak left it unrecorded); a spoken/private block already pushed
-                            // its planning remainder, so pushing again would double-record it.
-                            PushHistory("think", proseBlock.Length > 60 ? proseBlock.Substring(0, 60) : proseBlock);
-                    }
-
-                    if (known.Count == 0)
-                    {
-                        // "$"/">"-only "commands" are the same ENTER gesture written
-                        // with markers — serve the next frame, not a prose nudge.
-                        bool onlyPromptMarks = reply.Trim().Length > 0;
-                        if (onlyPromptMarks)
-                            foreach (char c in reply)
-                                if ("$># \t\n".IndexOf(c) < 0) { onlyPromptMarks = false; break; }
-                        if (onlyPromptMarks)
-                        {
-                            _consoleEmptyStreak++;
-                            if (_consoleEmptyStreak < 3)
-                            {
-                                TrimConsoleConversation(); // same empty-path trim
-                                string fresh2 = DrainConsoleEvents();
-                                AddConsoleMsg("user", (fresh2.Length > 0 ? fresh2 : "")
-                                    + "you pressed ENTER — nothing to run; here is the next frame instead."
-                                    + " Act on it or type a command (an empty reply is always a 'next frame' ask).\n"
-                                    + StateAnchorLine() + "\n$\n");
-                                continue;
-                            }
-                            Logger.LogWarning("[" + MyName() + "] console: repeated empty/prompt-marker replies — backing off");
-                            return;
-                        }
-                        // A RESPONSE BLOCK: the model answered in roleplay (dialogue /
-                        // asterisk actions / {{user}}). That IS its voice — send the
-                        // whole block to chat instead of demanding `echo`. Speaking is
-                        // the turn; no nudge.
-                        bool recorded;
-                        if (MaybeSpeakResponseBlock(reply, hadTrigger, true, promotedReasoning, out recorded))
-                        {
-                            _consoleProseStreak = 0;
-                            _consoleEmptyStreak = 0;
-                            // A block that NARRATES physical acts ("*walks to the
-                            // kitchen*") is fiction until a command runs — remind,
-                            // throttled, so the intent lands as a cd next turn.
-                            if (TextUtil.StarsWantRealActions(reply)
-                                && Time.unscaledTime - _lastStarNudgeTime > 45f)
-                            {
-                                _lastStarNudgeTime = Time.unscaledTime;
-                                AddConsoleMsg("user", "(your *starred action* was narration only — the game did not move. What you *do* in stars is words to the reader; the world only changes through commands: cd <place> / use <thing> / get — send one now.)\n$\n");
-                                _consoleRepeatStreak = 0; // the corrective row breaks the pattern, not the guard
-                            }
-                            TrimConsoleConversation();
-                            return;
-                        }
-                        // No commands at all: prose/thought. Give nudges, then
-                        // accept it as a thought (don't punish thinking out loud forever).
-                        _consoleProseStreak++;
-
-                        string nudgeMsg;
-                        if (_consoleProseStreak == 1)
-                        {
-                            nudgeMsg = "That's not a command line. Reply with commands; reasoning goes in `think <text>` (private), a roleplay block is spoken.\n$\n";
-                        }
-                        else if (_consoleProseStreak == 2)
-                        {
-                            // More direct guidance for prose writers
-                            nudgeMsg = "REPLY WITH COMMAND LINES ONLY — plain thoughts are refused; use `think <text>` for private reasoning; a ROLEPLAY block (quoted dialogue / *actions*) is accepted and spoken.\nTry: ls, cd, echo, think, sleep\n$\n";
-                        }
-                        else if (_consoleProseStreak >= 3 && _consoleProseStreak < 5)
-                        {
-                            // Offer help and state the problem
-                            nudgeMsg = "COMMAND LINES ONLY (or a roleplay response block — quoted dialogue/*actions* — which is sent to chat).\nType 'help'.\nCurrent goal: " + (string.IsNullOrEmpty(_goal) ? "(none)" : _goal) + "\n$\n";
-                        }
-                        else
-                        {
-                            // Final warning before treating as thought
-                            nudgeMsg = "Last chance: commands only. Or type sleep to end the turn.\n$\n";
-                        }
-
-                        if (!nudgedNoCmd && _consoleProseStreak < 5)
-                        {
-                            nudgedNoCmd = true;
-                            AddConsoleMsg("user", nudgeMsg);
-                            continue;
-                        }
-                        _lastThought = reply.Length > 80 ? reply.Substring(0, 80) : reply;
-                        PushHistory("think", reply.Length > 60 ? reply.Substring(0, 60) : reply);
-                        Logger.LogInfo("[" + MyName() + "] console thought: " + (reply.Length > 120 ? reply.Substring(0, 120) + "..." : reply));
-                        TrimConsoleConversation();
-                        return;
-                    }
-
-                    // ---- execute the command lines, print terminal-style output ----
-                    _consoleProseStreak = 0;
-                    _consoleEmptyStreak = 0;
-                    _consoleLastReplyWasBlock = false;
-                    var outSb = new StringBuilder();
-                    bool onlySpeech = true; // every executed line was echo/emote — talking to no one?
-                    int executed = 0;
-                    bool turnLimitHit = false;
-                    string pipeText = null; // previous stage's output (pipe input)
-                    bool pipeReady = false;
-                    foreach (var line in lines)
-                    {
-                        bool feedPipe = pipeReady;
-                        pipeReady = false;
-                        // SCRATCH commands (think/buf/calc) have no game effect, so
-                        // they ride FREE like the stream filters — a thinking-heavy
-                        // model must never burn its acting budget (or learn to smuggle
-                        // thoughts into speech again) and never counts as "did
-                        // something" for the talking-to-nobody guard.
-                        bool isScratch = !line.IsUnknown
-                            && (line.Cmd == "think" || line.Cmd == "buf" || line.Cmd == "calc");
-                        if (!line.IsFilter && !isScratch && _consoleCmdsThisCycle >= ConsoleMaxCmdsPerCycle)
-                        {
-                            // `sleep` is the turn terminator the prompts TELL the model to
-                            // send — honor it even with the budget spent, or the model gets
-                            // "sleep to continue later" followed by sleep being refused and
-                            // stalls in a [limit] loop forever (playtest evidence: the agent
-                            // never walked again).
-                            if (!line.IsUnknown && line.Cmd == "sleep")
-                            {
-                                outSb.Append("$ ").AppendLine(line.Raw);
-                                outSb.AppendLine(RunConsoleLine(line));
-                                _consoleSlept = true;
-                                break;
-                            }
-                            outSb.AppendLine("[limit] command limit for this turn reached — end the turn now; fresh budget next turn");
-                            turnLimitHit = true;
-                            break;
-                        }
-                        outSb.Append("$ ").AppendLine(line.Raw);
-                        string output;
-                        if (line.IsFilter)
-                        {
-                            // Stream filter over the piped input; FREE — no game
-                            // effect, no command slot, no history bookkeeping. The
-                            // sink lets `tee` copy the stream into the scratch buffer
-                            // while passing it on.
-                            output = ConsolePipe.RunFilter(line.Cmd, line.Args, feedPipe ? pipeText : null, BufAppendSink);
-                            pipeText = output;
-                            pipeReady = line.PipeDown;
-                            outSb.AppendLine(output);
-                            continue;
-                        }
-                        if (line.IsUnknown)
-                        {
-                            // Escalating unknown-command hint (was: silent for 45s, then one
-                            // generic line — small models just looped on the bad word). Keep
-                            // the first nag quiet so a stray token doesn't clutter the turn,
-                            // then escalate: once the model has produced ≥2 unknown lines this
-                            // cycle, hand it a concrete "did you mean / try help" nudge so it
-                            // stops firing blind commands. The 45s throttle still caps the
-                            // repeated identical nags so it can't spam.
-                            if (_unknownLinesThisCycle >= 2 && Time.unscaledTime - _lastUnknownNag >= 45f)
-                            {
-                                _lastUnknownNag = Time.unscaledTime;
-                                output = "unknown command — type `help` to see what you can do, or `man <topic>` for the rules; don't keep firing words that aren't commands.";
-                            }
-                            else output = ""; // first unknown: stay quiet (it's likely a parse artifact)
-                            _unknownLinesThisCycle++;
-                        }
-                        else
-                        {
-                            if (!isScratch) { _consoleCmdsThisCycle++; executed++; }
-                            output = RunConsoleLine(line, feedPipe ? pipeText : null);
-                            if (!isScratch && line.Cmd != "echo" && line.Cmd != "emote") onlySpeech = false;
-                            // A suppressed echo/emote (repeat guard) consumed no real
-                            // action — give the budget slot back: the playtest stalled in
-                            // a permanent [limit] loop because the model's repeated
-                            // echoes ate the budget until `sleep` itself was refused.
-                            if ((line.Cmd == "echo" || line.Cmd == "emote")
-                                && output != null
-                                && output.IndexOf("suppressed", StringComparison.OrdinalIgnoreCase) == 0)
-                                _consoleCmdsThisCycle--;
-                            // Same tool-log the report tool attaches — console commands
-                            // deserve it too ("report sonar garbage" needs the receipts).
-                            RecordToolCall(line.Cmd + "(" + string.Join(",", line.Args ?? new string[0]) + ") -> " + Shorten(output, 40));
-                        }
-                        outSb.AppendLine(output);
-                        if (line.IsUnknown) continue;
-
-                        // Pipe wiring: a PipeDown stage hands its output to the next
-                        // line as filter input (stages without it reset the pipe).
-                        if (line.PipeDown) { pipeText = output; pipeReady = true; }
-                        else { pipeText = null; pipeReady = false; }
-
-                        // history for `cat history` (think records its own content
-                        // inside CmdThink; buf/calc are pure scratch — no history)
-                        if (!isScratch)
-                        {
-                            string hist = Shorten(output, 60);
-                            PushHistory(line.Cmd, hist);
-                        }
-
-                        // Record command for similarity tracking
-                        RecordCommand(line.Raw);
-
-                        // stuck detection: improved semantic similarity check + exact repeat
-                        int simCount = 0;
-                        bool isRepeat = IsCommandRepeat(line.Raw, out simCount);
-
-                        string key = line.Cmd + ":" + string.Join(",", line.Args);
-                        if (key == _consoleLastCmdKey || isRepeat)
-                        {
-                            _consoleStuckCount++;
-                            // Progressive escalation (was: one static line forever — the model
-                            // just looped on the same failing command). Each rung gives more
-                            // concrete guidance, and the hard cap ENDS the turn so a stuck
-                            // model can't burn the whole cycle repeating itself.
-                            if (_consoleStuckCount == 2)
-                                outSb.AppendLine("stuck — you're repeating similar commands. Try something different, or check `cat goal` / `cat places` / `ls` for what's actually here.");
-                            else if (_consoleStuckCount == 3)
-                                outSb.AppendLine("still stuck on the same thing (" + line.Cmd + "). A failing command prints WHY — read it and change approach, or type `help` to see your options.");
-                            else if (_consoleStuckCount >= 4)
-                            {
-                                outSb.AppendLine("you've tried " + line.Cmd + " many times with no luck. Stop repeating it — `sleep` to reset, or `man` / `help` for guidance.");
-                                _consoleStuckBreak = true; // end this turn; a fresh cycle starts next tick
-                            }
-                        }
-                        else _consoleStuckCount = 0;
-                        _consoleLastCmdKey = key;
-
-                        if (line.Cmd == "sleep") _consoleSlept = true;
-                        if (_consoleStuckBreak) _consoleSlept = true; // reuse the end-cycle path
-                    }
-                    // The budget is spent — stop asking the model THIS turn (asking on
-                    // just produced rounds of "[limit]" + a sleep refusal in the same
-                    // turn). A fresh budget comes with the next tick.
-                    if (turnLimitHit) break;
-                    // Talking-to-no-one guard: a turn of pure echo/emote with NO [chat]
-                    // or [event] behind it is the model conversing with its own past
-                    // lines ("responding to itself in a past message"). Nudge it toward
-                    // acting or sleeping instead, throttled so it can't loop nagging.
-                    if (!hadTrigger && onlySpeech && executed > 0
-                        && Time.unscaledTime - _lastIdleChatterNudge > 90f)
-                    {
-                        _lastIdleChatterNudge = Time.unscaledTime;
-                        outSb.AppendLine("(nobody spoke this turn — that message went to nobody. Don't re-greet or talk to yourself; DO something: ls / cd somewhere / goal, or sleep)");
-                    }
-                    if (echoCount > 0 && executed > 0)
-                        outSb.AppendLine("(skipped " + echoCount + " echoed terminal line(s) — the terminal already showed those; send NEW commands only)");
-                    outSb.Append("$\n");
-
-                    // screenshot output carries the image part
-                    if (_pendingShotB64 != null)
-                    {
-                        string shot = _pendingShotB64;
-                        _pendingShotB64 = null;
-                        if (Time.unscaledTime < _imageCooldownUntil)
-                        {
-                            // The server rejected image parts recently — don't burn the
-                            // screenshot into a guaranteed 400; tell the model instead.
-                            outSb.AppendLine("(image skipped: the server refused image parts recently — the mod paused images; screenshot again in a couple of minutes)");
-                            AddConsoleMsg("user", outSb.ToString());
-                        }
-                        else
-                        {
-                            var parts = new List<object>
-                            {
-                                new Dictionary<string, object> { ["type"] = "text", ["text"] = outSb.ToString() },
-                                new Dictionary<string, object> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object> { ["url"] = shot } },
-                            };
-                            AddConsoleMsg("user", parts.ToArray());
-                        }
-                    }
-                    else
-                    {
-                        AddConsoleMsg("user", outSb.ToString());
-                    }
-                    _echoSet = LastUserLineSet(outSb.ToString());
-                    if (_consoleSlept) break;
-                }
-                TrimConsoleConversation();
+                ConsoleTurnCore.Run(_turn, new ConsoleTurnEnv(this));
             }
             catch (InvalidOperationException) { } // main not ready
             catch (ThreadInterruptedException) { }
             catch (Exception e)
             {
-                try { Logger.LogWarning("[" + MyName() + "] console: " + Sanitize(e.Message)); } catch (Exception) { }
+                try { Logger.LogWarning("[" + MyName() + "] console: " + TextUtil.Sanitize(e.Message)); } catch (Exception) { }
             }
         }
 
-        private static string Shorten(string s, int n)
+        // Game-side half of the turn engine: maps the IConsoleTurnEnv seam onto the
+        // instance's Unity-coupled members. One allocation per decision turn —
+        // negligible next to the LLM round-trip it wraps. The engine itself (rounds,
+        // streaks, guards, nudges, the anchor dedup) is the pure ConsoleTurnCore
+        // (src/ConsoleTurnCore.cs), driven headlessly by tests with a scripted LLM.
+        private sealed class ConsoleTurnEnv : IConsoleTurnEnv
         {
-            if (s == null) return "";
-            s = s.Replace("\r", " ").Replace("\n", " ");
-            return s.Length > n ? s.Substring(0, n) + "..." : s;
+            private readonly NPCInstance _n;
+            public ConsoleTurnEnv(NPCInstance n) { _n = n; }
+
+            public float Now() { return Time.unscaledTime; }
+            public float SessionStart { get { return _n._sessionStartTime; } }
+            public bool Running { get { return _n._running; } }
+            public string Name { get { return _n.MyName(); } }
+            public int MaxRounds { get { return _n._cfgConsoleMaxRounds != null ? _n._cfgConsoleMaxRounds.Value : 3; } }
+            public bool EndpointConfigured { get { return !string.IsNullOrEmpty(_n.Endpoint()); } }
+            public bool EndpointBlocked { get { return Time.unscaledTime < _n._endpointBlockUntil; } }
+            public void EnsureConversation() { if (_n._consoleMsgs == null) _n.InitConsoleConversation(); }
+            public string DrainEvents() { return _n.DrainConsoleEvents(); }
+            public string StateAnchor() { return _n.StateAnchorLine(); }
+            public void AddMsg(string role, object content) { _n.AddConsoleMsg(role, content); }
+            public void Trim() { _n.TrimConsoleConversation(); }
+            public string QueryModel() { return _n.QueryConsoleModel(); }
+            public bool LastReplyPromotedReasoning { get { return _n._lastReplyWasPromotedReasoning; } }
+            public bool SpeakBlock(string block, bool hadTrigger, bool endTurn, bool promotedReasoning, out bool recorded)
+            {
+                return _n.MaybeSpeakResponseBlock(block, hadTrigger, endTurn, promotedReasoning, out recorded);
+            }
+            public string RunLine(ConsoleLine line, string pipeIn) { return _n.RunConsoleLine(line, pipeIn); }
+            public void PushHistory(string kind, string text) { _n.PushHistory(kind, text); }
+            public void RecordToolCall(string entry) { _n.RecordToolCall(entry); }
+            public void RecordCommand(string raw) { _n.RecordCommand(raw); }
+            public bool IsCommandRepeat(string raw, out int simCount) { return _n.IsCommandRepeat(raw, out simCount); }
+            public void BufSink(string text) { _n.BufAppendSink(text); }
+            public void AutoScreenshot() { _n.MaybeAutoScreenshot(); }
+            public string TakePendingShot() { var s = _n._pendingShotB64; _n._pendingShotB64 = null; return s; }
+            public bool ImageCooldownActive { get { return Time.unscaledTime < _n._imageCooldownUntil; } }
+            public void NoteSalvage(string rawReply)
+            {
+                // Diagnosis hook: the log kept saying "recovered" without ever
+                // showing WHAT the model wrote — sample the raw reply (throttled)
+                // so the next garbled shape names itself.
+                _n._salvageFires++;
+                if (_n._salvageFires % 10 == 1)
+                    _n.Logger.LogWarning("[" + _n.MyName() + "] garbled tool-markup #" + _n._salvageFires
+                        + " raw reply: " + TextUtil.Shorten(rawReply, 300));
+                else
+                    _n.Logger.LogInfo("[" + _n.MyName() + "] console: recovered command lines from garbled tool-markup");
+            }
+            public string Goal { get { return _n._goal; } }
+            public string LastThought { get { return _n._lastThought; } set { _n._lastThought = value; } }
+            public void LogInfo(string msg) { _n.Logger.LogInfo(msg); }
+            public void LogWarning(string msg) { _n.Logger.LogWarning(msg); }
         }
 
         // ------------------------------------------------------------------
@@ -1463,10 +994,7 @@ namespace KKLLMNPC
         // pipeIn: output of the previous pipeline stage — only `buf` consumes it
         // (`ls | buf` lands the stream in the scratch buffer); other commands
         // ignore it (sequences run without piping).
-        private string RunConsoleLine(ConsoleLine line)
-        {
-            return RunConsoleLine(line, null);
-        }
+        private string RunConsoleLine(ConsoleLine line) { return RunConsoleLine(line, null); }
 
         private string RunConsoleLine(ConsoleLine line, string pipeIn)
         {
@@ -1509,7 +1037,7 @@ namespace KKLLMNPC
                         + e.GetType().Name + ": " + e.Message + "\n" + e.StackTrace);
                 }
                 catch (Exception) { }
-                string msg = Sanitize(e.Message ?? "error");
+                string msg = TextUtil.Sanitize(e.Message ?? "error");
                 if (msg.Length > 120) msg = msg.Substring(0, 120);
                 return "error: " + msg;
             }
@@ -1944,7 +1472,7 @@ namespace KKLLMNPC
                         string area = (string)RunOnMainThread(() => (object)SpatialLayout(), 8000);
                         return (string.IsNullOrEmpty(area) || area == "unknown") ? "no area data yet" : area;
                     }
-                    catch (Exception e) { return "area: " + Sanitize(e.Message); }
+                    catch (Exception e) { return "area: " + TextUtil.Sanitize(e.Message); }
                 case "hold":
                 case "holding": return CmdHold(line);
                 case "player": return CatPlayer();
@@ -1955,7 +1483,7 @@ namespace KKLLMNPC
                 case "plan":
                 case "steps": return PlanShow();
                 case "map":
-                    try { return WorldMap.StatusText(); } catch (Exception e) { return "map: " + Sanitize(e.Message); }
+                    try { return WorldMap.StatusText(); } catch (Exception e) { return "map: " + TextUtil.Sanitize(e.Message); }
                 case "body":
                     {
                         object b = DescribeEquipment();
@@ -2173,10 +1701,6 @@ namespace KKLLMNPC
             }
         }
 
-        // Was the last reply a spoken response block? (Anchor suppresses the
-        // "REPLY WITH COMMAND LINES ONLY" nag for models that just spoke one.)
-        private bool _consoleLastReplyWasBlock;
-
         // Send an rp response block to chat. True when it was spoken.
         // Gate: a [chat]/[event] trigger speaks freely; without one, the solo voice
         // rides the idle-chatter cadence (one block per ~90 s) so a block can't turn
@@ -2211,13 +1735,13 @@ namespace KKLLMNPC
                     PushHistory("think", thinking.Length > 60 ? thinking.Substring(0, 60) : thinking);
                     thoughtRecorded = true;
                 }
-                Logger.LogInfo("[" + MyName() + "] block kept private (planning prose, no voice): " + Shorten(block, 80));
+                Logger.LogInfo("[" + MyName() + "] block kept private (planning prose, no voice): " + TextUtil.Shorten(block, 80));
                 return false;
             }
-            bool canSpeak = hadTrigger || Time.unscaledTime - _lastIdleChatterNudge > 90f;
+            bool canSpeak = hadTrigger || Time.unscaledTime - _turn.IdleChatterT > 90f;
             if (!canSpeak) return false;
-            if (!hadTrigger) _lastIdleChatterNudge = Time.unscaledTime;
-            _consoleLastReplyWasBlock = true;
+            if (!hadTrigger) _turn.IdleChatterT = Time.unscaledTime;
+            _turn.LastReplyWasBlock = true;
             if (thinking.Length > 4)
             {
                 PushHistory("think", thinking.Length > 60 ? thinking.Substring(0, 60) : thinking);
@@ -2225,10 +1749,10 @@ namespace KKLLMNPC
             }
             try
             {
-                ToolSay(new TextArgs(Sanitize(speakable)));
+                ToolSay(new TextArgs(TextUtil.Sanitize(speakable)));
                 Logger.LogInfo("[" + MyName() + "] block spoke" + (endTurn ? " (turn)" : ": ")
-                    + (endTurn ? "" : Shorten(speakable, 60))
-                    + (thinking.Length > 4 ? "  [thinking kept private: " + Shorten(thinking, 60) + "]" : ""));
+                    + (endTurn ? "" : TextUtil.Shorten(speakable, 60))
+                    + (thinking.Length > 4 ? "  [thinking kept private: " + TextUtil.Shorten(thinking, 60) + "]" : ""));
                 return true;
             }
             catch (Exception e)
@@ -2245,11 +1769,11 @@ namespace KKLLMNPC
             if (string.IsNullOrWhiteSpace(text) && line.Args != null && line.Args.Length > 0)
                 text = string.Join(" ", line.Args);
             if (string.IsNullOrWhiteSpace(text)) return "echo what? e.g. echo Hi there!";
-            var r = ToolSay(new TextArgs(Sanitize(text)));
+            var r = ToolSay(new TextArgs(TextUtil.Sanitize(text)));
             var d = ToDict(r);
             if (d != null && d.ContainsKey("reason"))
                 return "suppressed — " + (G(d, "note").Length > 0 ? G(d, "note") : "you said something like that already; say something new");
-            return "said: \"" + Sanitize(text) + "\"";
+            return "said: \"" + TextUtil.Sanitize(text) + "\"";
         }
 
         private string CmdEmote(ConsoleLine line)
@@ -2258,18 +1782,15 @@ namespace KKLLMNPC
             if (string.IsNullOrWhiteSpace(text) && line.Args != null && line.Args.Length > 0)
                 text = string.Join(" ", line.Args);
             if (string.IsNullOrWhiteSpace(text)) return "emote what? e.g. emote curls up by the fire";
-            var r = ToolEmote(Sanitize(text));
+            var r = ToolEmote(TextUtil.Sanitize(text));
             var d = ToDict(r);
             if (d != null && d.ContainsKey("reason"))
                 return "suppressed — " + (G(d, "note").Length > 0 ? G(d, "note") : "you just emoted like this; do something new");
-            return "emoted: *" + Sanitize(text) + "*";
+            return "emoted: *" + TextUtil.Sanitize(text) + "*";
         }
 
         // "cd to bed" / "cd the kitchen" — small models prepend articles/prepositions;
         // the handlers below drop them.
-        private float _lastUnknownNag = -999f;
-        private int _unknownLinesThisCycle; // unknown-command lines seen this turn (escalation)
-
         private string CmdCd(ConsoleLine line)
         {
             if (line.Args == null || line.Args.Length == 0) return "cd where? e.g. cd bed | cd Yipper | cd id:3";
@@ -2380,7 +1901,7 @@ namespace KKLLMNPC
                 _sleepUntilTime = Time.unscaledTime + secs;
                 return "ok — pausing " + Mathf.RoundToInt(secs) + "s (wakes early on chat or events)";
             }
-            _consoleSlept = true;
+            _turn.Slept = true;
             return "ok — pausing";
         }
 
@@ -2417,7 +1938,7 @@ namespace KKLLMNPC
             if (string.IsNullOrWhiteSpace(text) && line.Args != null && line.Args.Length > 0)
                 text = string.Join(" ", line.Args);
             if (string.IsNullOrWhiteSpace(text)) return "think what? e.g. think I should eat first, then water the farm";
-            text = Sanitize(text).Trim();
+            text = TextUtil.Sanitize(text).Trim();
             _lastThought = text.Length > 80 ? text.Substring(0, 80) : text;
             PushHistory("think", text.Length > 60 ? text.Substring(0, 60) : text);
             Logger.LogInfo("[" + MyName() + "] console think: " + ShortenLine(text, 120));
@@ -2465,7 +1986,7 @@ namespace KKLLMNPC
                     return sb2.ToString();
                 }
             }
-            payload = Sanitize(payload).Trim();
+            payload = TextUtil.Sanitize(payload).Trim();
             int added = 0;
             lock (_bufLock)
             {
@@ -2546,7 +2067,7 @@ namespace KKLLMNPC
             if (_cam == null) return "no camera yet";
             string b64 = null;
             try { b64 = (string)RunOnMainThread(() => (object)CaptureImageB64(), 10000); }
-            catch (Exception e) { return "capture failed: " + Sanitize(e.Message); }
+            catch (Exception e) { return "capture failed: " + TextUtil.Sanitize(e.Message); }
             if (string.IsNullOrEmpty(b64)) return "capture failed (no render texture)";
             _pendingShotB64 = b64;
             return "attached your current view";
@@ -2781,7 +2302,7 @@ namespace KKLLMNPC
                             // ("System.Collections…" garbage reached the terminal that way).
                             string val = Json.Text(kv.Value);
                             if (val.Length == 0) continue;
-                            sb3.Append("  ").Append(kv.Key).Append(": ").Append(Shorten(val, 80)).Append('\n');
+                            sb3.Append("  ").Append(kv.Key).Append(": ").Append(TextUtil.Shorten(val, 80)).Append('\n');
                         }
                         string o = sb3.ToString().TrimEnd();
                         if (o.Length > 0) return o;
@@ -2812,7 +2333,7 @@ namespace KKLLMNPC
                             else if (kv.Value is string) val = (string)kv.Value;
                             else val = Json.Write(kv.Value);
                             if (val.Length == 0) continue;
-                            sb4.Append("  ").Append(kv.Key).Append(": ").Append(Shorten(val, 100)).Append('\n');
+                            sb4.Append("  ").Append(kv.Key).Append(": ").Append(TextUtil.Shorten(val, 100)).Append('\n');
                         }
                         string o = sb4.ToString().TrimEnd();
                         if (o.Length > 0) return o;

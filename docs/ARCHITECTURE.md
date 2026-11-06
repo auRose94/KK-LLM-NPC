@@ -93,6 +93,7 @@ all driven by an OpenAI-compatible chat-completion endpoint.
 | `Overlay.cs` | Debug overlay GUI |
 | `GoalMachine.cs` | Persistent goal machine (set/complete/drop) |
 | `Console.cs` | Console REPL (default mode): command handlers, event drain, prompt, the command→output→command turn loop |
+| `ConsoleTurnCore.cs` | Pure console turn engine: the round loop, streaks/guards/nudges, anchor dedup, command budget — driven through the `IConsoleTurnEnv` seam (headless agent sim; scripted-LLM tested) |
 | `ConsoleShell.cs` | Bash-like command vocabulary + lenient line/reply parser (pure C#, unit-testable) |
 
 ### Key Design Decisions
@@ -149,6 +150,15 @@ all driven by an OpenAI-compatible chat-completion endpoint.
     turning prose into commands. Module tools register themselves into the same
     vocabulary at startup (`ConsoleShell.RegisterExtra`). Set `[Console] Enabled=false`
     to fall back to the legacy push-perception / `act`-JSON loop, which is kept intact.
+
+11. **Headless turn engine**: The console turn loop's control flow lives in the
+    pure `ConsoleTurnCore` (streaks, guards, nudges, anchor dedup, command
+    budget) and is driven through an `IConsoleTurnEnv` seam; `Console.cs` only
+    maps that seam onto the Unity-coupled members (a nested `ConsoleTurnEnv`
+    adapter) and keeps the exception wrapper. This is what makes whole agent
+    turns testable without the game: `tests/test_turncore.cs` scripts a fake
+    LLM and a fake world terminal and runs real turns — the same pure-core
+    pattern as `ContextCore`/`ContextManager`.
 
 ### Data Flow
 

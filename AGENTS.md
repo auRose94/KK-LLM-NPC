@@ -24,7 +24,7 @@ weaken those gates casually; see `docs/VORE.md` before touching that area.
 ## Commands
 
 ```bash
-./run_tests.sh                  # all 21 pure-C# suites — THE gate (CI runs this)
+./run_tests.sh                  # all 22 pure-C# suites — THE gate (CI runs this)
 ./run_tests.sh json swallow     # subset by suite name
 ./check_syntax.sh               # parse-only check, no game install needed
 ./check_build.sh                # FULL compile vs real game install — only check that
@@ -154,12 +154,16 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 - `CONTRIBUTING.md` — style, PR checklist, game-API integration notes
 - `wip/BASE-GAME-AI.md` — reverse-engineered game internals
 
-## Current state (2026-11-05)
+## Current state (2026-11-06)
 
 - `main` is the PR target. `ws/*` branches are checked out in git worktrees
   elsewhere — don't try to check them out here.
-- `feature/headless-agent-sim` (current branch) is even with `main` — the
-  headless agent-sim work it's named for hasn't started yet.
+- `feature/headless-agent-sim` (current branch) is one commit ahead of `main`
+  (v1.2.3 landed here) plus the headless agent sim: the console turn engine now
+  lives in pure `src/ConsoleTurnCore.cs` behind an `IConsoleTurnEnv` seam
+  (`Console.cs` keeps only the game wiring), and `tests/test_turncore.cs` drives
+  whole agent turns with a scripted fake LLM + fake world (99 checks; 22
+  suites). v1.3.0. Ready to merge to `main`.
 - v1.2.3 (2026-11-05): new default profile — rapid/immersive/Ollama-first.
   Shipped defaults now reflect a well-played setup (no existing config file is
   touched — BepInEx only writes a key on first launch). Ollama adoption

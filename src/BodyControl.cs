@@ -88,7 +88,7 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
             }
-            catch (Exception e) { lines.Add("feeling trouble: " + Sanitize(e.Message)); }
+            catch (Exception e) { lines.Add("feeling trouble: " + TextUtil.Sanitize(e.Message)); }
             string head = lines.Count > 0
                 ? "what your body feels right now (holes only):"
                 : (Swallowed

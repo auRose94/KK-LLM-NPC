@@ -217,7 +217,7 @@ namespace KKLLMNPC
             }
             catch (Exception e)
             {
-                dict["sensation"] = new { error = Sanitize(e.Message) };
+                dict["sensation"] = new { error = TextUtil.Sanitize(e.Message) };
             }
         }
 

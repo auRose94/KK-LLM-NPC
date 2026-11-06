@@ -1031,9 +1031,9 @@ namespace KKLLMNPC
         }
 
         // ---- autonomy bookkeeping (self-initiative cues) ----
-        // Last time a turn carried a REAL trigger ([chat]/[event] content), and the
-        // last time the idle-initiative cue fired. ConsoleTurn/DrainConsoleEvents write.
-        internal float _lastTriggerTime = -999f;
+        // The last time a turn carried a REAL trigger ([chat]/[event] content) lives
+        // in ConsoleTurnState.LastTriggerT (the turn engine writes it); the last
+        // time the idle-initiative cue fired is here.
         internal float _lastInitiativeAt = 0f;
         // Cooldown for the sibling-proximity self-initiative nudge: a short,
         // independent trigger that lets two idle NPCs find each other without
@@ -1199,16 +1199,10 @@ namespace KKLLMNPC
             _seenChatAcks.Clear();
             // Reset the console REPL conversation (fresh boot).
             _consoleMsgs = null;
-            _consoleProseStreak = 0;
-            _consoleEmptyStreak = 0;
-            _consoleLastCmdKey = null;
-            _consoleStuckCount = 0;
+            _turn.Reset(); // streaks, stuck state, turn clock, anchor dedup, slept
             if (_consoleRecentCmds != null) _consoleRecentCmds.Clear();
             lock (_bufLock) { _scratchBuf.Clear(); } // the scratch buffer is session/personal — dies with the identity
-            _lastTurnStampT = 0f; _turnClockLine = null;
-            _lastClockRebuildT = 0f; _lastEmittedAnchor = null; // fresh boot: emit a real anchor
             _pendingShotB64 = null;
-            _consoleSlept = false;
             _sleepUntilTime = 0f;
             _pendingSayNudge = false;
             _emptyContentRetry = false;
@@ -1705,7 +1699,7 @@ namespace KKLLMNPC
                 return;
             }
             if (string.IsNullOrWhiteSpace(fact)) return;
-            string f = Sanitize(fact.Trim());
+            string f = TextUtil.Sanitize(fact.Trim());
             // Backstop: junk facts (goals-as-facts, momentary body states, viewer-
             // relative text, transient object states) are useless long-term
             // knowledge — drop them from EVERY writer. The remember tool refuses

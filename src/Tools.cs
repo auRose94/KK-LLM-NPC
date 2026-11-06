@@ -90,7 +90,7 @@ namespace KKLLMNPC
             if (msg.Length == 0) msg = p.S("say", "");
             if (msg.Length == 0) msg = p.S("message", "");
             if (msg.Length == 0) msg = p.S("issue", "");
-            msg = Sanitize(msg ?? "").Trim();
+            msg = TextUtil.Sanitize(msg ?? "").Trim();
             if (msg.Length == 0)
                 return new { ok = false, reason = "empty_report",
                     note = "report_issue(msg='what is broken') — one line: what failed or frustrated you + what you tried" };
@@ -839,7 +839,7 @@ namespace KKLLMNPC
         {
             string fact = p.S("mem", "");
             if (string.IsNullOrWhiteSpace(fact)) return new { ok = false, reason = "empty_mem" };
-            fact = Sanitize(fact);
+            fact = TextUtil.Sanitize(fact);
             string junk = TextUtil.JunkFactReason(fact);
             if (junk != null)
                 return new { ok = false, reason = junk, note = TextUtil.JunkFactNote(junk) };

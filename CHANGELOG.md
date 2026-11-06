@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Added (2026-11-06 — headless agent sim: the console turn engine is unit-testable)
+
+The console REPL's turn loop — rounds, guards, nudges, the anchor dedup — was
+the least-tested code in the plugin exactly where it mattered most: it is where
+the historical console bugs lived (the idle-ENTER transcript runaway, the "now
+events" anchor flood, the parrot loop), and it was Unity-coupled, so no suite
+could reach it. It now follows the pure-core pattern (`ContextCore`,
+`PathCore`).
+
+- **`src/ConsoleTurnCore.cs` (pure) holds the whole turn engine.**
+  `ConsoleTurnCore.Run(state, env)` is a port of `ConsoleTurn`'s control flow;
+  `ConsoleTurnState` carries the cross-turn streaks/throttles/anchor-dedup
+  state (wiped by `ResetMindNow` via `Reset()`); `IConsoleTurnEnv` is the seam
+  the game supplies (LLM query, command execution, transcript,
+  events/anchor, clock, logging).
+- **`src/Console.cs` keeps only the game wiring**: `ConsoleTurn()` is now a
+  try/catch adapter plus a nested `ConsoleTurnEnv` mapping the seam onto the
+  real Unity-coupled members. Behavior is unchanged — the engine is a
+  mechanical port, quirks included (a limit-cut turn still ends without
+  sending its `[limit]` line; only the next tick's fresh budget tells the
+  model).
+- **`TextUtil.Sanitize` / `TextUtil.Shorten`** moved out of `Llm.cs` /
+  `Console.cs` (same behavior, pure home) so the engine can use them
+  headlessly.
+- **`tests/test_turncore.cs` — the scripted-LLM agent sim.** A fake
+  OpenAI-style replier plus a fake world terminal drive WHOLE console turns
+  through the real engine: anchor dedup/bare poll, ENTER frames, the
+  prose-nudge ladder, identical-repeat and terminal-copy guards, roleplay
+  blocks + the star-narration nudge, the command budget (`sleep` honored when
+  spent, suppressed echoes refund their slot), unknown-command escalation, the
+  stuck ladder, scratch commands riding free, pipes/`tee`, multipart
+  screenshots, endpoint gates, the turn clock, and salvage/`<think>`-strip
+  integration — 99 checks, with the real `ConsoleShell` parser, `ConsolePipe`
+  filters, `ConsoleSalvage` and `ModelFamilies` running inside the simulated
+  turns. Suites: 21 → 22.
+
 ### Changed (2026-11-05 — new default profile: rapid, immersive, Ollama-first)
 
 The shipped defaults now reflect a real, well-played setup — tuned for rapid

@@ -102,8 +102,8 @@ namespace KKLLMNPC
                             string line = content.Trim().Split('\n')[0].Trim().Trim('"', '"');
                             if (line.Length > 0 && line.Length < 200)
                             {
-                                Logger.LogInfo("[" + MyName() + "] muses: " + Sanitize(line));
-                                try { ToolSay(new TextArgs(Sanitize(line))); } catch (Exception) { }
+                                Logger.LogInfo("[" + MyName() + "] muses: " + TextUtil.Sanitize(line));
+                                try { ToolSay(new TextArgs(TextUtil.Sanitize(line))); } catch (Exception) { }
                             }
                         }
                     }
@@ -363,7 +363,7 @@ namespace KKLLMNPC
                 // the same monologue — the field reports why the last reply failed
                 if (_lastRejectedNameThink.Length > 0)
                     prompt = prompt + "\n(Your last reply was rejected because it never ended with the required final 'Name:' line. "
-                        + "Its reasoning was: " + Shorten(_lastRejectedNameThink, 400) + ")\n"
+                        + "Its reasoning was: " + TextUtil.Shorten(_lastRejectedNameThink, 400) + ")\n"
                         + "Use that conclusion. Reply with the reasoning ALREADY DONE: end your reply with the lone final line: Name: Nyxa (your own invented name — never the example) — nothing after it.";
                 string body = Json.Write(payload);
 
@@ -575,7 +575,7 @@ namespace KKLLMNPC
                     // friends used to surface only as a nameless fallback. Name the
                     // behavior in the log so re-rolls are explainable (attempts 4+
                     // append the "TIME IS UP" demand to counter exactly this).
-                    try { if (ModelFamilies.LooksLikeNameMeta(content)) Logger.LogInfo("[" + MyName() + "] model stalled on naming ('" + Shorten(content, 80) + "') — re-rolling with a hard 'answer NOW' demand"); } catch (Exception) { }
+                    try { if (ModelFamilies.LooksLikeNameMeta(content)) Logger.LogInfo("[" + MyName() + "] model stalled on naming ('" + TextUtil.Shorten(content, 80) + "') — re-rolling with a hard 'answer NOW' demand"); } catch (Exception) { }
                     Logger.LogInfo("[" + MyName() + "] LLM name rejected: '" + (content ?? "null") + "' — using fallback");
                     return null;
                 }
@@ -974,31 +974,11 @@ namespace KKLLMNPC
         // POST the perception+memory to the model. Sends response_format: json_schema
         // (not tools/tool_choice — many chat templates 400 on tool forcing). Model replies
         // with the act-args object as its content.
-        // Protect everything stored/forwarded from Mono string conversion failures:
-        // replace lone surrogate code units with '?', keep valid surrogate pairs
-        // (emoji, CJK ext-B). LLM streaming can deliver a broken mid-multibyte
-        // sequence that .NET keeps as an unpaired surrogate; the moment such a
-        // string reaches a native call (HttpWebRequest, Logger, Unity) Mono dies
-        // with "String conversion error: Illegal byte sequence ... in the input",
-        // and because the failure text gets stored in history/state it keeps
-        // re-triggering. Sanitize at the ingest points so nothing poisoned sticks.
-        private static string Sanitize(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return s;
-            var sb = new StringBuilder(s.Length);
-            for (int i = 0; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (char.IsHighSurrogate(c))
-                {
-                    if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { sb.Append(c).Append(s[i + 1]); i++; }
-                    else sb.Append('?');
-                }
-                else if (char.IsLowSurrogate(c)) sb.Append('?');
-                else sb.Append(c);
-            }
-            return sb.ToString();
-        }
+        // Ingest points scrub unpaired surrogates via TextUtil.Sanitize: LLM
+        // streaming can deliver a broken mid-multibyte sequence that .NET keeps as
+        // an unpaired surrogate, and the moment such a string reaches a native
+        // call Mono dies — the failure text gets stored in history/state, so
+        // nothing poisoned may stick.
 
         private string QueryLLM(string perceptionJson, string imageB64)
         {
@@ -1315,11 +1295,11 @@ namespace KKLLMNPC
                         // freeing the gate slot instead of holding it hostage.
                         if (++unloadedTries > 1)
                         {
-                            Logger.LogWarning("[" + MyName() + "] " + Shorten(lastError, 120) + " — model unloaded; deferring to next tick (endpoint breaker will back off)");
+                            Logger.LogWarning("[" + MyName() + "] " + TextUtil.Shorten(lastError, 120) + " — model unloaded; deferring to next tick (endpoint breaker will back off)");
                             NoteEndpointFail();
                             return null;
                         }
-                        Logger.LogWarning("[" + MyName() + "] " + Shorten(lastError, 120) + " — model reloading?; one quick retry unchanged");
+                        Logger.LogWarning("[" + MyName() + "] " + TextUtil.Shorten(lastError, 120) + " — model reloading?; one quick retry unchanged");
                         try { Thread.Sleep(2000); } catch (Exception) { }
                         lastError = null;
                         continue;
@@ -1520,7 +1500,7 @@ namespace KKLLMNPC
             string n = fn.GetValueOrDefault("name") as string;
             string a = fn.GetValueOrDefault("arguments") as string;
             if (!string.IsNullOrEmpty(n)) toolName = n;
-            if (!string.IsNullOrEmpty(a)) toolArgs = (toolArgs == null ? "" : toolArgs) + Sanitize(a);
+            if (!string.IsNullOrEmpty(a)) toolArgs = (toolArgs == null ? "" : toolArgs) + TextUtil.Sanitize(a);
             if (callsOut != null && !string.IsNullOrEmpty(n)) callsOut.Add(new ToolCallRec { Name = n, Args = a ?? "{}" });
         }
 
@@ -1570,7 +1550,7 @@ namespace KKLLMNPC
                     var delta = (choices[0] as Dictionary<string, object>)?.GetValueOrDefault("delta") as Dictionary<string, object>;
                     if (delta == null) continue;
                     var c = delta.GetValueOrDefault("content") as string;
-                    if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                    if (!string.IsNullOrEmpty(c)) contentBuilder.Append(TextUtil.Sanitize(c));
                     // gpt-oss (harmony via Ollama) streams its reply as `delta.reasoning` —
                     // a third field name next to content / reasoning_content — sometimes
                     // emitting the ENTIRE act in that channel with an empty final content.
@@ -1605,7 +1585,7 @@ namespace KKLLMNPC
                             if (msg != null)
                             {
                                 var c = msg.GetValueOrDefault("content") as string;
-                                if (!string.IsNullOrEmpty(c)) contentBuilder.Append(Sanitize(c));
+                                if (!string.IsNullOrEmpty(c)) contentBuilder.Append(TextUtil.Sanitize(c));
                                 var mr = msg.GetValueOrDefault("reasoning") as string
                                       ?? msg.GetValueOrDefault("reasoning_content") as string;
                                 if (!string.IsNullOrEmpty(mr)) reasoningBuilder.Append(mr);
@@ -1633,7 +1613,7 @@ namespace KKLLMNPC
             _lastReplyWasPromotedReasoning = false;
             if (contentBuilder.Length == 0 && reasoningBuilder.Length > 0)
             {
-                contentBuilder.Append(Sanitize(reasoningBuilder.ToString()));
+                contentBuilder.Append(TextUtil.Sanitize(reasoningBuilder.ToString()));
                 _lastReplyWasPromotedReasoning = true;
             }
 
@@ -2587,7 +2567,7 @@ namespace KKLLMNPC
                 if (msg != null && (msg.IndexOf("Illegal byte sequence", StringComparison.OrdinalIgnoreCase) >= 0
                     || msg.IndexOf("String conversion", StringComparison.OrdinalIgnoreCase) >= 0))
                     msg = "bad_encoding_from_llm";
-                else msg = Sanitize(msg);
+                else msg = TextUtil.Sanitize(msg);
                 return new { ok = false, reason = msg };
             }
         }
