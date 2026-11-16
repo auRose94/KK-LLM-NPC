@@ -307,6 +307,17 @@ namespace KKLLMNPC
             result["penetrated"] = IsPenetrated() ? PenetrationInfo() : null;
             result["penetrating"] = IsDickInside() ? DickInInfo() : null;
             result["stim_from"] = StimFromText();
+            // PHYSICAL CONTACT (bug fix 2026-11-08): arousal/stimulation RISE ON THEIR
+            // OWN — the game's PumpUpDick runs continuously and our horniness climbs
+            // whenever the body is unstimulated (Movement.UpdateHorniness). So a body
+            // standing NEXT TO the player, touching no one, can read "very aroused /
+            // warm". Without a contact signal the model mistook that for intimacy
+            // ("we're sharing something, bodies touching") and got tender with a player
+            // who was nowhere near her. This says plainly whether ANYTHING is actually
+            // touching the body right now: penetration, being penetrated, a mounted
+            // station, or being carried/swallowed. When it's "none", rising arousal is
+            // the body's own drive — NOT a partner, NOT the player, NOT touch.
+            result["touch"] = ContactText();
             result["partners"] = PartnersList();
             result["heard"] = RecentPlayerChat();
             // Goal machine: the persistent goal ("bigger thinking") + repetition guard.

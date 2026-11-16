@@ -23,6 +23,7 @@ namespace KKLLMNPC
         {
             if (_harmony != null) return;
             _harmony = new Harmony("com.kk.llmnpc.patches");
+            Log = log;
             try
             {
                 // Suppress the station-entry rotation grab: AnimationRoutine lerps the body
@@ -41,6 +42,23 @@ namespace KKLLMNPC
                 if (stopRoutineMoveNext != null)
                     _harmony.Patch(stopRoutineMoveNext,
                         prefix: new HarmonyMethod(typeof(Patches).GetMethod(nameof(StopAnimationRoutine_MoveNext_Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
+
+                // STATION-CANUSE CRASH GUARD (bug fix 2026-11-08): the game's own
+                // User.FixedUpdate -> SortGrabbables -> BreedingStation.CanUse() throws a
+                // NullReferenceException every physics frame when a station's
+                // AnimationStation.info (or an entry in its station list) is null — CanUse
+                // ignores its Kobold argument and dereferences station.info.user. It fires
+                // after a body is destroyed/sold mid-mount, leaving a slot whose info is
+                // null, and it spammed the log 3800+ times. Our own interact() already
+                // wraps its CanUse() call in try/catch, so this only ever fires from the
+                // GAME's FixedUpdate; a finalizer on SortGrabbables swallows that one
+                // exception at the single point the game calls it, leaving the game's
+                // interaction menu (closestUsable) intact.
+                var sortGrabbables = typeof(User).GetMethod("SortGrabbables",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                if (sortGrabbables != null)
+                    _harmony.Patch(sortGrabbables,
+                        finalizer: new HarmonyMethod(typeof(Patches).GetMethod(nameof(SortGrabbables_Finalizer), BindingFlags.Static | BindingFlags.NonPublic)));
 
                 // Swallow-vore trigger: the player's drop while looking up becomes a
                 // swallow (SwallowManager owns the trigger rule + suppresses the drop).
@@ -92,5 +110,33 @@ namespace KKLLMNPC
             }
             catch (Exception) { /* never break the game's coroutine — errors here are benign */ }
         }
+
+        // Finalizer for User.SortGrabbables — the game's per-physics-frame interaction
+        // scan. A breeding/bed/milking/etc. station whose AnimationStation.info is null
+        // throws inside CanUse (station.info.user deref), which the game's FixedUpdate
+        // does NOT catch and which then floods the log every frame. We swallow the
+        // exception here so the game keeps running; closestUsable simply stays whatever
+        // it was (the game re-scans next frame). We log once, throttled, so the crash
+        // is visible without spamming.
+        private static Exception SortGrabbables_Finalizer(Exception __exception)
+        {
+            if (__exception == null) return null;
+            try
+            {
+                if (Log == null) return __exception;
+                float now = Time.unscaledTime;
+                if (now - _lastStationCrashLog > 30f)
+                {
+                    _lastStationCrashLog = now;
+                    Log.LogWarning("KKLLMNPC: swallowed station CanUse NRE (null station.info) — "
+                        + __exception.GetType().Name + ": " + __exception.Message
+                        + " — game interaction menu left intact, will re-scan next frame.");
+                }
+            }
+            catch (Exception) { }
+            return null; // swallow — do not rethrow
+        }
+        private static volatile float _lastStationCrashLog = -99f;
+        internal static BepInEx.Logging.ManualLogSource Log;
     }
 }

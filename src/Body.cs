@@ -1790,5 +1790,33 @@ namespace KKLLMNPC
             }
             catch (Exception) { return null; }
         }
+
+        // Whether ANYTHING is physically touching the body right now — the honest
+        // contact signal the model needs to tell real intimacy from a body that is
+        // merely aroused on its own. Arousal rises with no contact (see StimFromText's
+        // comment + Movement.UpdateHorniness), so "very aroused" must NOT be read as
+        // "someone is touching me". Returns a short phrase the perception layer drops
+        // into 'touch'. Main-thread only (reads game state).
+        internal string ContactText()
+        {
+            try
+            {
+                if (IsPenetrated()) return "being_penetrated";
+                if (IsDickInside()) return "penetrating_something";
+                if (IsInAnimationStation()) return "mounted_in_station";
+                // Being carried / swallowed: the belly holds a guest (you're the
+                // carrier) OR you're the meal inside someone (Swallowed). Either way a
+                // body is inside you — that IS contact. BellyGuestText is null when the
+                // belly is empty, non-null when a guest is present.
+                try
+                {
+                    if (Swallowed) return "inside_a_stomach";
+                    if (SwallowManager.BellyGuestText(_kobold) != null) return "carrying_a_guest";
+                }
+                catch (Exception) { }
+                return "none — nothing is touching you";
+            }
+            catch (Exception) { return "none — nothing is touching you"; }
+        }
     }
 }
