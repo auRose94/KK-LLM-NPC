@@ -154,16 +154,30 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 - `CONTRIBUTING.md` — style, PR checklist, game-API integration notes
 - `wip/BASE-GAME-AI.md` — reverse-engineered game internals
 
-## Current state (2026-11-06)
+## Current state (2026-11-15)
 
-- `main` is the PR target. `ws/*` branches are checked out in git worktrees
-  elsewhere — don't try to check them out here.
-- `feature/headless-agent-sim` (current branch) is one commit ahead of `main`
-  (v1.2.3 landed here) plus the headless agent sim: the console turn engine now
-  lives in pure `src/ConsoleTurnCore.cs` behind an `IConsoleTurnEnv` seam
-  (`Console.cs` keeps only the game wiring), and `tests/test_turncore.cs` drives
-  whole agent turns with a scripted fake LLM + fake world (99 checks; 22
-  suites). v1.3.0. Ready to merge to `main`.
+- `main` is the PR target and is current: it contains v1.2.3 + v1.3.0 (the
+  headless-agent-sim merge, `629e327`). CI runs on every branch push since
+  2026-11-15 (previously main/master/dev only — feature branches got no test
+  runs). `ws/*` branches are checked out in worktrees under
+  `/mnt/Matrix/Work/KK-LLM-NPC-wt/<name>` — don't try to check them out here.
+- v1.3.0 is NOT released yet (newest GitHub release is v1.2.3) — cut it when
+  the next batch settles.
+- 2026-11-15: phantom-intimacy fix — perception `touch` field
+  (`Body.ContactText`) states real physical contact (penetrated / penetrating /
+  mounted / carrying / swallowed / none); arousal alone is never intimacy and
+  the prompt says so. Plus a Harmony finalizer on `User.SortGrabbables` that
+  swallows the game's per-physics-frame `BreedingStation.CanUse` NRE (null
+  `station.info` after a body dies mid-mount) with a throttled log.
+- 2026-11-15: Ollama keep-alive heartbeat — `[Ollama].KeepAlive` (default
+  `30m`): the watcher pings `/api/generate` with an empty prompt + explicit
+  `keep_alive` (Ollama's documented keep-warm call) roughly every half-window,
+  so the model never unloads mid-session. `-1` pins, `off` disables; pure
+  parse/cadence in `OllamaArgs.KeepAliveSeconds`/`KeepAlivePingSecs`.
+- The console turn engine lives in pure `src/ConsoleTurnCore.cs` behind an
+  `IConsoleTurnEnv` seam (`Console.cs` keeps only the game wiring), and
+  `tests/test_turncore.cs` drives whole agent turns with a scripted fake LLM +
+  fake world (22 suites total).
 - v1.2.3 (2026-11-05): new default profile — rapid/immersive/Ollama-first.
   Shipped defaults now reflect a well-played setup (no existing config file is
   touched — BepInEx only writes a key on first launch). Ollama adoption
