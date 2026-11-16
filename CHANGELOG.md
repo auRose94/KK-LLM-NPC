@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — stretch stomachs, kick training, and the player escape mini-game)
+
+- **The stretch band**: a meal slightly over the ceiling (up to +0.6 ratio)
+  still goes down — the stomach STRETCHES to compensate: pull ×1.5,
+  digest ×1.35, the meal's kicks hit ×1.25 harder against the tight gut,
+  and the bulge shows ×1.2 more. Only beyond the band is the meal refused.
+- **Kick training**: HOLD a real fighter (struggle ≥ 4) all the way through
+  digestion and the eater's `bellySize` gene grows (+2, live-applied via
+  `SetGenes` — a genuinely roomier stomach, persisted by the game's save).
+  Surviving kicks IS training: preds who keep eating fighters become able
+  to swallow anyone.
+- **Player escape mini-game**: the "swallow abort" chat command is GONE. A
+  swallowed PLAYER earns freedom the honest way — MASH SPACE (spectate HUD
+  shows the struggle meter `[#-----] N%`; each press = one struggle hit,
+  same size-scaled math as agent kicks; fill it and the pred throws you up
+  whole). When the eater runs on another client, the meter lives on the
+  victim's machine and success fires the same cross-machine abort RPC the
+  chat command used. NPC victims keep the `kick` path (which now shares one
+  `VomitRelease` with the mini-game).
+
 ### Added (2026-11-16 — vore size mechanics: capacity gates, scaled time, throw-up, belly bulge)
 
 Meals scale with the bodies involved, per the playtest design:

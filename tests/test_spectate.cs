@@ -96,11 +96,20 @@ internal static class TestSpectate
         string hud = SpectateLogic.HudLine("Sylvie", "the egg is planted in soil");
         True(hud.Contains("Sylvie"), "hud names the eater");
         True(hud.Contains("planted in soil"), "hud carries the hatch promise");
-        True(hud.Contains("swallow abort"), "hud names the escape command");
         hud = SpectateLogic.HudLine("Sylvie", null);
         True(hud.Contains("no hatch coming"), "hud explains Grow/Destroy have no hatch");
         hud = SpectateLogic.HudLine(null, "x");
         True(hud.Contains("someone"), "hud falls back to 'someone'");
+        // ---- escape mini-game meter (2026-11-16): MASH SPACE, no chat command ----
+        string hudMash = SpectateLogic.HudLine("Sylvie", null, 0.5f);
+        True(hudMash.Contains("MASH SPACE"), "hud teaches the escape mini-game");
+        True(hudMash.Contains("50%"), "hud shows the meter percent");
+        True(!hudMash.Contains("swallow abort"), "the chat-abort command is gone from the hud");
+        string hudFull = SpectateLogic.HudLine("Sylvie", null, 1f);
+        True(hudFull.Contains("########"), "meter fills all eight cells at full");
+        string hudIdle = SpectateLogic.HudLine("Sylvie", null, 0f);
+        True(hudIdle.Contains("--------"), "meter starts empty");
+        True(!SpectateLogic.HudLine("Sylvie", null).Contains("MASH"), "legacy 2-arg call omits the meter");
         // the HUD never leaks a hatch promise when the effect has none
         string hudNoHatch = SpectateLogic.HudLine("Sylvie", null);
         True(!hudNoHatch.Contains("until"), "hud 'no hatch' variant promises nothing");

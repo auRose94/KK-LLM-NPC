@@ -122,12 +122,31 @@ namespace KKLLMNPC
         // The one-line status the spectating player always sees on screen (HUD).
         // hatchHint = what the planted egg promises them; null = there is NO hatch
         // (Grow/Destroy) — the line must then say so plainly and never promise one.
+        // struggle01 (0..1, or negative = omit) drives the ESCAPE MINI-GAME meter
+        // (2026-11-16): the chat-abort command is gone — a swallowed player MASHES
+        // SPACE to struggle free, and the bar shows how close the stomach is to
+        // heaving them back up.
         public static string HudLine(string eaterLabel, string hatchHint)
+        {
+            return HudLine(eaterLabel, hatchHint, -1f);
+        }
+
+        public static string HudLine(string eaterLabel, string hatchHint, float struggle01)
         {
             string who = string.IsNullOrEmpty(eaterLabel) ? "someone" : eaterLabel;
             string b = "you are inside " + who + " — watching";
-            if (string.IsNullOrEmpty(hatchHint)) b += " (no hatch coming — 'swallow abort' in game chat frees you)";
-            else b += " until " + hatchHint + " — or 'swallow abort' in game chat frees you";
+            if (string.IsNullOrEmpty(hatchHint)) b += " (no hatch coming)";
+            else b += " until " + hatchHint;
+            if (struggle01 >= 0f)
+            {
+                int filled = (int)Math.Round(struggle01 * 8f);
+                if (filled < 0) filled = 0;
+                if (filled > 8) filled = 8;
+                var bar = new System.Text.StringBuilder();
+                for (int i = 0; i < 8; i++) bar.Append(i < filled ? '#' : '-');
+                b += " — MASH SPACE to struggle free [" + bar + "] "
+                    + Math.Round(struggle01 * 100f) + "%";
+            }
             return b;
         }
     }

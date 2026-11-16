@@ -521,15 +521,41 @@ namespace KKLLMNPC
             return ratio < 0.75f ? 0.75f : (ratio > 2f ? 2f : ratio);
         }
 
-        // Capacity: a meal over the limit is refused outright. The eater's
-        // bellySize gene — the game's OWN stomach capacity (it sets
-        // bellyContainer.maxVolume) — raises the ceiling, so a big-stomach
-        // predator eats big prey as a build choice, not a loophole.
+        // Capacity ceiling: the eater's bellySize gene — the game's OWN stomach
+        // capacity (it sets bellyContainer.maxVolume) — raises it, so a
+        // big-stomach predator eats big prey as a build choice.
+        public static float BellyCeiling(float eaterBellySize)
+        {
+            return 2.1f + (eaterBellySize > 0f ? eaterBellySize : 0f) / 25f;
+        }
+
+        // THE STRETCH BAND (2026-11-16, Rose's design): a meal slightly OVER the
+        // ceiling still goes down — the stomach stretches to compensate. It's
+        // slower, riskier work (see the multipliers below); only beyond the band
+        // is the meal refused outright.
+        public const float StretchBand = 0.6f;
+        public const float StretchPullMult = 1.5f;     // swallowing past your size is slow work
+        public const float StretchDigestMult = 1.35f;  // and takes longer to work down
+        public const float StretchStruggleMult = 1.25f; // a stretched-tight gut is easier to churn
+        public const float StretchBulgeMult = 1.2f;    // and shows even more
+
+        public static bool IsStretchMeal(float ratio, float eaterBellySize)
+        {
+            float ceil = BellyCeiling(eaterBellySize);
+            return ratio > ceil + 0.001f && ratio <= ceil + StretchBand + 0.001f;
+        }
+
+        // True when the meal goes down AT ALL (plain or stretching).
         public static bool FitsInBelly(float ratio, float eaterBellySize)
         {
-            float limit = 2.1f + (eaterBellySize > 0f ? eaterBellySize : 0f) / 25f;
-            return ratio <= limit + 0.001f; // epsilon: float sums round down at the edge
+            return ratio <= BellyCeiling(eaterBellySize) + StretchBand + 0.001f;
         }
+
+        // KICK TRAINING (2026-11-16): holding a real fighter all the way through
+        // digestion trains the stomach — the eater's bellySize gene grows a
+        // little (live-applied by the game: a genuinely roomier gut).
+        public const float TrainStruggleMin = 4f;
+        public const float TrainBellyGain = 2f;
 
         // Struggle: each kick counts more the bigger the meal (small prey
         // barely register; a same-size meal churns properly). Threshold is in
@@ -539,6 +565,13 @@ namespace KKLLMNPC
             return ratio < 0.5f ? 0.5f : (ratio > 3f ? 3f : ratio);
         }
         public const float StruggleVomitThreshold = 12f;
+
+        // The struggle meter as 0..1 for HUDs (player escape mini-game).
+        public static float Struggle01(float struggle)
+        {
+            if (struggle <= 0f) return 0f;
+            return struggle >= StruggleVomitThreshold ? 1f : struggle / StruggleVomitThreshold;
+        }
 
         // Belly bulge in the game's inflatable units (1.0 = the full belly
         // blendshape, beyond = the "continue" overflow shape): visible at an

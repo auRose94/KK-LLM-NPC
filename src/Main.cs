@@ -844,6 +844,9 @@ namespace KKLLMNPC
             // MOD-TO-MOD handshake: presence heartbeat + peer scan (throttled
             // internally; no-ops offline).
             try { MultiplayerPresence.Tick(this); } catch (Exception) { }
+            // PLAYER ESCAPE MINI-GAME: a swallowed player mashes SPACE — no chat
+            // command anymore (2026-11-16).
+            try { SwallowManager.PollPlayerStruggle(); } catch (Exception) { }
             // DLL-change poll: FileSystemWatcher does NOT fire on SMB shares (the
             // game install here is a network drive — hot-reload silently never
             // worked) — poll the plugin file's write time ourselves, cheaply.
@@ -1518,7 +1521,8 @@ namespace KKLLMNPC
                 // hear the release command themselves.
                 if (isLocal)
                 {
-                    try { if (SwallowManager.TryAbortFromChat(msg)) return; } catch (Exception) { }
+                    // (2026-11-16) the swallow-abort CHAT command is gone — the swallowed
+                    // player escapes by MASHING SPACE now (SwallowManager.PollPlayerStruggle).
                     // vore operator controls ("vore arm anal", "vore fate", "vore …"):
                     // consumed like the abort words so agents never hear them
                     try { if (TryVoreCommandFromChat(msg)) return; } catch (Exception) { }

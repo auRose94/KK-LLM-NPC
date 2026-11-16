@@ -198,7 +198,8 @@ namespace KKLLMNPC
             {
                 if (_active == null) return null;
                 string who = _active.EaterLabel ?? "someone";
-                return SpectateLogic.HudLine(who, string.IsNullOrEmpty(_active.HatchHint) ? null : _active.HatchHint);
+                return SpectateLogic.HudLine(who, string.IsNullOrEmpty(_active.HatchHint) ? null : _active.HatchHint,
+                    SwallowManager.PlayerStruggle01());
             }
         }
 
