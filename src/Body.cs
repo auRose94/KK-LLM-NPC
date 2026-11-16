@@ -1386,6 +1386,26 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
 
+                // OWN-APPENDAGE GUARD (WhorseDick bug, field log 2026-11-15): a penis
+                // GAINED by grow-vore absorb spawns re-rooted OUTSIDE the checks above
+                // and instantly registered against our own penetrables — Zivka absorbed
+                // Mochi (dick=gained) and five log lines later reported "penetrated by
+                // WhorseDick (vagina)" about her own new equipment. A penetrator that
+                // is literally one of this body's own appendages (component search,
+                // inactive included) can never penetrate us. Only NEW contacts pay the
+                // search; known contacts update silently anyway.
+                try
+                {
+                    if (penetrator != null && _kobold != null && !_pen.ContainsKey(penetrator))
+                    {
+                        var ownAppendages = _kobold.GetComponentsInChildren<PenetrationTech.Penetrator>(true);
+                        if (ownAppendages != null)
+                            foreach (var own in ownAppendages)
+                                if (own == penetrator) return;
+                    }
+                }
+                catch (Exception) { }
+
                 string whoPen = penetrator.gameObject != null ? CleanName(penetrator.gameObject.name) : "something";
                 if (voreInsert && penGoName != null && penGoName.Length > 5)
                     whoPen = "vore-insert:" + CleanName(penGoName.Substring(5));

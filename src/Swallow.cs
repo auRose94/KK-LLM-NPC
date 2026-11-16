@@ -2210,6 +2210,9 @@ namespace KKLLMNPC
                 LLMNPCPlugin.Log.LogWarning("swallow: victim '" + st.Name + "' vanished mid-swallow — no egg laid");
                 try { if (st.Npc != null) st.Npc.PushWorldEvent("the swallow was interrupted — you were pulled out of the world entirely, not reborn from an egg."); } catch (Exception) { }
                 try { if (st.EaterNpc != null) st.EaterNpc.PushWorldEvent("the swallow was interrupted: " + st.Name + " was pulled out of the world from inside you — nothing of them was converted."); } catch (Exception) { }
+                // SWIFT SILENCE (2026-11-16): their body is gone — no confused
+                // "where's my body?" turns while reconcile catches up.
+                try { if (st.Npc != null) st.Npc.MarkGone("pulled out of the world mid-swallow"); } catch (Exception) { }
                 DestroyVirtualPen(st);
                 EndSwallow(st);
                 _active.RemoveAt(index);
@@ -3017,6 +3020,10 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
                 try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — you have been absorbed: body, strength... and your MEMORIES now live on in " + BodyLabel(st.Eater) + "."); } catch (Exception) { }
+                // SWIFT SILENCE: the absorbed mind must not take another turn or
+                // speak again ("Zynx... I'm all yours now" from inside the eater,
+                // 2026-11-15 playtest) — gone the moment the conversion completes.
+                try { if (st.Npc != null) st.Npc.MarkGone("absorbed into " + BodyLabel(st.Eater)); } catch (Exception) { }
             }
             catch (Exception e)
             {
@@ -3064,6 +3071,8 @@ namespace KKLLMNPC
             catch (Exception) { }
             try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' consumed entirely (Destroy mode)"); } catch (Exception) { }
             try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — you have been consumed entirely. There is no egg, no rebirth."); } catch (Exception) { }
+            // SWIFT SILENCE (2026-11-16): fully consumed = gone now; no post-mortem chatter.
+            try { if (st.Npc != null) st.Npc.MarkGone("fully consumed by " + BodyLabel(st.Eater)); } catch (Exception) { }
 
             if (st.VictimIsPlayer)
             {

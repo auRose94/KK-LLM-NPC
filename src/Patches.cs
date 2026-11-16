@@ -64,6 +64,19 @@ namespace KKLLMNPC
                 // swallow (SwallowManager owns the trigger rule + suppresses the drop).
                 SwallowManager.ApplyPatches(_harmony);
 
+                // SWIFT SELL SILENCE (2026-11-16, v1.3.0 playtest): MailMachine is
+                // the game's sell box — LocalUse runs the mail animation, then
+                // WaitThenVoreKobold PhotonNetwork.Destroy's the body. During those
+                // seconds (and until our reconcile notices) a claimed agent kept
+                // turning and SPEAKING from inside the mailbox ("where's my body?").
+                // When the machine takes one of OUR bodies, silence and retire the
+                // mind immediately — a sold kobold is gone the moment it's mailed.
+                var mailUse = typeof(MailMachine).GetMethod("LocalUse",
+                    BindingFlags.Instance | BindingFlags.Public);
+                if (mailUse != null)
+                    _harmony.Patch(mailUse,
+                        prefix: new HarmonyMethod(typeof(Patches).GetMethod(nameof(MailMachine_LocalUse_Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
+
                 log.LogInfo("KKLLMNPC: animator rotation patches applied.");
             }
             catch (Exception e)
@@ -138,5 +151,28 @@ namespace KKLLMNPC
         }
         private static volatile float _lastStationCrashLog = -99f;
         internal static BepInEx.Logging.ManualLogSource Log;
+
+        // Instance-for-body resolver, set by the plugin at startup (same delegate
+        // idiom as ModGrabManager.ResolveNpc) — lets this static class reach the
+        // NPCInstance driving a body without holding a plugin reference.
+        internal static System.Func<Kobold, NPCInstance> ResolveNpc;
+
+        // Prefix on MailMachine.LocalUse(Kobold k): silence the mind the moment the
+        // mail machine takes its body. Never blocks the game's sale (returns true).
+        private static bool MailMachine_LocalUse_Prefix(MailMachine __instance, Kobold k)
+        {
+            try
+            {
+                if (k == null) return true;
+                var npc = ResolveNpc != null ? ResolveNpc(k) : null;
+                if (npc != null && !npc.IsGone)
+                {
+                    npc.MarkGone("sold through the mail machine");
+                    try { Log?.LogInfo("KKLLMNPC: mail machine took '" + NPCInstance.CleanName(k.name) + "' — agent silenced (sold)."); } catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+            return true; // the sale itself always proceeds
+        }
     }
 }

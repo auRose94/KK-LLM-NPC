@@ -470,6 +470,14 @@ namespace KKLLMNPC
         // and a local echo so the player sees their own window too.
         private object ToolSay(JsonObj p)
         {
+            // SWIFT-GONE gate: an absorbed/sold mind never speaks again — the say
+            // is dropped quietly instead of the victim chatting from inside the
+            // eater or the mail machine (2026-11-16 playtest).
+            if (_gone)
+            {
+                try { Logger.LogDebug("[" + (_npcName ?? "?") + "] say dropped — gone (" + (_goneWhy ?? "?") + ")"); } catch (Exception) { }
+                return new { ok = false, reason = "gone — you have been " + (_goneWhy ?? "removed") + "; there is nothing left to say or do" };
+            }
             // The act schema names the parameter 'say', but salvage paths and some
             // models use 'text' or 'message' — accept all three.
             string text = p.S("say", "");

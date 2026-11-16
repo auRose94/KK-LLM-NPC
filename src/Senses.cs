@@ -1416,8 +1416,12 @@ namespace KKLLMNPC
             }
             catch (Exception e) { Logger.LogWarning("nearby: " + e.Message); }
 
-            // Notice the player: greet them the first time (and re-greet after a
-            // cooldown), and record when we last saw them so the prompt can say so.
+            // Notice the player: a SIGNAL, never canned speech (2026-11-16, Rose's
+            // direction) — the model gets an event that the player appeared nearby
+            // and decides for itself whether/how to greet. The old auto-"oh, hi!"
+            // ToolSay spoke FOR the agent and read as pre-programmed; the cooldowns
+            // stay so the signal can't spam. First sight is the meaningful moment;
+            // re-sights after a long gap get a quieter reminder.
             if (sawPlayer)
             {
                 bool firstSight = _playerSeenTime < -90f;
@@ -1425,10 +1429,12 @@ namespace KKLLMNPC
                 if ((firstSight && Time.unscaledTime - _lastGreetTime > 6f) || Time.unscaledTime - _lastGreetTime > 45f)
                 {
                     _lastGreetTime = Time.unscaledTime;
-                    string greet = firstSight ? "oh, hi!" : "hey again";
-                    // Use ToolSay, which posts to the real chat window too.
-                    RunOnMainThreadAsync(() => { try { ToolSay(new TextArgs(greet)); } catch (Exception e) { Logger.LogWarning("greet: " + e.Message); } });
-                    Logger.LogInfo("KKLLMNPC: noticed player, greeting.");
+                    string chat = PlayerChatName();
+                    string who = chat != null ? chat : "your player";
+                    PushWorldEvent(firstSight
+                        ? "[event] you notice " + who + " nearby — you haven't crossed paths in a while (or ever). Whether to greet them, watch them, or keep doing what you're doing is entirely up to you."
+                        : "[event] " + who + " is still around.");
+                    Logger.LogInfo("KKLLMNPC: noticed player — proximity signal sent (no canned greeting).");
                 }
             }
             return list;

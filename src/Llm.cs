@@ -600,7 +600,7 @@ namespace KKLLMNPC
             try { Thread.Sleep(4000); } catch (Exception) { return; }
             string lastState = "";
             int wedgedMarshalTimeouts = 0;
-            while (_running)
+            while (_running && !_gone)
             {
                 try
                 {

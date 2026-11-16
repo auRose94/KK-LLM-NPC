@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-11-16 — vore playtest round: swift silence, own-dick guard, voluntary greetings)
+
+- **Swift silence.** A fully absorbed mind (Grow absorb, Destroy consume, or
+  vanished mid-swallow) now goes quiet the moment the conversion completes —
+  `MarkGone` stops the LLM loop, drops every further `say`, and retires the
+  instance. Previously the victim kept chatting from inside the eater
+  ("Zynx... I'm all yours now. I accept it.") or, once the body was
+  destroyed, asked "where's my body?" until the reconcile pass caught up.
+  Same for the sell box: the mail machine (KoboldKare's actual seller —
+  LocalUse → mail animation → PhotonNetwork.Destroy) is now Harmony-prefixed,
+  so a claimed body being mailed is silenced the instant the machine takes
+  it, not seconds later.
+- **Own-appendage guard (the WhorseDick bug).** A penis GAINED by grow-vore
+  absorb spawns re-rooted outside the existing own-body checks and
+  registered against the eater's own penetrables — the log shows "absorbed
+  Mochi (dick=gained)" and five lines later "penetrated by WhorseDick
+  (vagina)": the agent reacting to its own new equipment as "something is
+  inside me". A penetrator that is one of the body's own appendages
+  (component search, inactive included) can never penetrate it; only new
+  contacts pay the search.
+- **Voluntary greetings.** The canned "oh, hi!" / "hey again" auto-speech on
+  noticing the player is gone — the agent now receives a proximity signal
+  ("you notice <player> nearby — whether to greet them is entirely up to
+  you") and decides for itself. First-sight and cooldown behavior preserved
+  so the signal can't spam.
+
+## [1.3.0] — 2026-11-15
+
 ### Fixed (2026-11-15 — who's-who: identity churn made legible; ps ids; record name pollution)
 
 Field log from the v1.3.0 playtest: every agent's body was destroyed/sold

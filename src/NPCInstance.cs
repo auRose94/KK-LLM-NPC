@@ -150,6 +150,21 @@ namespace KKLLMNPC
         // Set when a bound body is gone (or we left the world): the plugin's
         // reconciler retires this instance on its next pass.
         internal volatile bool BodyLost;
+        // SWIFT-GONE (2026-11-16, from the v1.3.0 playtest): the moment a mind is
+        // fully absorbed — or its body is taken by the mail machine to be sold —
+        // it must go quiet NOW: no further turns, no further speech. Without this
+        // the victim kept chatting from inside the eater ("Zynx... I'm all yours
+        // now") or asked "where's my body?" from inside the sell box, and the
+        // player felt awful. Set by MarkGone; read by the LLM loop and ToolSay.
+        private volatile bool _gone;
+        private volatile string _goneWhy;
+        internal void MarkGone(string why)
+        {
+            _gone = true;
+            _goneWhy = why;
+            BodyLost = true; // reconcile retires us on its next pass
+        }
+        internal bool IsGone { get { return _gone; } }
         private bool _bodyLostLogged;
 
         // ---- non-consent detection (Wave 3 POC) ----

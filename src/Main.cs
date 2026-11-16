@@ -386,6 +386,7 @@ namespace KKLLMNPC
             SpectateHudUI.PluginRef = this;
             
             try { Patches.Apply(Logger); } catch (Exception e) { Logger.LogWarning("patch apply: " + e.Message); }
+            Patches.ResolveNpc = InstanceForBody; // mail-machine sell-silence reaches the driving instance
             // Carry correctness: AI-body grabbers anchor held items on the AGENT'S eye
             // (the game's spring reads the local player's camera aim otherwise).
             try { ModGrabManager.Apply(PatchesHarmony()); } catch (Exception e) { Logger.LogWarning("modgrab patch: " + e.Message); }
