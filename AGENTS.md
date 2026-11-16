@@ -24,8 +24,8 @@ weaken those gates casually; see `docs/VORE.md` before touching that area.
 ## Commands
 
 ```bash
-./run_tests.sh                  # all 22 pure-C# suites — THE gate (CI runs this)
-./run_tests.sh json swallow     # subset by suite name
+./run_tests.sh                  # all 23 pure-C# suites — THE gate (CI runs this)
+./run_tests.sh json swallow     # subset by suite name (exact or prefix)
 ./check_syntax.sh               # parse-only check, no game install needed
 ./check_build.sh                # FULL compile vs real game install — only check that
                                 #   catches semantic errors; skips cleanly (exit 0) if
@@ -177,7 +177,9 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 - The console turn engine lives in pure `src/ConsoleTurnCore.cs` behind an
   `IConsoleTurnEnv` seam (`Console.cs` keeps only the game wiring), and
   `tests/test_turncore.cs` drives whole agent turns with a scripted fake LLM +
-  fake world (22 suites total).
+  fake world; `tests/test_soak.cs` is the long-horizon soak (3 agents ×
+  `SOAK_ROUNDS` turns over pathological replies — CI's nightly schedule scales
+  it to 2000). 23 suites total.
 - v1.2.3 (2026-11-05): new default profile — rapid/immersive/Ollama-first.
   Shipped defaults now reflect a well-played setup (no existing config file is
   touched — BepInEx only writes a key on first launch). Ollama adoption
