@@ -24,8 +24,9 @@ weaken those gates casually; see `docs/VORE.md` before touching that area.
 ## Commands
 
 ```bash
-./run_tests.sh                  # all 23 pure-C# suites — THE gate (CI runs this)
+./run_tests.sh                  # all 23 pure-C# suites + python linter selftest — THE gate (CI runs this)
 ./run_tests.sh json swallow     # subset by suite name (exact or prefix)
+tools/lint_config.py            # lint the game's live cfg vs docs/CONFIG.md (--selftest, --strict)
 ./check_syntax.sh               # parse-only check, no game install needed
 ./check_build.sh                # FULL compile vs real game install — only check that
                                 #   catches semantic errors; skips cleanly (exit 0) if
@@ -147,9 +148,11 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 ## Docs map
 
 - `docs/ARCHITECTURE.md` — full component breakdown, data flow, thread model
-- `docs/CONFIG.md` — complete config reference
+- `docs/CONFIG.md` — complete config reference (the `tools/lint_config.py` source of truth)
+- `docs/BEHAVIOR.md` — long-form behavior highlights (moved out of README 2026-11-15)
 - `docs/VORE.md` — swallow-vore/spectate mechanics (opt-in features)
 - `docs/MODELS.md` — model compatibility notes + benchmark plan
+- `docs/changelog-archive.md` — pre-2026-10-14 changelog rounds (main CHANGELOG keeps the rest)
 - `tests/README.md` — suite table, how to add a suite, deleted-fake-tests history
 - `CONTRIBUTING.md` — style, PR checklist, game-API integration notes
 - `wip/BASE-GAME-AI.md` — reverse-engineered game internals

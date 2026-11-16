@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the unit test suites: the pure-C# ones (no Unity/BepInEx/game install
-# required), plus the serve/ python contract tests when python3 exists.
+# required), plus the python config-linter selftest when python3 exists.
 #
 # Usage:
 #   ./run_tests.sh              # run everything
@@ -136,6 +136,20 @@ audit_coverage() {
 printf 'KK-LLM-NPC unit tests (pure C#)\n'
 run_headless_suites "$@"
 audit_coverage
+
+# Python tooling gate: the config linter's parser selftest (stdlib only, so
+# ubuntu-latest runners need no setup; skipped silently where python3 is absent).
+if command -v python3 >/dev/null 2>&1; then
+  if want_suite lint_config || [ ${#FILTERS[@]} -eq 0 ]; then
+    printf '\n=== lint_config (python) ===\n'
+    if python3 tools/lint_config.py --selftest; then
+      PASSED=$((PASSED + 1))
+    else
+      FAILED=$((FAILED + 1))
+      FAILED_SUITES+=("lint_config (python)")
+    fi
+  fi
+fi
 
 printf '\n========================================\n'
 if [ $FAILED -eq 0 ]; then
