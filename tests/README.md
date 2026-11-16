@@ -21,15 +21,16 @@ file can't silently never run.
 
 | Suite | File | Tests | What it covers |
 |-------|------|-------|----------------|
-| `json` | `test_json.cs` + `test_json_standalone.cs` | 22 | Json parser/writer (null, bool, int, float, string, object, array, nested, truncated, whitespace, round-trip) |
+| `json` | `test_json.cs` + `test_json_standalone.cs` | 41 | Json parser/writer (null, bool, int, float, string, object, array, nested, truncated, whitespace, round-trip; `\uXXXX` escapes incl. surrogate pairs + malformed fallback, `\b`/`\f`, writer control-char round-trip; writer collection shapes, type-leak guard) |
 | `pathcore` | `test_pathcore.cs` | 33 | A* solver, PathPolicy.ShouldReplan (14 cases), adaptive cell sizing, auto floor detection |
 | `goalresolver` | `test_goalresolver.cs` | 30 | Goal snapping: fast path, expanding-ring search, MaxRadius cutoff, height tiebreak, tie-break order, bounds/edge cases |
 | `contextcore` | `test_contextcore.cs` | 109 | Compaction escalation ladder, de-escalation, streak reset, per-budget dynamic limits + floors, token estimation, fact merging, history summarization |
 | `chat` | `test_chat_similarity.cs` | 19 | Jaccard similarity, Levenshtein ratio, fuzzy matching (6+ significant words) |
 | `console` | `test_console_shell.cs` | 90 | Console REPL parser: canonical/alias/fuzzy resolution, prose guard, prompt prefixes, headers, payload + quoted args, legacy call-style args, reply splitting (fences/bullets/mixed), help text, module `RegisterExtra` |
+| `turncore` | `test_turncore.cs` | 99 | Headless agent sim: a scripted fake LLM + fake world drive WHOLE console turns through the real engine (`ConsoleTurnCore`) — rounds, anchor dedup, ENTER frames, prose nudges, identical-repeat guard, terminal-copy guard, rp blocks + star nudge, command budget (+ sleep honor, + echo refund), unknown escalation, stuck ladder, scratch-free commands, pipes/tee, multipart screenshots, endpoint gates, turn clock, salvage + think-strip integration |
 | `safehttp` | `test_safehttp.cs` | 23 | Retry/backoff against a real loopback `HttpListener`: transient 5xx actually re-hits the server, permanent 4xx fails fast, error bodies surfaced, response size caps |
 | `spectate` | `test_spectate.cs` | 57 | Agent-eats-player gate (every reason reachable, zero-range guard), north-up azimuth math, size-scaled follow distance + clamps, follow-pose geometry (behind the eater at every cardinal), first-person eye offset (AI-vision convention) + third-person wall boom clamp, frame-rate-independent smoothing, spectator HUD line (hatch/no-hatch variants) |
-| `textutil` | `test_textutil.cs` | 43 | AsciiSafe, degenerate-say trimming (token/bigram runs), chat-template expansion, and viewer-relative fact hygiene (the remember gate: junk flagged, name-anchored/anchored-events pass) |
+| `textutil` | `test_textutil.cs` | 110 | AsciiSafe, degenerate-say trimming (token/bigram runs), chat-template expansion, viewer-relative fact hygiene (the remember gate: junk flagged, name-anchored/anchored-events pass), surrogate-scrub `Sanitize` + one-line `Shorten` (moved here for the headless turn engine) |
 
 **Total: run `./run_tests.sh` — every suite must pass; it audits that no test file is unwired.**
 

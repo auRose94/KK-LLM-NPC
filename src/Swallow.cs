@@ -1416,10 +1416,12 @@ namespace KKLLMNPC
             try { BroadcastBegin(st); } catch (Exception) { }
             try { st.EaterNpc = Plugin.InstanceForBody(eater); } catch (Exception) { st.EaterNpc = null; }
             // The EATER is the AI whose loop keeps running during a swallow — its
-            // grabber fires every frame. The victim above already sets its own
-            // StomachSwallowed, but the eater's never gets flagged: without this the
-            // eaten-by model keeps grabbing floor items all through the conversion.
-            if (st.EaterNpc != null) { try { st.EaterNpc.Swallowed = true; } catch (Exception) { } }
+            // grabber fires every frame. Flag it as DIGESTING (not Swallowed — the
+            // eater is the predator, not the meal): the only gate it needs is
+            // ModGrab's grab block, while its console, movement and anchor stay
+            // first-person honest ("my stomach is converting X", not "I am being
+            // digested"). See the Digesting field note on NPCInstance.
+            if (st.EaterNpc != null) { try { st.EaterNpc.Digesting = true; } catch (Exception) { } }
             // Mid-play swallow belt: if the victim was penetrating the eater when
             // swallowed, the eater's _pen entry never sees a "pull out" — purge
             // both sides of the false penetration so no rhythm survives the meal.
@@ -2592,13 +2594,11 @@ namespace KKLLMNPC
         // Undo the entire pin for one session and put the victim back into the
         // world in front of the eater (their OnReleaseRPC-style recovery, minus
         // what we changed ourselves).
-        // Clear the StomachSwallowed flag off EVERY mind tied to a finished
-        // session — the victim (line 939) AND the eater (line 923, my grab fix).
-        // Without the eater's reset here the eaten-by model's flag is left true
-        // forever: its grabber is permanently blocked and it can never grab again.
+        // Clear the eater's Digesting flag here: without this the predator's
+        // grabber stays blocked forever and it can never grab again.
         private static void EndSwallow(SwallowState st)
         {
-            if (st.EaterNpc != null) { try { st.EaterNpc.Swallowed = false; } catch (Exception) { } }
+            if (st.EaterNpc != null) { try { st.EaterNpc.Digesting = false; } catch (Exception) { } }
         }
 
         private static void ReleaseSwallowed(SwallowState st)
@@ -3598,6 +3598,17 @@ namespace KKLLMNPC
         // early-returns steering; the LLM session keeps running (it can speak), and
         // the swallow manager narrates the conversion into its world events.
         internal volatile bool Swallowed;
+
+        // True while THIS body is digesting someone ELSE (we are the eater/predator).
+        // Deliberately separate from Swallowed: the eater can walk, talk and work
+        // during a conversion — its awareness comes from BellyGuestText in the state
+        // anchor and the correctly-worded [conversion] events. The flag exists for
+        // the one gate the eater genuinely needs (ModGrab's per-frame grabber must
+        // not pick floor items up mid-conversion). Setting Swallowed on the eater
+        // (the old approach) made the console refuse every body command with
+        // "you are deep inside someone's body" — the predator was told it was the
+        // MEAL (2026-11-04 playtest report).
+        internal volatile bool Digesting;
 
         // Command gating while swallowed: the mind stays (it can be talked to), but
         // nothing body-attached can act — hands/legs/machines all reach nothing from

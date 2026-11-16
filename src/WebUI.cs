@@ -1266,7 +1266,12 @@ setInterval(poll,3000);poll();reports();setInterval(reports,15000);cfg();setInte
                         object role, content;
                         m.TryGetValue("role", out role);
                         m.TryGetValue("content", out content);
-                        terminal.Add(Convert.ToString(role) + ": " + WebTrunc(Convert.ToString(content), 500));
+                        // ConsoleMsgText, not Convert.ToString: screenshot-attached
+                        // messages carry multipart content (a text part + an image
+                        // part in an object[]) whose ToString() is "System.Object[]"
+                        // — the web terminal showed the type name where the model saw
+                        // its terminal output (2026-11-04 playtest).
+                        terminal.Add(Convert.ToString(role) + ": " + WebTrunc(ConsoleMsgText(m), 500));
                     }
                 if (terminal.Count > 24) terminal.RemoveRange(0, terminal.Count - 24);
             }

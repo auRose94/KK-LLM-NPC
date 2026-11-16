@@ -476,7 +476,7 @@ namespace KKLLMNPC
             if (text.Length == 0) text = p.S("text", "");
             if (text.Length == 0) text = p.S("message", "");
             if (text.Length == 0) return new { ok = false, reason = "empty" };
-            text = Sanitize(text);
+            text = TextUtil.Sanitize(text);
             // JSON-in-speech cleaner: reasoning models (gpt-oss) sometimes answer chat
             // turns with the act-shaped JSON instead of spoken words — a {"say": "..."}
             // echo, a whole act object, or fenced fragments — and none of that may

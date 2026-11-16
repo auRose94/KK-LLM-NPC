@@ -335,8 +335,9 @@ The mod talks to any OpenAI-compatible chat-completions endpoint via `[LLM].Endp
 (see the Requirements list above). For a local box the recommended host is
 **Ollama**, which ships its own model library, an `/api/chat` + `/v1/chat/completions`
 interface, and `--jinja` chat-template support so fine-tuned bases keep their base
-template. The mod can **adopt** the running Ollama as its live endpoint instead of the
-hard-coded `[LLM].Endpoint`, and hot-swap the served model without a config edit.
+template. The mod **adopts** the running Ollama as its live endpoint by default (v1.2.3)
+instead of the hard-coded `[LLM].Endpoint`, and hot-swaps the served model without a
+config edit. With no Ollama running it just idles, so a fresh install is unaffected.
 
 **Bring-up on a fresh machine:**
 
@@ -348,15 +349,15 @@ ollama run  tev1:4b             # sanity check it runs; Ctrl-D to quit
 
 Everything lives in the WebUI's **AI server** tab (http://127.0.0.1:8338): the status
 line shows whether Ollama has been adopted as the live endpoint (and its health,
-context length, current model); **enable adoption** makes the mod use Ollama, **take
-LLM traffic** pins the mod to `[LLM].Endpoint` while Ollama stays running, and
-**refresh models** re-reads what's installed. The **installed models** picker lists
-every local model (`ollama pull` to add one) and **use this model** hot-swaps the live
-served model — it also writes `[LLM].Model`, so it takes effect on the next turn (the
-model must be running in Ollama to serve).
+context length, current model); **disable adoption** makes the mod fall back to
+`[LLM].Endpoint` while Ollama stays running, and **refresh models** re-reads what's
+installed. The **installed models** picker lists every local model (`ollama pull` to
+add one) and **use this model** hot-swaps the live served model — it also writes
+`[LLM].Model`, so it takes effect on the next turn (the model must be running in Ollama
+to serve).
 
-Adoption is opt-in and reversible: `[LLM].Endpoint` is left untouched, so pointing back
-at any other endpoint is a one-line config change. Steam Proton runs Ollama the same way
+Adoption is on by default and reversible: `[LLM].Endpoint` is left untouched, so
+pointing back at any other endpoint is a one-line config change. Steam Proton runs Ollama the same way
 it runs any local server (native python outside Proton, or Wine inside it); the mod
 adopts whatever answers its endpoint.
 
@@ -366,18 +367,18 @@ adopts whatever answers its endpoint.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `Endpoint` | `http://127.0.0.1:11434/v1/chat/completions` | OpenAI-compatible chat completions URL |
-| `Model` | `local-model` | model name |
+| `Endpoint` | `http://127.0.0.1:11434/v1/chat/completions` | OpenAI-compatible chat completions URL (Ollama's) |
+| `Model` | `local-model` | model name (Ollama: an installed tag like `ornith-1.5:35b` — the default-recommended model) |
 | `ApiKey` | empty | bearer token |
 | `SystemPrompt` | built-in | persona; a customized value always wins |
 | `SystemPromptFile` | `system_prompt_default.txt` | path to a full system prompt (game dir, plugin dir, or CWD). Overrides the built-in unless `SystemPrompt` is customized; ships in this repo |
-| `ThinkInterval` | 0.4 | seconds between ticks |
-| `MaxTokens` | 640 | response cap (reasoning models need the headroom) (reasoning families: automatic floor, see Model families under the Console section) |
-| `Temperature` | 0.3 | sampler temp |
-| `PlanStepDelay` | 0.35 | pause between plan steps |
-| `PlanMaxSteps` | 8 | max chained actions per response |
+| `ThinkInterval` | 0.1 | seconds between ticks |
+| `MaxTokens` | 18096 | response cap (reasoning models need the headroom) (reasoning families: automatic floor, see Model families under the Console section) |
+| `Temperature` | 0.8 | sampler temp (higher = livelier roleplay) |
+| `PlanStepDelay` | 2 | pause between plan steps |
+| `PlanMaxSteps` | 2 | max chained actions per response |
 | `SendImage` | true | attach first-person JPEG when useful |
-| `ImageEveryNTicks` | 6 | baseline image cadence |
+| `ImageEveryNTicks` | 2 | baseline image cadence |
 | `ImageOnBump` | true | extra image right after blocked/bump |
 | `ImageOnTurn` | true | extra image after a >=30° turn |
 | `ImageHistory` | 3 | number of past frames to attach (0 = current only) |
@@ -387,6 +388,7 @@ adopts whatever answers its endpoint.
 | `CommentEveryNTicks` | 5 | free commentary interval (0 = off) |
 | `CommentTemp` | 0.9 | sampling temperature for commentary |
 | `ChatLogLines` | 20 | lines of chat history to feed the model (0 = off) |
+| `ParallelCalls` | 8 | max simultaneous LLM HTTP calls toward the endpoint (multi-NPC / multi-slot servers; lower to ~2 for a single-GPU serial box) |
 
 ### `[Console]` — bash-like REPL mode (default ON)
 
@@ -405,8 +407,8 @@ Logs one line per NPC: `model family 'qwen' from 'qwen3:14b' — …`.
 | Key | Default | Range | Purpose |
 | --- | --- | --- | --- |
 | `Enabled` | true | bool | Console REPL mode (default ON); false = legacy perception loop |
-| `MaxRounds` | 3 | 1–8 | Command rounds per think cycle (each round = one LLM call after reading output) |
-| `MaxTokens` | 256 | 64–4096 | Max tokens per console reply (command lines are short — low is fast). Reasoning families: automatic floor `256 + headroom`; your value stands when higher. |
+| `MaxRounds` | 5 | 1–8 | Command rounds per think cycle (each round = one LLM call after reading output) |
+| `MaxTokens` | 4096 | 64–4096 | Max tokens per console reply (command lines are short — low is fast). Reasoning families: automatic floor `4096 + headroom`; your value stands when higher. |
 | `HistoryMessages` | 30 | 6–120 | Rolling conversation window (system prompt always kept). When the window trims, the dropped span is replaced by a compact "[session memory]" digest instead of vanishing, so the story survives. |
 | `NativeTools` | true | on/off | Declare the console commands as an OpenAI tools array in console requests (see Native tool calling above). Auto-disabled for 300 s on a first tools-400; disable if your server errors on unknown payload fields. |
 | `AutoScreenshotTicks` | 6 | 0–60 | Attach the NPC's first-person view automatically every N console turns (vision-capable models only, and only when it moved/turned; also right after a stuck streak); 0 = off |
@@ -420,7 +422,7 @@ Logs one line per NPC: `model family 'qwen' from 'qwen3:14b' — …`.
 | `EveryNTicks` | 3 | ≥1 | Run the vision pass every N action ticks |
 | `Prompt` | built-in | — | Scene-report + navigation instruction for the vision pass |
 | `DebugDumpFrames` | true | bool | Write the exact JPEG given to the vision model to `BepInEx/plugins/KKLLMNPC_frames/` |
-| `Stereo` | false | bool | Render left+right eye cameras and stitch into side-by-side stereo image |
+| `Stereo` | true | bool | Render left+right eye cameras and stitch into side-by-side stereo image (default ON; harmless on a text-only model — image dropped when the server can't see) |
 | `StereoIPD` | 0.063 | — | Inter-pupillary distance in meters |
 
 ### `[VisionModel]` — route the captioner to a different model (or same)
@@ -446,12 +448,12 @@ benchmark plan — lives in [docs/MODELS.md](docs/MODELS.md).
 
 | Key | Default | Range | Purpose |
 | --- | --- | --- | --- |
-| `RayCount` | 9 | ≥2 | Number of rays across the frustum fan |
-| `RayRange` | 25 | 1–100m | Raycast range |
+| `RayCount` | 18 | ≥2 | Number of rays across the frustum fan |
+| `RayRange` | 32 | 1–100m | Raycast range |
 | `AutoFindRange` | 60 | 1–500m | Radius to look for an entity to hijack |
 | `RadarEnabled` | true | bool | North-up ASCII sonar map in perception (top edge is always north/+Z — never rotates with facing) |
-| `RadarSize` | 10 | 3–30 | Radar half-grid size in cells |
-| `RadarScale` | 1.2 | 0.1–10m | Radar meters per cell |
+| `RadarSize` | 30 | 3–30 | Radar half-grid size in cells |
+| `RadarScale` | 0.25 | 0.1–10m | Radar meters per cell |
 | `ImageSize` | 192 | 32–2048px | Square first-person render size |
 | `ImageQuality` | 50 | 1–100 | JPEG quality |
 | `CameraNearClip` | 0.10 | 0.01–10m | Camera near clip (raise if you see inside the head) |
@@ -529,7 +531,7 @@ in the mod — it's the model's own line, and the flag simply records it.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `MaxNPCs` | 1 | Maximum entities the LLM can possess (1–8) |
+| `MaxNPCs` | 4 | Maximum entities the LLM can possess (1–8) |
 | `SpawnMissingKobolds` | false | Spawn fresh AI kobolds (random genes, like the dispenser) near the player when the world can't fill `MaxNPCs` — a vanilla world only starts with the breeding pair. Off (default) = wait for bodies to appear naturally and claim each one as it shows up |
 | `DisableReagentMessages` | true | Suppress reagent injection messages in log |
 | `BlockedScenes` | `MainMenu,Loading,ErrorScene` | Comma-separated scene names where the LLM stays idle |

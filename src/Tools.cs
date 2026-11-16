@@ -90,7 +90,7 @@ namespace KKLLMNPC
             if (msg.Length == 0) msg = p.S("say", "");
             if (msg.Length == 0) msg = p.S("message", "");
             if (msg.Length == 0) msg = p.S("issue", "");
-            msg = Sanitize(msg ?? "").Trim();
+            msg = TextUtil.Sanitize(msg ?? "").Trim();
             if (msg.Length == 0)
                 return new { ok = false, reason = "empty_report",
                     note = "report_issue(msg='what is broken') — one line: what failed or frustrated you + what you tried" };
@@ -131,7 +131,9 @@ namespace KKLLMNPC
                 {
                     if (kv.Key == "action" || kv.Key == "thought" || kv.Key == "plan"
                         || kv.Key == "progress" || kv.Key == "why" || kv.Key == "wait") continue;
-                    string v = kv.Value == null ? "" : kv.Value.ToString();
+                    // Json.Text, not ToString(): args values may be dict/list shapes whose
+                    // ToString() is the type name, not the data.
+                    string v = kv.Value == null ? "" : Json.Text(kv.Value);
                     if (v.Length > 24) v = v.Substring(0, 24) + "…";
                     parts.Add(kv.Key + "=" + v);
                     if (parts.Count >= 4) break;
@@ -837,7 +839,7 @@ namespace KKLLMNPC
         {
             string fact = p.S("mem", "");
             if (string.IsNullOrWhiteSpace(fact)) return new { ok = false, reason = "empty_mem" };
-            fact = Sanitize(fact);
+            fact = TextUtil.Sanitize(fact);
             string junk = TextUtil.JunkFactReason(fact);
             if (junk != null)
                 return new { ok = false, reason = junk, note = TextUtil.JunkFactNote(junk) };

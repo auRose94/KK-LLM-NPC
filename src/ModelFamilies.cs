@@ -495,6 +495,14 @@ namespace KKLLMNPC
                 "never","number","numbers","attached","invent","actual","kobold","kobolds",
                 "character","gender","species","personality","female","male","unknown",
                 "house","setting","drink","eat",
+                // Playtest 2026-11-04: kobolds were NAMED out of reasoning words
+                // ("no", "maybe", "idea", "list", "check") by the old whole-content
+                // token scan. These are the words that showed up as names; the rest
+                // of the list covers their siblings in thought text.
+                "maybe","idea","ideas","list","lists","check","checked","checking",
+                "yes","yeah","ok","okay","hmm","well","let","lets","want","wants",
+                "need","needs","know","known","sure","think","try","trying","make",
+                "making","like","look","looking","going","start","first","next",
             };
 
         /// <summary>

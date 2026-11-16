@@ -582,5 +582,36 @@ namespace KKLLMNPC
             }
             catch (Exception) { return text; }
         }
+
+        // Scrub unpaired UTF-16 surrogates ('?') — Mono string-conversion garbage
+        // that corrupts LLM payloads. Paired surrogates pass through. Pure (moved
+        // from Llm.cs so the headless turn engine can use it too).
+        public static string Sanitize(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (char.IsHighSurrogate(c))
+                {
+                    if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { sb.Append(c).Append(s[i + 1]); i++; }
+                    else sb.Append('?');
+                }
+                else if (char.IsLowSurrogate(c)) sb.Append('?');
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        // Collapse newlines/CRs and hard-truncate with an ellipsis — one-line
+        // summaries for LLM-facing strings and log lines. Pure (moved from
+        // Console.cs for the same reason).
+        public static string Shorten(string s, int n)
+        {
+            if (s == null) return "";
+            s = s.Replace("\r", " ").Replace("\n", " ");
+            return s.Length > n ? s.Substring(0, n) + "..." : s;
+        }
     }
 }

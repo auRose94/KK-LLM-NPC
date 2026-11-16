@@ -56,7 +56,7 @@ namespace KKLLMNPC
         // Add a step. Returns the confirmation line for the terminal.
         internal string PlanAdd(string step)
         {
-            step = Sanitize((step ?? "").Trim());
+            step = TextUtil.Sanitize((step ?? "").Trim());
             if (step.Length == 0) return "plan: empty step — try: plan <what to do>";
             if (step.Length > 160) step = step.Substring(0, 160);
             lock (_planLock)
@@ -127,7 +127,7 @@ namespace KKLLMNPC
         // repetition guard), not a fresh goal — so re-asserting isn't free.
         private object ToolSetGoal(JsonObj p)
         {
-            string goal = Sanitize(p.S("goal", "").Trim());
+            string goal = TextUtil.Sanitize(p.S("goal", "").Trim());
             string why = p.S("why", "").Trim();
             if (goal.Length == 0) return new { ok = false, reason = "empty_goal" };
 
@@ -180,7 +180,7 @@ namespace KKLLMNPC
         // recently completed so the model doesn't immediately re-set it.
         private object ToolCompleteGoal(JsonObj p)
         {
-            string note = Sanitize(p.S("note", "").Trim());
+            string note = TextUtil.Sanitize(p.S("note", "").Trim());
             string completed;
             lock (_goalLock)
             {
@@ -204,7 +204,7 @@ namespace KKLLMNPC
         // model doesn't flapping back to it, and sheds its scratch facts.
         private object ToolDropGoal(JsonObj p)
         {
-            string reason = Sanitize(p.S("reason", "").Trim());
+            string reason = TextUtil.Sanitize(p.S("reason", "").Trim());
             string dropped;
             lock (_goalLock)
             {

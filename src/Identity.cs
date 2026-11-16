@@ -179,7 +179,7 @@ namespace KKLLMNPC
         internal object ToolSetPronouns(JsonObj p)
         {
             string text = p.S("pronouns", p.S("target", p.S("text", p.S("set", ""))));
-            text = Sanitize(text ?? "").Trim().Trim('"', '\'');
+            text = TextUtil.Sanitize(text ?? "").Trim().Trim('"', '\'');
             if (string.IsNullOrEmpty(text))
                 return new { ok = false, reason = "empty_pronouns",
                     note = "set_pronouns(pronouns='she/her') or console: set_pronouns she/her — also try they/them, he/him, xe/xem, or anything you go by" };

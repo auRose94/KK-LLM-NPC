@@ -928,7 +928,21 @@ namespace KKLLMNPC
             {
                 string k = kv.Key.ToLowerInvariant();
                 if (ArgMetaKeys.Contains(k)) continue;
-                string v = kv.Value == null ? "" : kv.Value.ToString().Trim('"', '\'');
+                // Act-schema "params" IS the argument container ({"action":"say",
+                // "params":{"text":"hi"}}): flatten it one level instead of
+                // stringifying the dict — Dictionary.ToString() is the .NET type
+                // name, and that garbage rode into the transcript as a command
+                // line the model then parroted ("echo System.Collections.Generic.
+                // Dictionary`2[...]") for whole turns (2026-11-04 playtest).
+                if (k == "params" && kv.Value is Dictionary<string, object> nested)
+                {
+                    sb.Append(ExpandArgDict(nested, ""));
+                    continue;
+                }
+                // Json.Text, not ToString(): a non-string value (dict/list) must
+                // render as JSON data — a type name here enters the transcript as
+                // if the model had said it, and models copy what they see.
+                string v = kv.Value == null ? "" : Json.Text(kv.Value).Trim('"', '\'');
                 if (v.Length == 0) continue;
                 if (k == "id") { sb.Append(" id:").Append(v); continue; }
                 if (k == "on" || k == "follow" || k == "state")

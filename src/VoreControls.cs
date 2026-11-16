@@ -140,7 +140,7 @@ namespace KKLLMNPC
             }
             catch (Exception e)
             {
-                return new { ok = false, reason = "main_thread_failed", note = Shorten(e.Message, 160) };
+                return new { ok = false, reason = "main_thread_failed", note = TextUtil.Shorten(e.Message, 160) };
             }
         }
 
