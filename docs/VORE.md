@@ -167,6 +167,51 @@ claimed-body viewIds and a beat into their own photon player properties every ~4
 
 ## Tests
 
-`tests/test_swallow.cs` (57 asserts, pure `src/SwallowLogic.cs`): trigger rules,
-conversion phases, the abort command, fingerprint format — the rebirth match is
-fingerprint-exact, so a swallowed person always comes back as THEMSELVES.
+`tests/test_swallow.cs` (pure `src/SwallowLogic.cs`): trigger rules, conversion
+phases, size mechanics (ratio/ceiling/stretch/struggle/bulge), fingerprint
+format — the rebirth match is fingerprint-exact, so a swallowed person always
+comes back as THEMSELVES. Player escape is the SPACE-mash mini-game (the old
+chat-abort command was removed 2026-11-16).
+
+## Design (2026-11-16, not yet built): live-prey reagent — the churn system
+
+Rose's design: a swallowed victim becomes a REAL belly reagent, and the reagent
+level IS the digestion. Game-side feasibility verified against the decompile:
+
+- `ReagentDatabase.AddAsset(asset, stub)` is a **public static registration
+  API** (`Database<T>`), and `ScriptableReagent` is a `ScriptableObject`
+  (color + emission so a belly full of person renders distinctly; clone-then-
+  mutate an existing asset for a safe `LocalizedString`).
+- `ScriptableReagent.metabolizationHalfLife` lets the game's OWN metabolism
+  slow-cook the prey reagent — the drain curve comes free.
+- Container mixes network by database ID: modded peers stay coherent
+  (mixed rooms see a foreign reagent — same caveat as every modded reagent).
+
+### The rules (Rose's words, formalized)
+
+1. **Presence**: while a swallow is live, the eater's belly holds N units of
+   `LivePrey` reagent (scaled to the meal). The volume-driven belly visual
+   becomes NATIVE bulge — the reflection shim retires to fallback.
+2. **Grow fate**: the prey reagent slowly absorbs (metabolizes) — volume IS
+   digestion progress.
+3. **Egg/BellyEgg fates**: the prey reagent converts to `Egg` reagent over
+   time. **The disconnect rule**: when no victim-reagent remains in ANY
+   stomach — fully converted — the victim's agent disconnects completely
+   (`MarkGone`; the egg carries their saved life for rebirth).
+4. **Churn targets (the milk/cum modes)**: conversion TARGET follows the
+   entry location — stuffing them into breasts churns them into milk
+   (milkable!), balls/cock into cum. Same conversion clock, different end
+   reagent + container. Inspired by a similar adult-game mod.
+5. **The substrate principle**: the reagent IS the person's substrate — the
+   mind follows the REAGENT, not the body. Pour a victim into a bucket, feed
+   them to someone else, and the connection (and drama) follows. Strange
+   situations are the point.
+
+### Build order (proposed)
+
+1. `LivePrey` reagent registration + presence + native bulge fallback flip.
+2. Conversion clock (grow-drain / egg-convert) + the disconnect rule.
+3. Churn targets: milk (breast route) and cum (cock route) conversions.
+4. Substrate transfer: pouring/feeding a prey reagent moves the claim.
+
+Pairs naturally with **reincarnation** (same consume/mind-transfer plumbing).
