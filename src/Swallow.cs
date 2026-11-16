@@ -762,6 +762,41 @@ namespace KKLLMNPC
             return BeginInsertFor(eater, victim, eater, out status);
         }
 
+        // Targeted twin of TryInsertForAgent (2026-11-16): the eater NAMES the victim
+        // (swallow target=...), so the held-and-facing disambiguation is skipped — but
+        // every other gate is identical: master switch, eater-busy, player-body
+        // refusal, already-inside, Force-mode receiver hunt. The caller enforces
+        // adjacency (the playtest's "couldn't order an eat by name" — the model had
+        // to find, walk to, grab AND face a moving person through four fragile steps).
+        internal static bool TryInsertForAgentTargeted(Kobold eater, Kobold victim, out InsertStatus status)
+        {
+            status = InsertStatus.Refused;
+            if (!LLMNPCPlugin.Alive(Plugin)) { status = InsertStatus.Disabled; return false; }
+            if (eater == null || eater.transform == null) { status = InsertStatus.NoBody; return false; }
+            var cfgEnabled = Plugin._cfgSwallowEnabled;
+            if (cfgEnabled == null || !cfgEnabled.Value) { status = InsertStatus.Disabled; return false; }
+
+            SwallowLogic.SwallowSwellMode mode = SwallowManager.SwellMode();
+            if (mode == SwallowLogic.SwallowSwellMode.Off) { status = InsertStatus.Disabled; return false; }
+
+            if (EaterBusy(eater)) { status = InsertStatus.ReceiverBusy; return false; }
+            if (victim == null || victim.transform == null) { status = InsertStatus.NoTarget; return false; }
+            if (NPCInstance.IsPlayerKobold(victim)) { status = InsertStatus.Refused; return false; }
+            if (IsDigestingVictim(victim)) { status = InsertStatus.AlreadyInside; return false; }
+
+            if (mode == SwallowLogic.SwallowSwellMode.Force)
+            {
+                Kobold receiver = null;
+                if (!FindForceReceiver(eater, victim, out receiver, out bool busy))
+                {
+                    status = busy ? InsertStatus.ReceiverBusy : InsertStatus.NoReceiver;
+                    return false;
+                }
+                return BeginInsertFor(receiver, victim, eater, out status);
+            }
+            return BeginInsertFor(eater, victim, eater, out status);
+        }
+
         // END button — cycle the swell mode Off -> Self -> Force -> Off. Returns
         // the new mode. Main-thread only.
         internal static SwallowLogic.SwallowSwellMode EndToggleMode()

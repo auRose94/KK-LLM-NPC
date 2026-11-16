@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — eat-by-name: `swallow target='Name'`)
+
+The playtest's "couldn't be ordered to eat by name": the swallow tool took
+no target — the model had to find the victim, walk to them, GRAB them and
+face them through four fragile steps, and failed more often than not on a
+moving person. `swallow` now takes `target` (an agent's chosen name, a
+player's chat name, a body name, or `id:N` from nearby): resolved at
+hugging range (~3m) it inserts directly — no grab dance; too far and it
+answers with the distance + bearing so the approach is one step, not a
+guess; unresolved it points at `ps`. Every existing gate is unchanged
+(master switch, one meal at a time, player-body refusal, already-inside,
+Force-mode receiver hunt) via the new `TryInsertForAgentTargeted`. Bare
+`swallow` keeps the classic held-and-facing form; manual + console prompt
+and the vore prompt-extra teach both.
+
 ### Fixed (2026-11-16 — vore playtest round: swift silence, own-dick guard, voluntary greetings)
 
 - **Swift silence.** A fully absorbed mind (Grow absorb, Destroy consume, or
