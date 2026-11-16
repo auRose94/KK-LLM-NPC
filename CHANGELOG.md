@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-11-15
+
+### Fixed (2026-11-08 — phantom intimacy + per-frame station crash)
+
+Perception gained a `touch` field (`Body.ContactText`): an honest
+physical-contact signal — `being_penetrated` / `penetrating_something` /
+`mounted_in_station` / `carrying_a_guest` / `inside_a_stomach`, or
+`none — nothing is touching you`. Arousal rises on its own with no contact
+(the game pumps stimulation continuously), and without this signal the model
+mistook a merely-aroused body standing near the player for intimacy
+("we're sharing something") and got tender with someone who wasn't touching
+it. The system prompt now teaches: real contact is only ever stated by
+`touch`/`penetrated`/`penetrating`/`feel`, never inferred from proximity.
+Also: a Harmony finalizer on `User.SortGrabbables` swallows the game's
+per-physics-frame `BreedingStation.CanUse` NullReferenceException (a station
+whose `AnimationStation.info` went null after a body was destroyed/sold
+mid-mount — observed 3800+ log spams), logged once per 30 s, game
+interaction menu left intact.
+
 ### Added (2026-11-15 — config linter; README/CHANGELOG slimmed)
 
 New `tools/lint_config.py`: validates a BepInEx `.cfg` against
@@ -103,6 +122,8 @@ could reach it. It now follows the pure-core pattern (`ContextCore`,
   integration — 99 checks, with the real `ConsoleShell` parser, `ConsolePipe`
   filters, `ConsoleSalvage` and `ModelFamilies` running inside the simulated
   turns. Suites: 21 → 22.
+
+## [1.2.3] — 2026-11-05
 
 ### Changed (2026-11-05 — new default profile: rapid, immersive, Ollama-first)
 
