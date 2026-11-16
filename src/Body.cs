@@ -127,6 +127,21 @@ namespace KKLLMNPC
                 {
                     _bodyLostLogged = true;
                     Logger.LogInfo("KKLLMNPC: body for '" + (_npcName ?? "?") + "' was destroyed/sold/lost — instance will be removed.");
+                    // DEATH ANNOUNCEMENT: the cast silently recasting look-alike prefab
+                    // clones was the "who's who" confusion (field log 2026-11-15: six
+                    // agents died in one session; survivors met strangers wearing
+                    // familiar faces with no idea the person they knew was gone). Tell
+                    // the OTHERS someone vanished — vore absorbs narrate their own
+                    // richer exit, so a swallowed victim stays quiet here.
+                    try
+                    {
+                        if (!Swallowed && !string.IsNullOrEmpty(_npcName))
+                            Plugin.FanoutWorldEventExcept("[event] you just watched " + _npcName
+                                + "'s body be destroyed or taken away — " + _npcName + " is GONE. A body like theirs may"
+                                + " appear later carrying a NEW mind you haven't met; greet them fresh, and remember "
+                                + _npcName + " as they were.", null, this);
+                    }
+                    catch (Exception) { }
                 }
                 BodyLost = true;
                 return false;
@@ -462,7 +477,25 @@ namespace KKLLMNPC
                 lock (_facts) foreach (var f in _facts) { facts.Add(f.Text); factUtc.Add(f.Utc); }
                 string fp = _boundBodyFp;
                 if (string.IsNullOrEmpty(fp)) fp = BodyFullFp(_kobold);
-                MemoryStore.Save(bodyKey, _npcName, _persona, facts, goal, _pronounsOverride, SkillsSnapshotLines(),
+                // NAME POLLUTION GUARD: before FinalizeIdentity lands, _npcName is the
+                // prefab placeholder ("Porcupine") — a save in that window would
+                // overwrite a previous life's real name in the record (field log
+                // 2026-11-15: a body's record saved as 'Porcupine' mid-limbo, then
+                // 'Nugget' after naming; had the body been lost in between, the
+                // record would forever say 'Porcupine'). Facts/persona still save;
+                // only the unfinalized name yields to whatever the record says.
+                string saveName = _npcName;
+                if (!_identityFinalized)
+                {
+                    try
+                    {
+                        var prior = MemoryStore.Load(bodyKey);
+                        if (prior != null && !string.IsNullOrEmpty(prior.Name))
+                            saveName = prior.Name;
+                    }
+                    catch (Exception) { }
+                }
+                MemoryStore.Save(bodyKey, saveName, _persona, facts, goal, _pronounsOverride, SkillsSnapshotLines(),
                     bodyFp: fp, species: BodySpecies(_kobold),
                     voreTarget: VoreTargetOverride, voreMode: VoreModeOverride, factUtc: factUtc);
                 try { Logger.LogInfo("KKLLMNPC: saved '" + _npcName + "' — " + facts.Count + " facts keyed to body '" + bodyKey + "'"); } catch (Exception) { }

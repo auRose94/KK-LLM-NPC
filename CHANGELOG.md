@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed (2026-11-15 — who's-who: identity churn made legible; ps ids; record name pollution)
+
+Field log from the v1.3.0 playtest: every agent's body was destroyed/sold
+at least once, and look-alike prefab clones (three genetically identical
+Porcupines distinguished only by viewID) recast the roles silently —
+survivors met strangers wearing familiar faces with no idea the person
+they knew was gone, and `ps` rows were indistinguishable (same prefab
+name, no id, plus 30–120 s of prefab-name limbo while qwen3.8 burned
+naming attempts on chain-of-thought). Three fixes:
+
+- `ps`/people entries now carry a stable `id` (look-alikes never share
+  one), and a claimed-but-not-yet-named agent says so in `who`: "a NEW
+  mind waking in this body — don't call them by the body name."
+- `SaveBodyMemory` no longer overwrites a previous life's real name with
+  the unfinalized prefab placeholder when a save lands in the naming
+  window (the record temporarily said 'Porcupine' before 'Nugget' landed;
+  a body lost mid-limbo would have kept the placeholder forever).
+- A destroyed/sold body now announces the departure to the other agents
+  ("you watched <name>'s body be destroyed or taken — <name> is GONE; a
+  new mind may appear later — greet them fresh"), so the recast is
+  narrated, not silent. Vore absorbs keep their own richer exit and stay
+  quiet here.
+
+Identity still dies with the body by design (a new clone is a new
+person); persistent-personality reincarnation remains future work.
+
 ## [1.3.0] — 2026-11-15
 
 ### Fixed (2026-11-08 — phantom intimacy + per-frame station crash)

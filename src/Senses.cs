@@ -1450,6 +1450,7 @@ namespace KKLLMNPC
             {
                 ["name"] = name,
                 ["body"] = CleanName(k.name),
+                ["id"] = k.GetInstanceID(), // stable handle: look-alike prefab clones share a name but never an id
                 ["d"] = F(d.magnitude),
                 ["dir"] = RelBearing(d),
                 ["dir_deg"] = F(RelBearingDeg(d)),
@@ -1499,9 +1500,13 @@ namespace KKLLMNPC
                     int kId = k.GetInstanceID();
                     if (!LLMNPCPlugin.IsClaimedByAnyLLM(kId)) continue; // wild — handled in pass 2
                     string agentName = AgentNameForBody(kId);
-                    if (string.IsNullOrEmpty(agentName) || string.Equals(agentName, MyName(), StringComparison.OrdinalIgnoreCase))
+                    bool unnamed = string.IsNullOrEmpty(agentName) || string.Equals(agentName, MyName(), StringComparison.OrdinalIgnoreCase);
+                    if (unnamed)
                         agentName = CleanName(k.name); // claimed but not yet named — still reachable by body name
-                    list.Add(MakePeopleEntry(k, agentName, asAgent: true));
+                    var entry = MakePeopleEntry(k, agentName, asAgent: true);
+                    if (unnamed)
+                        entry["who"] = "a NEW mind waking in this body — they haven't chosen a name yet (the body name is NOT their name; don't call them by it)";
+                    list.Add(entry);
                     if (list.Count >= 8) return list;
                 }
 
