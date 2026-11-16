@@ -97,6 +97,32 @@ internal static class TestOllama
         Eq("", OllamaArgs.HumanSize(0), "size: zero");
     }
 
+    // [Ollama].KeepAlive → seconds + heartbeat cadence.
+    private static void TestKeepAlive()
+    {
+        Eq(1800L, OllamaArgs.KeepAliveSeconds("30m"), "ka: 30m");
+        Eq(7200L, OllamaArgs.KeepAliveSeconds("2h"), "ka: 2h");
+        Eq(45L, OllamaArgs.KeepAliveSeconds("45s"), "ka: 45s");
+        Eq(600L, OllamaArgs.KeepAliveSeconds("600"), "ka: bare number is seconds");
+        Eq(600L, OllamaArgs.KeepAliveSeconds(" 600 "), "ka: surrounding whitespace");
+        Eq(600L, OllamaArgs.KeepAliveSeconds("600S"), "ka: uppercase unit");
+        Eq(-1L, OllamaArgs.KeepAliveSeconds("-1"), "ka: pin");
+        Eq(-1L, OllamaArgs.KeepAliveSeconds("-1s"), "ka: pin with unit");
+        Eq(0L, OllamaArgs.KeepAliveSeconds(""), "ka: empty is off");
+        Eq(0L, OllamaArgs.KeepAliveSeconds(null), "ka: null is off");
+        Eq(0L, OllamaArgs.KeepAliveSeconds("off"), "ka: off word");
+        Eq(0L, OllamaArgs.KeepAliveSeconds("0"), "ka: zero is off (Ollama would unload immediately)");
+        Eq(0L, OllamaArgs.KeepAliveSeconds("1h30m"), "ka: compound rejected");
+        Eq(0L, OllamaArgs.KeepAliveSeconds("1.5h"), "ka: fraction rejected");
+        Eq(0L, OllamaArgs.KeepAliveSeconds("-5"), "ka: negative-other-than--1 rejected");
+        Eq(0L, OllamaArgs.KeepAliveSeconds("soon"), "ka: junk rejected");
+        Eq(60, OllamaArgs.KeepAlivePingSecs(-1), "ka-ping: pin pings at the quiet cadence");
+        Eq(60, OllamaArgs.KeepAlivePingSecs(1800), "ka-ping: 30m window");
+        Eq(45, OllamaArgs.KeepAlivePingSecs(90), "ka-ping: half the window");
+        Eq(5, OllamaArgs.KeepAlivePingSecs(8), "ka-ping: floor");
+        Eq(0, OllamaArgs.KeepAlivePingSecs(0), "ka-ping: disabled never pings");
+    }
+
     internal static int Run()
     {
         TestBaseUrl();
@@ -107,6 +133,7 @@ internal static class TestOllama
         TestEffectiveContext();
         TestFitContext();
         TestHumanSize();
+        TestKeepAlive();
 
         if (_failed > 0)
         {

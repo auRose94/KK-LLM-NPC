@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Added (2026-11-15 — Ollama keep-alive heartbeat: no more mid-session model unloads)
+
+Ollama unloads the served model after its default ~5m idle, so any quiet stretch
+in play (exploring, reading chat, a long station scene with no decision due)
+evicted it — and the next NPC turn stalled behind a multi-gigabyte reload. That
+stall was the "model_unloaded" failure the v1.2.2 retry only patched around;
+this removes the cause. The Ollama watcher now sends Ollama's documented
+keep-warm call — `/api/generate` with an empty prompt — carrying an explicit
+`keep_alive`, roughly every half of the configured window (60 s for the
+default). New `[Ollama].KeepAlive` (default `30m`; durations, bare seconds,
+`-1` to pin for the session, `off` to disable and keep Ollama's own behavior).
+Pings stop with the game, so the default also unloads shortly after you quit;
+`-1` holds the RAM until the server recycles it. The heartbeat rides the
+existing watcher thread (no new thread), only fires while an Ollama is adopted
+and a current model is known, throttles to one attempt per interval even on
+failure (a timed-out ping usually means the server is mid-load — the one time
+hammering hurts), and logs once when it activates. Parse/cadence math lives in
+pure `OllamaArgs.KeepAliveSeconds` / `KeepAlivePingSecs` with new tests in the
+ollama suite; the WebUI AI-server snapshot gains a `keepAlive` field.
+
 ### Added (2026-11-06 — headless agent sim: the console turn engine is unit-testable)
 
 The console REPL's turn loop — rounds, guards, nudges, the anchor dedup — was

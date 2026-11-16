@@ -55,6 +55,7 @@ Endpoint     = http://127.0.0.1:11434
 AutoEndpoint = true            ; route LLM + vision-fallback POSTs to the adopted Ollama (default ON)
 SelectedModel=                ; what 'Use this model' picked; also writes [LLM].Model
 PollIntervalSec = 10
+KeepAlive    = 30m             ; keep the model resident — empty-ping /api/generate every half-window
 ```
 
 | Key | Default | Range | Purpose |
@@ -64,6 +65,7 @@ PollIntervalSec = 10
 | `AutoEndpoint` | `true` | bool | When an Ollama is adopted + healthy, route LLM + vision-fallback POSTs to it regardless of `[LLM].Endpoint` (hand-off with no config editing after a restart). ON by default so the adopted Ollama is the live endpoint. Off = the configured endpoint stays the truth. |
 | `PollIntervalSec` | `10` | — | How often the watcher probes the Ollama `/api/tags` + `/api/show`. |
 | `SelectedModel` | *(empty)* | — | The Ollama model the WebUI 'Use this model' picked. Writing this also writes `[LLM].Model` so it takes effect on the next chat POST. Empty = use the model Ollama is currently serving. |
+| `KeepAlive` | `30m` | `Ns`/`Nm`/`Nh`, bare seconds, `-1`, `off` | Keep the adopted model resident so NPC turns never wait behind a reload: the watcher pings `/api/generate` with an empty prompt + this `keep_alive` (Ollama's documented keep-warm call) roughly every half of the window. `-1` pins the model in RAM for the whole session; `off` restores Ollama's own ~5m idle unload. Pings stop when the game exits, so the default unloads shortly after you quit. |
 
 The **installed models** picker lists every local model (`ollama pull` to add one); **use this model**
 hot-swaps the served model. Adoption is opt-in and reversible — `[LLM].Endpoint` is left untouched,

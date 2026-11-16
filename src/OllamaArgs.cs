@@ -142,6 +142,47 @@ namespace KKLLMNPC
             return gb.ToString("0.0", CultureInfo.InvariantCulture) + " GiB";
         }
 
+        // Parse a [Ollama].KeepAlive value into seconds. Accepts Ollama's duration
+        // forms — "<n>s" / "<n>m" / "<n>h" or a bare number (seconds) — and "-1"
+        // (unit optional) to pin the model in memory forever. Returns:
+        //   -1  pin forever
+        //    0  disabled / unparseable — the caller must NOT ping
+        //   >0  keep-alive window in seconds
+        // Compound ("1h30m"), fractional and negative-other-than--1 forms are
+        // rejected: on a knob this quiet, silence beats a wrong guess.
+        public static long KeepAliveSeconds(string v)
+        {
+            if (string.IsNullOrWhiteSpace(v)) return 0;
+            string s = v.Trim().ToLowerInvariant();
+            if (s == "off" || s == "none" || s == "disable" || s == "disabled" || s == "false") return 0;
+            long mul = 1;
+            char unit = s[s.Length - 1];
+            if (unit == 's' || unit == 'm' || unit == 'h')
+            {
+                s = s.Substring(0, s.Length - 1);
+                if (unit == 'm') mul = 60;
+                else if (unit == 'h') mul = 3600;
+                if (s.Length == 0) return 0;
+            }
+            long n;
+            try { n = long.Parse(s, CultureInfo.InvariantCulture); } catch (Exception) { return 0; }
+            if (n == -1) return -1;
+            if (n <= 0) return 0;
+            long r;
+            try { checked { r = n * mul; } } catch (Exception) { return 0; }
+            return r <= 0 ? 0 : r;
+        }
+
+        // How often to re-ping for a keep-alive window: half the window, so a ping
+        // can never race the eviction, clamped to 5..60 s. -1 (pin) and any window
+        // >= 2 min both land on the quiet 60 s cadence; 0 means "don't ping".
+        public static int KeepAlivePingSecs(long keepAliveSecs)
+        {
+            if (keepAliveSecs == -1) return 60;
+            if (keepAliveSecs <= 0) return 0;
+            return (int)Math.Max(5, Math.Min(60, keepAliveSecs / 2));
+        }
+
         // Navigate a dotted key (e.g. "general.architecture") through nested dictionaries and
         // return the final value as a string. Returns "" if any segment is missing or not a dict.
         private static string Str(Dictionary<string, object> o, string key)

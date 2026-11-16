@@ -34,6 +34,7 @@ namespace KKLLMNPC
         private static ConfigEntry<bool> _cfgAutoEndpoint;
         private static ConfigEntry<int> _cfgPollInterval;
         private static ConfigEntry<string> _cfgSelectedModel;
+        private static ConfigEntry<string> _cfgKeepAlive;
         // The mod's own [LLM].Model entry, referenced (not re-bound) so a picker
         // pick is reflected into the running LLM immediately.
         private static ConfigEntry<string> _cfgLlmModel;
@@ -50,6 +51,9 @@ namespace KKLLMNPC
         private static string _tagsJson = "";       // /api/tags
         private static string _showJson = "";       // /api/show for the current model
         private static volatile string _currentModel = ""; // the model /api/show was fetched for — written by the watcher thread, read off-thread
+        // Keep-alive heartbeat state (watcher thread only).
+        private static DateTime _lastKeepAliveUtc = DateTime.MinValue; // last ping ATTEMPT — success or failure, never hammer a slow server
+        private static bool _keepAliveLogged;                          // one "heartbeat active" log per session
 
         // ------------------------------------------------------------------
         // lifecycle
@@ -69,6 +73,8 @@ namespace KKLLMNPC
                 "How often the watcher probes the Ollama /api/tags + /api/show when enabled.");
             _cfgSelectedModel = plugin.Config.Bind("Ollama", "SelectedModel", "",
                 "The Ollama model the WebUI 'Use this model' picked. Writing this also writes [LLM].Model so it takes effect on the next chat POST. Empty = let /api/tags' current model be used.");
+            _cfgKeepAlive = plugin.Config.Bind("Ollama", "KeepAlive", "30m",
+                "Keep the adopted model resident so NPC turns never wait behind a model reload. The watcher pings /api/generate with an empty prompt (Ollama's documented keep-warm call) roughly every half of this window. Accepts Ollama durations ('45s', '30m', '2h'), a bare number (seconds), or '-1' to pin the model in RAM for the whole session. 'off' (or empty) disables the heartbeat — Ollama then unloads after its own ~5m idle and the next turn pays the reload. Pings stop with the game, so '30m' also unloads shortly after you quit.");
             _running = true;
             _watch = new Thread(WatchLoop) { IsBackground = true, Name = "KKLLMNPC-OllamaWatch" };
             _watch.Start();
@@ -180,6 +186,9 @@ namespace KKLLMNPC
                                 try { LLMNPCPlugin.Log?.LogInfo("Ollama /api/show: " + cur + " ctx=" + show.ContextLength); } catch (Exception) { }
                         }
                     }
+                    // Keep-warm heartbeat: empty /api/generate + keep_alive, so a
+                    // quiet stretch never lets Ollama evict the model mid-session.
+                    MaybeKeepAlive(base_);
                     PollSleep();
                 }
                 catch (Exception e)
@@ -188,6 +197,43 @@ namespace KKLLMNPC
                     try { LLMNPCPlugin.Log?.LogWarning("Ollama watcher: " + e.Message); } catch (Exception) { }
                     PollSleep();
                 }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // keep-alive heartbeat — /api/generate with an empty prompt
+        // ------------------------------------------------------------------
+        // The chat POSTs ride Ollama's OpenAI-compatible /v1/chat/completions,
+        // where a body-level keep_alive is not part of the schema. The NATIVE
+        // /api/generate takes it, and an empty prompt makes the call a no-op
+        // generation that just (re)asserts residency — Ollama's documented
+        // keep-warm trick. Without it Ollama's default ~5m idle unload evicts
+        // the model during quiet play, and the next NPC turn stalls behind a
+        // multi-gigabyte reload: the exact stall the v1.2.2 model_unloaded
+        // retry only patched around. Runs on the existing watcher thread; the
+        // 20s timeout covers a cold (re)load without hanging the poll loop.
+        private static void MaybeKeepAlive(string base_)
+        {
+            long secs = OllamaArgs.KeepAliveSeconds(_cfgKeepAlive != null ? _cfgKeepAlive.Value : null);
+            int every = OllamaArgs.KeepAlivePingSecs(secs);
+            if (every <= 0) return;
+            if (string.IsNullOrEmpty(base_) || string.IsNullOrEmpty(_currentModel)) return;
+            if ((DateTime.UtcNow - _lastKeepAliveUtc).TotalSeconds < every) return;
+            // Stamp the ATTEMPT, not the success: a timed-out ping usually means
+            // the server is mid-(re)load — the one situation where retrying fast hurts.
+            _lastKeepAliveUtc = DateTime.UtcNow;
+            var payload = new Dictionary<string, object>
+            {
+                ["model"] = _currentModel,
+                ["prompt"] = "",
+                ["keep_alive"] = secs, // -1 (pin) or the window in seconds — both native forms
+            };
+            string resp = HttpPost(base_ + "/api/generate", Json.Write(payload), 20000);
+            if (!_keepAliveLogged && resp != null)
+            {
+                _keepAliveLogged = true;
+                try { LLMNPCPlugin.Log?.LogInfo("Ollama keep-alive: " + _currentModel + " stays resident (keep_alive="
+                    + (secs == -1 ? "-1 (pinned)" : secs + "s") + ", ping every " + every + "s)"); } catch (Exception) { }
             }
         }
 
@@ -240,12 +286,17 @@ namespace KKLLMNPC
 
         private static string HttpPost(string url, string body)
         {
+            return HttpPost(url, body, 5000);
+        }
+
+        private static string HttpPost(string url, string body, int timeoutMs)
+        {
             try
             {
                 var req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "POST";
                 req.ContentType = "application/json";
-                req.Timeout = 5000;
+                req.Timeout = timeoutMs;
                 byte[] bytes = Encoding.UTF8.GetBytes(body ?? "{}");
                 req.ContentLength = bytes.Length;
                 using (var s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
@@ -297,6 +348,7 @@ namespace KKLLMNPC
                 ["autoEndpoint"] = _cfgAutoEndpoint != null && _cfgAutoEndpoint.Value,
                 ["endpoint"] = _cfgEndpoint != null ? _cfgEndpoint.Value : "",
                 ["pollIntervalSec"] = _cfgPollInterval != null ? _cfgPollInterval.Value : 10,
+                ["keepAlive"] = _cfgKeepAlive != null ? _cfgKeepAlive.Value : "30m",
                 ["selected"] = selected,
                 ["currentModel"] = _currentModel,
                 ["contextLength"] = ctx,
