@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Fixed (2026-11-15 — run_tests.sh suite filtering actually works)
+
+The usage header has always promised `./run_tests.sh json path` (run only the
+named suites) but the argument list was silently ignored — every invocation
+ran everything. Args are now honored (exact or prefix match), which is what
+the new nightly deep-soak CI step relies on.
+
+### Added (2026-11-15 — long-horizon soak suite + nightly deep-soak CI; ParallelCalls goes live-editable)
+
+New `soak` suite (23rd): three fake agents driven through `SOAK_ROUNDS`
+whole turns (default 40) over a cycling pathological reply stream — normal,
+empty, whitespace, prose-as-thought, a 120KB flood, an identical parrot
+line, a JSON tool call, broken JSON, a null endpoint failure — with
+cross-agent chat events landing in each other's queues. Asserts the
+invariants that only show up over distance: nothing escapes
+`ConsoleTurnCore.Run`, the round budget holds (the historical empty-reply
+runaway class), transcript/history growth stays linear, wall clock stays
+bounded. CI gained a nightly schedule (04:17 UTC) + `workflow_dispatch`
+that re-run the full suites and then scale the soak to 2000 turns per
+agent — 50x the per-push distance. `[LLM] ParallelCalls` now follows live
+config edits (re-clamped and pushed into the SafeHttp gate on
+`SettingChanged` — previously restart-only), and its guidance gained the
+Ollama note: Ollama queues gracefully but serves only
+`OLLAMA_NUM_PARALLEL` slots, each splitting the model's KV window — 2–4 is
+the sweet spot there.
+
 ### Added (2026-11-15 — Ollama keep-alive heartbeat: no more mid-session model unloads)
 
 Ollama unloads the served model after its default ~5m idle, so any quiet stretch

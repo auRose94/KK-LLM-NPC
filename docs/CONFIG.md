@@ -34,7 +34,7 @@ All config entries are in `BepInEx/config/com.kk.llmnpc.cfg`.
 
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
-| `ParallelCalls` | `8` | 0–8 | Max simultaneous LLM HTTP calls the whole mod makes toward the endpoint. Local llama.cpp/KoboldCpp/solo-GPU LM Studio servers answer serially — with several NPCs posting at once, burst calls starved into `WebException(Timeout)` warnings (the dominant log noise). Extra calls now QUEUE inside the mod (fail-open after two minutes). `0` = unlimited. Default raised to 8 for multi-NPC / multi-slot servers; lower it (e.g. 2) for a single-GPU serial box to avoid timeouts. |
+| `ParallelCalls` | `8` | 0–8 | Max simultaneous LLM HTTP calls the whole mod makes toward the endpoint. Local llama.cpp/KoboldCpp/solo-GPU LM Studio servers answer serially — with several NPCs posting at once, burst calls starved into `WebException(Timeout)` warnings (the dominant log noise). Extra calls now QUEUE inside the mod (fail-open after two minutes). `0` = unlimited. Default raised to 8 for multi-NPC / multi-slot servers; lower it (e.g. 2) for a single-GPU serial box to avoid timeouts. Ollama note: it queues gracefully (no starvation) but serves only `OLLAMA_NUM_PARALLEL` slots, and each parallel slot splits the model's KV context window — 2–4 is the sweet spot there. Edits apply live (no restart). |
 
 ### External host (Ollama)
 

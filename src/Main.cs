@@ -608,7 +608,7 @@ namespace KKLLMNPC
             _cfgFactMaxAge = Config.Bind("Memory", "FactMaxAgeHours", 72f,
                 "Cross-session age prune (HOURS of real time): a fact not re-remembered within this many hours drops from memory even across saves — finished business stops haunting new sessions. 0 = off. Exempt: identity notes (me:/name:) and the latest player_wants. Old save files get their fact ages backfilled from each record's save stamp, so the first boot after updating already cleans up.");
             _cfgParallelCalls = Config.Bind("LLM", "ParallelCalls", 8,
-                "Max simultaneous LLM HTTP calls made toward the endpoint by the whole mod (every NPC competes for a serial local server otherwise — the burst was the source of most 'WebException(Timeout)' log spam; extra calls queue). 0 = unlimited. 2 is right for llama.cpp/KoboldCpp/solo-GPU LM Studio; raise for >1-slot servers.");
+                "Max simultaneous LLM HTTP calls made toward the endpoint by the whole mod (every NPC competes for a serial local server otherwise — the burst was the source of most 'WebException(Timeout)' log spam; extra calls queue). 0 = unlimited. 2 is right for llama.cpp/KoboldCpp/solo-GPU LM Studio. Ollama queues extra requests itself (no timeouts), but serves only OLLAMA_NUM_PARALLEL slots and each parallel slot splits the model's KV window — 2-4 is the sweet spot there. Raise toward 8 only for genuinely parallel (vLLM-class) servers. Edits apply live, no restart.");
             _cfgIdentityBot = Config.Bind("Multiplayer", "IdentityBot", false,
                 "Run a second Photon client in the room under the NPC's own name so its chat renders as 'KoboldName: text' to EVERYONE (not attributed to you). OFF = safe default (chat shows 'YourName: KoboldName: text' to others). Opt-in: adds a room player, may affect player count / host logic.");
             _cfgIdentityAppId = Config.Bind("Multiplayer", "IdentityAppId", "",
@@ -679,6 +679,13 @@ namespace KKLLMNPC
             ReconfigureDataRecord();
             _cfgRecordData.SettingChanged += (o, e) => ReconfigureDataRecord();
             _cfgRecordMaxMb.SettingChanged += (o, e) => ReconfigureDataRecord();
+            // [LLM] ParallelCalls follows live edits too (WebUI settings tab): re-clamp
+            // and push into the SafeHttp gate without a restart.
+            _cfgParallelCalls.SettingChanged += (o, e) =>
+            {
+                _cfgParallelCalls.Value = Mathf.Clamp(_cfgParallelCalls.Value, 0, 8);
+                SafeHttp.SetMaxParallel(_cfgParallelCalls.Value);
+            };
 
             // Clamp config values to safe ranges to prevent divide-by-zero, negative durations, etc.
             _cfgThinkInterval.Value = Mathf.Clamp(_cfgThinkInterval.Value, 0.05f, 10f);

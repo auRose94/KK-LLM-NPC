@@ -33,9 +33,24 @@ FAILED=0
 PASSED=0
 declare -a FAILED_SUITES=()
 
+# Optional suite-name filters from the command line (exact or prefix match):
+#   ./run_tests.sh json path   → runs only json + pathcore.
+FILTERS=("$@")
+want_suite() {
+  [ ${#FILTERS[@]} -eq 0 ] && return 0
+  local name="$1" f
+  for f in "${FILTERS[@]}"; do
+    case "$name" in
+      "$f"|"$f"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # run_suite <name> <test files...> -- <src files...>
 run_suite() {
   local name="$1"; shift
+  want_suite "$name" || return 0
   local tests=() srcs=()
   local seen_sep=0
   for arg in "$@"; do
@@ -86,6 +101,7 @@ run_headless_suites() {
   run_suite chat        tests/test_chat_similarity.cs -- src/ChatSimilarity.cs
   run_suite console     tests/test_console_shell.cs -- src/ConsoleShell.cs src/ConsolePipe.cs src/Manual.cs src/Calc.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs
   run_suite turncore    tests/test_turncore.cs -- src/ConsoleTurnCore.cs src/ConsoleShell.cs src/ConsolePipe.cs src/Manual.cs src/Calc.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs src/ModelFamilies.cs src/TextUtil.cs src/Constants.cs
+  run_suite soak        tests/test_soak.cs -- src/ConsoleTurnCore.cs src/ConsoleShell.cs src/ConsolePipe.cs src/Manual.cs src/Calc.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs src/ModelFamilies.cs src/TextUtil.cs src/Constants.cs
   run_suite consolepipe tests/test_consolepipe.cs -- src/ConsolePipe.cs src/ConsoleShell.cs src/DataRecord.cs src/ChatSimilarity.cs src/Json.cs
   run_suite datarecord  tests/test_datarecord.cs -- src/DataRecord.cs src/Json.cs
   run_suite decisionparse tests/test_decisionparse.cs -- src/DecisionParse.cs src/Guidance.cs src/Json.cs
@@ -118,7 +134,7 @@ audit_coverage() {
 }
 
 printf 'KK-LLM-NPC unit tests (pure C#)\n'
-run_headless_suites
+run_headless_suites "$@"
 audit_coverage
 
 printf '\n========================================\n'

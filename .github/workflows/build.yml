@@ -5,6 +5,11 @@ on:
     branches: ['**']
   pull_request:
     branches: [main, master]
+  schedule:
+    # Nightly deep soak: the same suites as push, then the soak suite scaled
+    # up 50x — catches drift/flakiness that per-push runs are too small to see.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
 
 jobs:
   test:
@@ -23,6 +28,10 @@ jobs:
       # a red suite fails the build.
       - name: Run unit tests
         run: ./run_tests.sh
+
+      - name: Deep soak (nightly + manual runs only)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: SOAK_ROUNDS=2000 ./run_tests.sh soak
 
       - name: Build script sanity
         run: bash -n build.sh
