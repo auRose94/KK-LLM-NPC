@@ -77,6 +77,18 @@ namespace KKLLMNPC
                     _harmony.Patch(mailUse,
                         prefix: new HarmonyMethod(typeof(Patches).GetMethod(nameof(MailMachine_LocalUse_Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
 
+                // BELLY BULGE KEEPER (2026-11-16): the game sizes the belly purely
+                // from reagent volume (OnBellyContentsChanged -> SetSize(Log(1+vol/80)));
+                // a swallowed meal is not a reagent, so SwallowManager adds its
+                // size-scaled bulge on top. Any volume change (drinking, eating)
+                // would erase that term — this postfix re-applies it after the
+                // game's own sizing, so a full stomach and a meal COMPOSE.
+                var bellyChanged = typeof(Kobold).GetMethod("OnBellyContentsChanged",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                if (bellyChanged != null)
+                    _harmony.Patch(bellyChanged,
+                        postfix: new HarmonyMethod(typeof(Patches).GetMethod(nameof(Kobold_OnBellyContentsChanged_Postfix), BindingFlags.Static | BindingFlags.NonPublic)));
+
                 log.LogInfo("KKLLMNPC: animator rotation patches applied.");
             }
             catch (Exception e)
@@ -173,6 +185,13 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
             return true; // the sale itself always proceeds
+        }
+
+        // Postfix on Kobold.OnBellyContentsChanged: re-apply the swallow meal's
+        // bulge term after the game re-sizes the belly from reagent volume.
+        private static void Kobold_OnBellyContentsChanged_Postfix(Kobold __instance)
+        {
+            try { if (__instance != null) SwallowManager.RefreshBellyBulge(__instance); } catch (Exception) { }
         }
     }
 }

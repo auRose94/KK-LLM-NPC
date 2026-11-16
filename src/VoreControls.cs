@@ -226,6 +226,8 @@ namespace KKLLMNPC
                     return "you are already digesting someone (or the nearest receiver is) — one meal at a time";
                 case SwallowManager.InsertStatus.NoReceiver:
                     return "FORCE mode: no other live kobold near you to receive them";
+                case SwallowManager.InsertStatus.TooBig:
+                    return "they are TOO BIG for your stomach — your bellySize sets the ceiling (a bigger-stomached body could hold them). Size them up honestly, pick smaller meals, or ask the human to lift the limit ([LittleTreats].SwallowSizeGates)";
                 default:
                     return "the swallow did not happen — hold a person you are facing and try again";
             }

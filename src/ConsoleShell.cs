@@ -572,7 +572,7 @@ namespace KKLLMNPC
 
             // ---- misc ----
             { "items",      "list grabbable PHYSICS items around you: items [radius] — eggs/seeds/fruit/frozen ones, each with a target id so `get id:N` works without eyes" },
-            { "kick",       "IN-BODY: kick (only while swallowed) — squirm hard inside them; they feel every one" },
+            { "kick",       "IN-BODY: kick (only while swallowed) — squirm hard inside them; they feel every one, and enough kicks can force a THROW-UP (bigger meals kick harder)" },
             { "masturbate", "IN-BODY (only while swallowed): cum deliberately, deep inside them — the intentional climax; their belly gains your cum (genes ride)" },
             { "surrender",  "IN-BODY (only while swallowed): go limp — stop squirming, accept the conversion" },
             { "screenshot", "show yourself your current view (image)" },

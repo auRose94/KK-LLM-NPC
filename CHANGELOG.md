@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — vore size mechanics: capacity gates, scaled time, throw-up, belly bulge)
+
+Meals scale with the bodies involved, per the playtest design:
+- **Capacity gates** (new `[LittleTreats].SwallowSizeGates`, default ON): a
+  meal too big for the receiving stomach is refused before any pin — the
+  ceiling rises with the eater's `bellySize` gene (the game's own stomach
+  capacity), so big-stomach predators eat big prey as a build choice. New
+  `InsertStatus.TooBig` with honest notes. Off restores anything-goes.
+- **Scaled timing**: pull-in takes 0.75–2x and digestion 0.5–3x the base,
+  by victim-to-eater `baseSize` ratio (per-state `PullSeconds`; the old
+  constant is now only the seed).
+- **Throw-up**: every `kick` from inside accumulates struggle — bigger
+  meals churn far more (4 kicks at the capacity ceiling vs ~24 for a tiny
+  snack). Past the threshold the stomach HEAVES: the meal is thrown up
+  whole, alive and furious, with escalating warnings to the predator
+  before it happens. A fighting meal is one you must pacify or finish
+  fast — or don't swallow fighters.
+- **Belly bulge**: a swallowed meal finally SHOWS — the game's belly
+  visual is reagent-volume-driven, so the meal-term is added on top
+  (reflection onto `bellyInflater`; a Harmony postfix keeps it through
+  drinks; begin/milestones/ends refresh it), scaled to meal size (0.45
+  inflatable units at an even match, monstrous at the ceiling) and easing
+  down as digestion progresses.
+All curves are pure `SwallowLogic` (SizeRatio/DigestScale/PullScale/
+FitsInBelly/KickStruggle/BellyBulge) with 30 new assertions in the
+swallow suite; prompts (manual/console/vore extra) teach the size rules.
+
 ### Added (2026-11-16 — eat-by-name: `swallow target='Name'`)
 
 The playtest's "couldn't be ordered to eat by name": the swallow tool took

@@ -298,6 +298,39 @@ internal static class TestSwallow
         Eq(true, !SwallowLogic.IsPreferenceClearWord("mouth") && !SwallowLogic.IsPreferenceClearWord("grow"),
             "real picks are not clear words");
 
+        // ---- size mechanics (2026-11-16): ratio, timing scales, capacity, struggle, bulge ----
+        Near(1.0, SwallowLogic.SizeRatio(20f, 20f), "even match → ratio 1");
+        Near(2.0, SwallowLogic.SizeRatio(40f, 20f), "double meal → ratio 2");
+        Near(0.4, SwallowLogic.SizeRatio(4f, 20f), "tiny meal clamps at 0.4");
+        Near(3.2, SwallowLogic.SizeRatio(999f, 1f), "absurd meal clamps at 3.2");
+        Near(1.0, SwallowLogic.SizeRatio(0f, 20f), "degenerate genes → even match");
+        Near(1.0, SwallowLogic.SizeRatio(20f, 0f), "degenerate eater → even match");
+        Near(1.5, SwallowLogic.DigestScale(1.5f), "digest scales with ratio");
+        Near(3.0, SwallowLogic.DigestScale(9f), "digest scale clamps at 3x");
+        Near(0.5, SwallowLogic.DigestScale(0.1f), "digest scale floors at 0.5x");
+        Near(1.75, SwallowLogic.PullScale(1.75f), "pull scales with ratio");
+        Near(2.0, SwallowLogic.PullScale(5f), "pull scale clamps at 2x");
+        Near(0.75, SwallowLogic.PullScale(0.5f), "pull scale floors at 0.75x");
+        Eq(true, SwallowLogic.FitsInBelly(1f, 0f), "same-size meal always fits");
+        Eq(true, SwallowLogic.FitsInBelly(2.1f, 0f), "ratio 2.1 fits at the bare ceiling");
+        Eq(false, SwallowLogic.FitsInBelly(2.11f, 0f), "just over the bare ceiling is refused");
+        Eq(true, SwallowLogic.FitsInBelly(2.9f, 20f), "bellySize 20 raises the ceiling to 2.9");
+        Eq(false, SwallowLogic.FitsInBelly(2.95f, 20f), "over the raised ceiling is refused");
+        Eq(true, SwallowLogic.FitsInBelly(6.1f, 100f), "a huge-stomach predator holds absurd meals");
+        Near(1.0, SwallowLogic.KickStruggle(1f), "same-size kick = 1 struggle");
+        Near(3.0, SwallowLogic.KickStruggle(3f), "ceiling meal kicks at 3x");
+        Near(0.5, SwallowLogic.KickStruggle(0.2f), "tiny meal kicks at 0.5x");
+        True(SwallowLogic.KickStruggle(3f) * 4f >= SwallowLogic.StruggleVomitThreshold,
+            "four ceiling kicks force a throw-up");
+        True(SwallowLogic.KickStruggle(0.5f) * 24f >= SwallowLogic.StruggleVomitThreshold,
+            "a tiny meal needs ~24 kicks — barely registers");
+        Near(0.45, SwallowLogic.BellyBulge(1f, 0f), "same-size meal bulges visibly at swallow");
+        Near(0.45f * 2f, SwallowLogic.BellyBulge(2f, 0f), "double meal bulges double");
+        Near(0.45f * 0.4f, SwallowLogic.BellyBulge(0.4f, 0f), "tiny meal barely shows");
+        Near(0.45f * 0.4f, SwallowLogic.BellyBulge(1f, 1f), "bulge eases to 40% at digestion end");
+        True(SwallowLogic.BellyBulge(1f, 0.5f) < SwallowLogic.BellyBulge(1f, 0f),
+            "bulge shrinks monotonically with progress");
+
         if (_failed == 0) Console.WriteLine("test_swallow: all OK");
         else Console.WriteLine("test_swallow: " + _failed + " failure(s)");
         Environment.Exit(_failed);

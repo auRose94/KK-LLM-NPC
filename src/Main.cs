@@ -440,6 +440,8 @@ namespace KKLLMNPC
                 "What a fully-digested person becomes: Egg = an egg pops out at your feet carrying KoboldGenes.Mix(your genes, theirs) — plant it in soil and the hatched body is claimed again with their saved persona/facts (genes changed). " +
                 "BellyEgg = their 'Egg' reagent + genes ride in YOUR belly (20 units; nests need ≥5) — sit on a nest and lay THEM, then plant the egg as above. " +
                 "Grow = no egg; you absorb them: SwallowGrowLarger/Strength/Sex pick what you gain (size, strength, curves). Destroy = no egg, nothing gained; they're just gone.");
+            _cfgSwallowSizeGates = Config.Bind("LittleTreats", "SwallowSizeGates", true,
+                "Size-balanced vore (2026-11-16): a meal too big for the eater's stomach is REFUSED — the ceiling rises with the eater's bellySize gene (the game's own stomach-capacity stat), so big-stomach predators eat big prey as a build choice. Digestion and pull-in time scale with meal size, a swallowed meal shows a size-scaled belly bulge that eases as digestion progresses, and enough `kick`ing from inside can force a throw-up (scales with meal size). Off = any stomach holds any meal (the old anything-goes); the time scaling, bulge and struggle still apply.");
             _cfgSwallowGrowLarger = Config.Bind("LittleTreats", "SwallowGrowLarger", true,
                 "[SwallowEffect=Grow] gain the consumed person's size: baseSize += 10% of theirs (see SwallowGrowPercent) — you visibly grow (the game's size inflate gene).");
             _cfgSwallowGrowStrength = Config.Bind("LittleTreats", "SwallowGrowStrength", true,

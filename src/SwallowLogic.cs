@@ -492,5 +492,62 @@ namespace KKLLMNPC
                 ? "a full, warm, comfortable meal is almost all you can think about — every kobold looks invitingly big and soft"
                 : "food-thoughts dominate: kobolds look downright TASTY, and each of them would make a proper meal";
         }
+
+        // ------------------------------------------------------------------
+        // SIZE MECHANICS (2026-11-16, Rose's design): meals scale with the
+        // bodies involved — bigger prey digest slower, bulge more, and may not
+        // FIT at all in a small stomach; enough struggling forces a throw-up.
+        // Pure math so tests cover every curve.
+        // ------------------------------------------------------------------
+
+        // victim-to-eater baseSize ratio, clamped to a sane band; degenerate
+        // genes (0/missing) read as an even match so nothing divides by zero.
+        public static float SizeRatio(float victimBaseSize, float eaterBaseSize)
+        {
+            if (victimBaseSize <= 0f || eaterBaseSize <= 0f) return 1f;
+            float r = victimBaseSize / eaterBaseSize;
+            return r < 0.4f ? 0.4f : (r > 3.2f ? 3.2f : r);
+        }
+
+        // Bigger meals take proportionally longer to digest (0.5x..3x the base).
+        public static float DigestScale(float ratio)
+        {
+            return ratio < 0.5f ? 0.5f : (ratio > 3f ? 3f : ratio);
+        }
+
+        // And are slower to pull in (0.75x..2x) — swallowing up is work.
+        public static float PullScale(float ratio)
+        {
+            return ratio < 0.75f ? 0.75f : (ratio > 2f ? 2f : ratio);
+        }
+
+        // Capacity: a meal over the limit is refused outright. The eater's
+        // bellySize gene — the game's OWN stomach capacity (it sets
+        // bellyContainer.maxVolume) — raises the ceiling, so a big-stomach
+        // predator eats big prey as a build choice, not a loophole.
+        public static bool FitsInBelly(float ratio, float eaterBellySize)
+        {
+            float limit = 2.1f + (eaterBellySize > 0f ? eaterBellySize : 0f) / 25f;
+            return ratio <= limit + 0.001f; // epsilon: float sums round down at the edge
+        }
+
+        // Struggle: each kick counts more the bigger the meal (small prey
+        // barely register; a same-size meal churns properly). Threshold is in
+        // the same units — ~24 tiny kicks vs ~4 at the capacity ceiling.
+        public static float KickStruggle(float ratio)
+        {
+            return ratio < 0.5f ? 0.5f : (ratio > 3f ? 3f : ratio);
+        }
+        public const float StruggleVomitThreshold = 12f;
+
+        // Belly bulge in the game's inflatable units (1.0 = the full belly
+        // blendshape, beyond = the "continue" overflow shape): visible at an
+        // even match, enormous at the capacity ceiling, easing down as the
+        // digestion progresses (the meal is, after all, softening).
+        public static float BellyBulge(float ratio, float digestProgress01)
+        {
+            float p = digestProgress01 < 0f ? 0f : (digestProgress01 > 1f ? 1f : digestProgress01);
+            return 0.45f * ratio * (1f - 0.6f * p);
+        }
     }
 }

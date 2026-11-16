@@ -105,6 +105,9 @@ namespace KKLLMNPC
                                            // consume keeps the body parked (never destroyed)
             public float StartUnscaled;
             public float DigestSeconds;
+            public float SizeRatio = 1f;    // victim/eater baseSize ratio (2026-11-16 size mechanics)
+            public float PullSeconds;       // per-state pull duration (scales with meal size)
+            public float Struggle;          // accumulated kick-struggle — the throw-up meter
             public Vector3 PullStartPos;
             public int Milestone;          // last narrated digest mark
             public int LastPhase = -9;     // previous Advance phase (for the 0→1 full-insert edge)
@@ -185,15 +188,15 @@ namespace KKLLMNPC
                     // INTAKE (the virtual-insertion window): the held person is being
                     // drawn in — the pred can CHECK the insert fraction every turn
                     // ("full insert" is where the actual digestion starts).
-                    if (elapsed < SwallowLogic.PullSeconds)
+                    if (elapsed < st.PullSeconds)
                     {
-                        float t = SwallowLogic.Smooth01(Mathf.Clamp01(elapsed / SwallowLogic.PullSeconds));
+                        float t = SwallowLogic.Smooth01(Mathf.Clamp01(elapsed / st.PullSeconds));
                         parts.Add("TAKING IN " + st.Name + " — " + Mathf.RoundToInt(t * 100f).ToString("0", CultureInfo.InvariantCulture)
                             + "% into your " + holeLabelFor(st.Hole) + " (" + SwallowLogic.InsertStageText(t)
                             + "); the conversion starts when they are FULLY in");
                         continue;
                     }
-                    float left = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - elapsed);
+                    float left = Mathf.Max(0f, st.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - elapsed);
                     string fate;
                     switch (EffectAt(st))
                     {
@@ -667,17 +670,18 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
 
         // Status codes returned to the player via TryInsert.
-        internal enum InsertStatus
-        {
-            Success,          // swallowed
-            Disabled,         // master switch or swell mode off
-            NoBody,           // player has no body
-            NoTarget,         // no held person facing us within the window
-            AlreadyInside,    // victim is already being swallowed (cascade guard)
-            Refused,          // Begin declined (no valid eaten-by body)
-            NoReceiver,       // FORCE mode: no other live kobold near us
-            ReceiverBusy,     // FORCE mode: nearest kobold is being eaten
-        }
+    internal enum InsertStatus
+    {
+        Success,          // swallowed
+        Disabled,         // master switch or swell mode off
+        NoBody,           // player has no body
+        NoTarget,         // no held person facing us within the window
+        AlreadyInside,    // victim is already being swallowed (cascade guard)
+        Refused,          // Begin declined (no valid eaten-by body)
+        NoReceiver,       // FORCE mode: no other live kobold near us
+        ReceiverBusy,     // FORCE mode: nearest kobold is being eaten
+        TooBig,           // size gates: meal exceeds the stomach's capacity
+    }
 
         // Press INSERT. Returns whether a swallow started + a status for the
         // player. Main-thread only. `eater` = the LOCAL PLAYER's body (whose
@@ -879,6 +883,23 @@ namespace KKLLMNPC
         private static bool BeginInsertFor(Kobold eater, Kobold victim, Kobold actor, out InsertStatus status)
         {
             status = InsertStatus.Refused;
+            // SIZE GATES (2026-11-16): a meal too big for the receiving stomach is
+            // refused BEFORE any pin/hoist — the playtest design: small predators
+            // can't easily swallow large prey (their bellySize gene raises the
+            // ceiling). Gated by [LittleTreats].SwallowSizeGates; the timing/bulge
+            // scaling below always applies.
+            {
+                float ratio, pullSec;
+                bool fits;
+                SizePlan(eater, victim, out ratio, out pullSec, out fits);
+                if (!fits)
+                {
+                    status = InsertStatus.TooBig;
+                    try { LLMNPCPlugin.Log.LogInfo("swallow: refused — meal " + NPCInstance.CleanName(victim != null ? victim.name : "?")
+                        + " too big for " + NPCInstance.CleanName(eater != null ? eater.name : "?") + "'s stomach (ratio " + ratio.ToString("0.0", CultureInfo.InvariantCulture) + ")"); } catch (Exception) { }
+                    return false;
+                }
+            }
             // Sky-drop: raise the held victim well above the eaten-by body's head so
             // the pull-in visually falls in (StartPos for the phase). Hoisted out of
             // the try so the else-branch can undo it if Begin declines.
@@ -1439,11 +1460,14 @@ namespace KKLLMNPC
                 Entry = holeDest,
                 VictimIsPlayer = playerVictim,
                 StartUnscaled = Time.unscaledTime,
-                DigestSeconds = DigestSeconds(),
+                DigestSeconds = DigestSeconds() * SwallowLogic.DigestScale(SizePlanRatio(eater, victim)),
+                SizeRatio = SizePlanRatio(eater, victim),
+                PullSeconds = SwallowLogic.PullSeconds * SwallowLogic.PullScale(SizePlanRatio(eater, victim)),
                 PullStartPos = victim.transform.position,
                 Milestone = -1,
             };
             lock (_lock) _active.Add(st);
+            RefreshBellyBulge(eater); // the meal SHOWS from the first moment
             DisarmVictimPenetrators(st);
             SpawnVirtualPen(st);
             // MOD EVENT CHANNEL (multiplayer): a remote victim's mod learns of the
@@ -1491,7 +1515,7 @@ namespace KKLLMNPC
                         st.EaterNpc.PushWorldEvent("you just " + entryVerb + " the PLAYER WHOLE — " + st.Name
                             + " is inside your " + SwallowLogic.InsideNoun(holeDest) + " now via your " + holeLabelFor(hole)
                             + " (a meal-like conversion, NOT sex): their camera is gone, they WATCH everything through your body's eyes and CANNOT act (about "
-                            + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
+                            + Math.Ceiling(st.DigestSeconds + st.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
                             + "s to conversion). " + PlayerFateHint(eater) + " Keep living your ordinary life — go to work, play, talk — and speak to them whenever; they hear you. They are a person in your care: never sell, abandon or hurt them.");
                     }
                     catch (Exception) { }
@@ -1512,7 +1536,7 @@ namespace KKLLMNPC
                         st.EaterNpc.PushWorldEvent("you just " + entryVerb + " " + st.Name
                              + " WHOLE — they are deep inside your " + SwallowLogic.InsideNoun(holeDest)
                              + " now (a meal-like conversion, not sex), digesting (about "
-                            + Math.Ceiling(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
+                            + Math.Ceiling(st.DigestSeconds + st.PullSeconds + SwallowLogic.SettleSeconds).ToString("0", CultureInfo.InvariantCulture)
                             + "s to conversion). Their fate follows this stomach's rules; you can speak while they convert.");
                     }
                     catch (Exception) { }
@@ -1656,6 +1680,43 @@ namespace KKLLMNPC
             if (v < 5f) v = 5f;
             if (v > 600f) v = 600f;
             return v;
+        }
+
+        // ---- size mechanics (2026-11-16) ------------------------------------------
+        // victim-to-eater size ratio from the genes' baseSize (degenerate genes
+        // read as an even match — see SwallowLogic.SizeRatio).
+        private static float SizePlanRatio(Kobold eater, Kobold victim)
+        {
+            try
+            {
+                float v = 0f, e = 0f;
+                var vg = victim != null ? victim.GetGenes() : null;
+                var eg = eater != null ? eater.GetGenes() : null;
+                if (vg != null) v = vg.baseSize;
+                if (eg != null) e = eg.baseSize;
+                return SwallowLogic.SizeRatio(v, e);
+            }
+            catch (Exception) { return 1f; }
+        }
+
+        // The full size plan: ratio, per-state pull seconds, and whether the meal
+        // FITS (capacity gate: [LittleTreats].SwallowSizeGates, ceiling raised by
+        // the eater's own bellySize gene — the game's stomach-capacity stat).
+        private static void SizePlan(Kobold eater, Kobold victim, out float ratio, out float pullSec, out bool fits)
+        {
+            ratio = SizePlanRatio(eater, victim);
+            pullSec = SwallowLogic.PullSeconds * SwallowLogic.PullScale(ratio);
+            bool gates = true;
+            try
+            {
+                var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowSizeGates : null;
+                if (cfg != null) gates = cfg.Value;
+            }
+            catch (Exception) { }
+            if (!gates) { fits = true; return; }
+            float belly = 0f;
+            try { var eg = eater != null ? eater.GetGenes() : null; if (eg != null) belly = eg.bellySize; } catch (Exception) { }
+            fits = SwallowLogic.FitsInBelly(ratio, belly);
         }
 
         // Fire OnReleaseRPC for every held entry of the eater's grabber, giving the
@@ -2180,6 +2241,13 @@ namespace KKLLMNPC
             float now = Time.unscaledTime;
             if (now - st.LastKick < 5f) return true; // quietly throttled
             st.LastKick = now;
+            // STRUGGLE ACCUMULATOR (2026-11-16, Rose's design): every kick churns
+            // the stomach — bigger meals churn far more (small prey barely
+            // register). Past the threshold the stomach HEAVES and the meal comes
+            // back up: the victim's lever to fight back, the pred's reason to
+            // pacify (or finish faster than) a rowdy meal.
+            st.Struggle += SwallowLogic.KickStruggle(st.SizeRatio);
+            bool vomit = !st.Surrendered && st.Struggle >= SwallowLogic.StruggleVomitThreshold;
             try
             {
                 if (st.EaterNpc != null)
@@ -2189,15 +2257,109 @@ namespace KKLLMNPC
                         "a strong jolt from inside: " + st.Name + " kicked against your gut",
                         "movement inside you — " + st.Name + " squirms and presses outward",
                     };
-                    st.EaterNpc.PushWorldEvent("[kick] " + kicks[UnityEngine.Random.Range(0, kicks.Length)] + ".");
+                    string extra = vomit ? " Your stomach LURCHES — you can't hold them!"
+                        : st.Struggle >= SwallowLogic.StruggleVomitThreshold * 0.6f
+                            ? " Your gut is churning hard — they're really fighting in there."
+                            : "";
+                    st.EaterNpc.PushWorldEvent("[kick] " + kicks[UnityEngine.Random.Range(0, kicks.Length)] + "." + extra);
                 }
                 if (st.Npc != null)
-                    st.Npc.PushWorldEvent("[kick] you kick hard inside " + BodyLabel(st.Eater) + " — you can feel it land; they will notice.");
+                    st.Npc.PushWorldEvent("[kick] you kick hard inside " + BodyLabel(st.Eater) + " — you can feel it land; they will notice."
+                        + (vomit ? " And then — everything REVERSES." : ""));
                 // Bystanders sense the squirm too.
                 try { Plugin.FanoutWorldEventExcept("[kick] something in " + BodyLabel(st.Eater) + " visibly squirms — a kick from within.", st.EaterNpc, st.Npc); } catch (Exception) { }
             }
             catch (Exception) { }
+            if (vomit)
+            {
+                try { LLMNPCPlugin.Log.LogInfo("swallow: " + st.Name + " struggled free — " + BodyLabel(st.Eater) + " threw up"); } catch (Exception) { }
+                try
+                {
+                    if (st.EaterNpc != null)
+                        st.EaterNpc.PushWorldEvent("[vore] your stomach HEAVES — all that kicking was too much: you THROW UP " + st.Name
+                            + " whole. They're out, slick and furious, and your gut aches. A fighting meal is a meal you must PACIFY or finish fast — or don't swallow fighters at all.");
+                    if (st.Npc != null)
+                        st.Npc.PushWorldEvent("[vore] the walls clench — and everything reverses: you're THROWN UP, back into the light, gasping. Your struggling WORKED.");
+                    try { Plugin.FanoutWorldEventExcept("[vore] " + BodyLabel(st.Eater) + " suddenly retches and throws " + st.Name + " back up — alive and furious.", st.EaterNpc, st.Npc); } catch (Exception) { }
+                }
+                catch (Exception) { }
+                lock (_lock) _active.Remove(st);
+                try { DestroyVirtualPen(st); } catch (Exception) { }
+                try { ClearBellyBulge(st.Eater); } catch (Exception) { }
+                try { ReleaseSwallowed(st); } catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow vomit release: " + e.Message); } catch (Exception) { } }
+            }
             return true;
+        }
+
+        // ---- belly bulge (2026-11-16): a swallowed meal SHOWS ------------------
+        // The game's belly visual is a pure function of reagent volume
+        // (Kobold.OnBellyContentsChanged -> bellyInflater.SetSize(Log2(1+vol/80)));
+        // a meal is not a reagent, so we ADD the meal-term on top (Harmony postfix
+        // keeps it through drinks; swallow begin/end/milestones refresh it; the
+        // bulge eases down as digestion progresses). Reflection touches only the
+        // private bellyInflater field; every call is guarded — a body model
+        // without the inflatable simply shows no bulge.
+        private static System.Reflection.FieldInfo _bellyInflaterField;
+        private static void SetBellySize(Kobold k, float size)
+        {
+            try
+            {
+                if (k == null) return;
+                if (_bellyInflaterField == null)
+                    _bellyInflaterField = typeof(Kobold).GetField("bellyInflater", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var inf = _bellyInflaterField != null ? _bellyInflaterField.GetValue(k) : null;
+                if (inf == null) return;
+                var m = inf.GetType().GetMethod("SetSize", new[] { typeof(float), typeof(MonoBehaviour) });
+                if (m != null) m.Invoke(inf, new object[] { size, k });
+            }
+            catch (Exception) { }
+        }
+        // The game's own volume-based belly size — mirrored so our addition
+        // composes with whatever the stomach currently holds.
+        internal static float GameBellySize(Kobold k)
+        {
+            try
+            {
+                var bc = k != null ? k.bellyContainer : null;
+                if (bc == null) return 0f;
+                return (float)Math.Log(1f + bc.volume / 80f, 2f);
+            }
+            catch (Exception) { return 0f; }
+        }
+        internal static float ActiveBulgeFor(Kobold eater)
+        {
+            float total = 0f;
+            try
+            {
+                lock (_lock)
+                    foreach (var st in _active)
+                    {
+                        if (st == null || st.Eater != eater) continue;
+                        float elapsed = Time.unscaledTime - st.StartUnscaled - st.PullSeconds;
+                        float prog = st.DigestSeconds > 0f ? Mathf.Clamp01(elapsed / st.DigestSeconds) : 1f;
+                        total += SwallowLogic.BellyBulge(st.SizeRatio, prog);
+                    }
+            }
+            catch (Exception) { }
+            return total;
+        }
+        // Re-apply: the game's current volume size + the meal-term. No-op when
+        // no meal is aboard (the game's own sizing stands).
+        internal static void RefreshBellyBulge(Kobold k)
+        {
+            try
+            {
+                if (k == null) return;
+                float bulge = ActiveBulgeFor(k);
+                if (bulge <= 0.001f) return;
+                SetBellySize(k, GameBellySize(k) + bulge);
+            }
+            catch (Exception) { }
+        }
+        // Restore the game's own volume-based size (meal over / released).
+        internal static void ClearBellyBulge(Kobold k)
+        {
+            try { if (k != null) SetBellySize(k, GameBellySize(k)); } catch (Exception) { }
         }
 
         // `surrender`: the victim goes limp and accepting; the pred's mind learns
@@ -2255,8 +2417,8 @@ namespace KKLLMNPC
             }
 
             float t = Time.unscaledTime - st.StartUnscaled;
-            int phase = SwallowLogic.PhaseFor(SwallowLogic.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
-            float phaseT = SwallowLogic.PhaseT(SwallowLogic.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
+            int phase = SwallowLogic.PhaseFor(st.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
+            float phaseT = SwallowLogic.PhaseT(st.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
 
             // LAUNCH BRAKE: nothing in the pin/pull escalates vertically, so a fast,
             // sustained climb of the pred is a physics/animation break carrying the
@@ -2362,7 +2524,7 @@ namespace KKLLMNPC
                 if (nowT - st.LastProgressEvent < 0f || nowT - st.LastProgressEvent > 10f)
                 {
                     st.LastProgressEvent = nowT;
-                    float totalSec = SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds;
+                    float totalSec = st.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds;
                     float leftS = Mathf.Max(0f, totalSec - (nowT - st.StartUnscaled));
                     float pct = Mathf.Clamp01((nowT - st.StartUnscaled) / totalSec);
                     int pctI = Mathf.RoundToInt(pct * 100f);
@@ -2381,6 +2543,7 @@ namespace KKLLMNPC
                 if (mark > st.Milestone)
                 {
                     st.Milestone = mark;
+                    RefreshBellyBulge(st.Eater); // digestion eases the bulge — shrink with each milestone
                     if (st.Npc != null)
                     {
                         try
@@ -2407,7 +2570,7 @@ namespace KKLLMNPC
                     // from the victim's NPC (a vanilla victim must not stall the marks).
                     if (st.EaterNpc != null)
                     {
-                        float leftS = Mathf.Max(0f, SwallowLogic.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - (Time.unscaledTime - st.StartUnscaled));
+                        float leftS = Mathf.Max(0f, st.PullSeconds + st.DigestSeconds + SwallowLogic.SettleSeconds - (Time.unscaledTime - st.StartUnscaled));
                         string feeling = mark == SwallowLogic.MarkChurn
                             ? "your " + SwallowLogic.InsideNoun(st.Entry) + " churns around " + st.Name + " — they are in there, alive"
                             : "your " + SwallowLogic.InsideNoun(st.Entry) + " kneads " + st.Name + " steadily — the conversion is underway";
@@ -2620,6 +2783,7 @@ namespace KKLLMNPC
                     var st = _active[i];
                     _active.RemoveAt(i);
                     DestroyVirtualPen(st);
+                    try { ClearBellyBulge(st.Eater); } catch (Exception) { }
                     try { ReleaseSwallowed(st); }
                     catch (Exception e)
                     {
@@ -2637,6 +2801,7 @@ namespace KKLLMNPC
         private static void EndSwallow(SwallowState st)
         {
             if (st.EaterNpc != null) { try { st.EaterNpc.Digesting = false; } catch (Exception) { } }
+            try { ClearBellyBulge(st.Eater); } catch (Exception) { } // meal over — the game's own belly sizing resumes
         }
 
         private static void ReleaseSwallowed(SwallowState st)
@@ -3446,7 +3611,7 @@ namespace KKLLMNPC
                 var pv = st.Victim.photonView;
                 if (pv == null) return;
                 BroadcastLine("swallow|begin|" + pv.ViewID + "|" + (st.Name ?? "?") + "|"
-                    + EffectAt(st).ToString() + "|" + Math.Round(st.DigestSeconds + SwallowLogic.PullSeconds + SwallowLogic.SettleSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    + EffectAt(st).ToString() + "|" + Math.Round(st.DigestSeconds + st.PullSeconds + SwallowLogic.SettleSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             catch (Exception) { }
         }
@@ -3611,6 +3776,8 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgSwallowInsertRangeMin;
         internal ConfigEntry<float> _cfgSwallowInsertRangeMax;
         internal ConfigEntry<SwallowEffect> _cfgSwallowEffect;
+        // Size-balanced vore (2026-11-16): capacity gate for oversized meals.
+        internal ConfigEntry<bool> _cfgSwallowSizeGates;
         internal ConfigEntry<bool> _cfgSwallowGrowLarger;
         internal ConfigEntry<bool> _cfgSwallowGrowStrength;
         internal ConfigEntry<bool> _cfgSwallowGrowSex;
