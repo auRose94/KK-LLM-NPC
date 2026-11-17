@@ -357,6 +357,21 @@ namespace KKLLMNPC
 
                 if (dropper == null) return true;
 
+                // SAFE DROP (2026-11-16, Rose's placement accident): hold the safe
+                // key (default LeftShift, [LittleTreats].SwallowSafeDropKey) while
+                // releasing and NO swallow trigger fires for that drop — the person
+                // just lands. Placing kobolds at work stations next to each other
+                // (or under yourself) without arming/disarming vore every time.
+                try
+                {
+                    if (SafeDropHeld())
+                    {
+                        try { LLMNPCPlugin.Log.LogInfo("swallow: safe drop (key held) — vore disarmed for this release"); } catch (Exception) { }
+                        return true;
+                    }
+                }
+                catch (Exception) { }
+
                 var held = NPCInstance.HeldScanFor(dropper);
                 var persons = new List<Kobold>();
                 // MULTIPLAYER VORE (SwallowPlayerVictims): a PLAYER dropper may
@@ -695,6 +710,22 @@ namespace KKLLMNPC
         // Press INSERT. Returns whether a swallow started + a status for the
         // player. Main-thread only. `eater` = the LOCAL PLAYER's body (whose
         // hands hold and whose menu key is pressed).
+        // The safe-drop key: held while releasing = no swallow triggers for that
+        // drop ([LittleTreats].SwallowSafeDropKey, default LeftShift; "" = off).
+        internal static bool SafeDropHeld()
+        {
+            try
+            {
+                var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowSafeDropKey : null;
+                string s = cfg != null ? (cfg.Value ?? "").Trim() : "";
+                if (string.IsNullOrEmpty(s)) return false;
+                KeyCode k;
+                if (!Enum.TryParse<KeyCode>(s, true, out k) || k == KeyCode.None) return false;
+                return UnityEngine.Input.GetKey(k);
+            }
+            catch (Exception) { return false; }
+        }
+
         internal static bool TryInsert(Kobold eater, out InsertStatus status)
         {
             status = InsertStatus.Refused;
@@ -2844,9 +2875,9 @@ namespace KKLLMNPC
                 if (st.LastWatchT > 0f && nt - st.LastWatchT > 0.01f)
                 {
                     float upRate = (ey - st.LastWatchY) / (nt - st.LastWatchT);
-                    if (upRate > 2.5f) st.LaunchTicks++;
+                    if (upRate > 3.4f) st.LaunchTicks++;
                     else st.LaunchTicks = Mathf.Max(0, st.LaunchTicks - 2);
-                    if (st.LaunchTicks >= 15) launched = true;
+                    if (st.LaunchTicks >= 24) launched = true;
                 }
                 st.LastWatchY = ey;
                 st.LastWatchT = nt;
@@ -4403,6 +4434,8 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgSwallowSizeGates;
         // Reincarnation (2026-11-16): the Destroy fate's rare soul-egg second chance.
         internal ConfigEntry<float> _cfgSwallowReincarnateChance;
+        // Safe drop (2026-11-16): hold this key while releasing to disarm vore for that drop.
+        internal ConfigEntry<string> _cfgSwallowSafeDropKey;
         internal ConfigEntry<bool> _cfgSwallowGrowLarger;
         internal ConfigEntry<bool> _cfgSwallowGrowStrength;
         internal ConfigEntry<bool> _cfgSwallowGrowSex;

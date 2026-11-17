@@ -5,7 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.1] — 2026-11-16
+
+The vore-drama mega-release: the churn system, reincarnation in three
+flavors, drunk roleplay, and the fixes from the second playtest.
+
+### Fixed (2026-11-16 — v1.3.1 hardening: safe drops + jumpy hosts)
+
+- **Safe drop** (`[LittleTreats].SwallowSafeDropKey`, default LeftShift):
+  hold the key while releasing a held kobold and NO swallow trigger fires
+  for that drop — they just land. The accidental-vore fix from the
+  playtest: placing kobolds at work stations near each other (or below
+  yourself) no longer feeds anyone to anyone.
+- **Jump-escape**: the swallow launch brake (the anti-physics-break
+  release) fired on ordinary hard jumps (0.25 s above 2.5 m/s of climb);
+  it now needs a real sustained climb (24 ticks above 3.4 m/s) — jumpy
+  hosts keep their meals.
+
+### Added (2026-11-16 — offspring reincarnation: the charged load's grown body wakes as the victim)
 
 ### Added (2026-11-16 — offspring reincarnation: the charged load's grown body wakes as the victim)
 

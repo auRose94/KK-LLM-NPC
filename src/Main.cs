@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.3.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.3.1")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -448,6 +448,8 @@ namespace KKLLMNPC
                 "Size-balanced vore (2026-11-16): a meal too big for the eater's stomach is REFUSED — the ceiling rises with the eater's bellySize gene (the game's own stomach-capacity stat), so big-stomach predators eat big prey as a build choice. Digestion and pull-in time scale with meal size, a swallowed meal shows a size-scaled belly bulge that eases as digestion progresses, and enough `kick`ing from inside can force a throw-up (scales with meal size). Off = any stomach holds any meal (the old anything-goes); the time scaling, bulge and struggle still apply.");
             _cfgSwallowReincarnateChance = Config.Bind("LittleTreats", "SwallowReincarnateChance", 0.15f,
                 "Reincarnation (2026-11-16): the chance (0..1) that a fully-consumed Destroy-fate victim refuses the end — an egg carrying THEIR OWN body slips free (a soul egg), their saved life linked for rebirth: plant it in soil and they return as themselves, memories intact. The eater is told what they hold ('their SECOND CHANCE; yours to deliver or devour'). 0 = never (final deaths are final); 1 = every destruction leaves an egg. Grow absorbs stay integrated — no second chance for those.");
+            _cfgSwallowSafeDropKey = Config.Bind("LittleTreats", "SwallowSafeDropKey", "LeftShift",
+                "SAFE DROP: hold this key while releasing a held kobold and NO swallow trigger fires for that drop — they just land. The fix for accidental vore when PLACING kobolds at work stations near each other (or below yourself): place freely with the key held, no arming/disarming needed. Any Unity KeyCode name works (LeftShift, RightShift, LeftControl…); empty = off (every armed drop gesture can trigger).");
             _cfgSwallowGrowLarger = Config.Bind("LittleTreats", "SwallowGrowLarger", true,
                 "[SwallowEffect=Grow] gain the consumed person's size: baseSize += 10% of theirs (see SwallowGrowPercent) — you visibly grow (the game's size inflate gene).");
             _cfgSwallowGrowStrength = Config.Bind("LittleTreats", "SwallowGrowStrength", true,
