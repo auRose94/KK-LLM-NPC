@@ -82,14 +82,14 @@ sobers across ~45 minutes of play.
 ```ini
 [Intoxication]
 Enabled   = true
-Reagents  = Wine,Beer,Vodka,Mead
+Reagents  = CervezaCristal,Beer,Whiskey,Vodka,Rum,Wine
 Potency   = 1.0
 ```
 
 | Key | Default | Range | Purpose |
 |-----|---------|-------|---------|
 | `Enabled` | `true` | bool | Track blood alcohol and require the drunk roleplay (tipsy → drunk → WASTED; ~13 units ≈ one tier step; only time sobers — the anchor says how long). Off = agents are magically immune. |
-| `Reagents` | `Wine,Beer,Vodka,Mead` | csv | Which reagents count as alcohol — resolved against the game's reagent database at first use; names not installed are skipped and logged (the game ships wine via the wine press; adjust to match your mods). |
+| `Reagents` | `CervezaCristal,Beer,Whiskey,Vodka,Rum,Wine` | csv | Which reagents count as alcohol — the drink mods' list by default; resolved against the game's reagent database at first use, names not installed are skipped and logged. |
 | `Potency` | `1.0` | 0.1–5 | Multiplier on blood-alcohol gain per drink (0.5 = hardy drinkers, 2 = lightweights). |
 
 ## [Vision] — Background Vision Pass

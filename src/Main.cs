@@ -620,8 +620,8 @@ namespace KKLLMNPC
                 "Max simultaneous LLM HTTP calls made toward the endpoint by the whole mod (every NPC competes for a serial local server otherwise — the burst was the source of most 'WebException(Timeout)' log spam; extra calls queue). 0 = unlimited. 2 is right for llama.cpp/KoboldCpp/solo-GPU LM Studio. Ollama queues extra requests itself (no timeouts), but serves only OLLAMA_NUM_PARALLEL slots and each parallel slot splits the model's KV window — 2-4 is the sweet spot there. Raise toward 8 only for genuinely parallel (vLLM-class) servers. Edits apply live, no restart.");
             _cfgDrunkEnabled = Config.Bind("Intoxication", "Enabled", true,
                 "Agents that drink alcohol roleplay being drunk — the belly's alcohol volume is tracked as blood-alcohol (tipsy/drunk/wasted tiers), carried in the state anchor every turn with an explicit PLAY IT contract, with tier-change events on the way up and sobering (and the hangover, from wasted) on the way down. Metabolism is slow: a full drunk sobers across ~45 minutes of play. Off = agents are magically immune.");
-            _cfgDrunkReagents = Config.Bind("Intoxication", "Reagents", "Wine,Beer,Vodka,Mead",
-                "Which reagents count as alcohol (comma-separated; resolved against the game's reagent database at first use — names not installed are skipped and logged). The game ships wine (the wine press); add or rename to match your mods.");
+            _cfgDrunkReagents = Config.Bind("Intoxication", "Reagents", "CervezaCristal,Beer,Whiskey,Vodka,Rum,Wine",
+                "Which reagents count as alcohol (comma-separated; resolved against the game's reagent database at first use — names not installed are skipped and logged). Default = the drink mods' list: CervezaCristal, Beer, Whiskey, Vodka, Rum, Wine.");
             _cfgDrunkPotency = Config.Bind("Intoxication", "Potency", 1f,
                 "Multiplier on blood-alcohol gain per drink (1 = default: ~13 units for a solid glass ≈ one tier step; 0.5 = hardy drinkers, 2 = lightweights).");
             _cfgIdentityBot = Config.Bind("Multiplayer", "IdentityBot", false,
