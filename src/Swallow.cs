@@ -1514,6 +1514,12 @@ namespace KKLLMNPC
                 npc.PushWorldEvent("[vore] you taste someone in what you drank — " + e.Name + "'s substance, and with it their MEMORIES pour into you. You know things now. You know them FROM " + e.Name + " — remember who taught you.");
                 if (facts != null && facts.Count > 0) npc.AbsorbVictimFacts(e.Name, facts);
                 else npc.RememberFact("from " + e.Name + ": drunk whole — their substance carried nothing else readable");
+                try
+                {
+                    string epLine = MemoryCompaction.EpisodeLine(e.Name, rec.Episode);
+                    if (epLine != null) npc.RememberFact(epLine);
+                }
+                catch (Exception) { }
                 try { LLMNPCPlugin.Log.LogInfo("swallow: substrate absorb — '" + e.Name + "' drunk by " + BodyLabel(k)); } catch (Exception) { }
             }
             catch (Exception ex) { try { LLMNPCPlugin.Log.LogWarning("substrate absorb: " + ex.Message); } catch (Exception) { } }
@@ -3460,6 +3466,14 @@ namespace KKLLMNPC
                     // SKILL TRANSFER: the digested person's procedures pour in as
                     // well — muscle memory goes to whoever absorbed them.
                     try { if (rec.Skills != null && rec.Skills.Count > 0) eatNpc.SkillsAbsorbFrom(st.Name, rec.Skills); } catch (Exception) { }
+                    // EPISODE TRANSFER (2026-11-16): their last waking hours — what
+                    // they were DOING when it ended — rides along as one labeled line.
+                    try
+                    {
+                        string epLine = MemoryCompaction.EpisodeLine(rec.Name ?? st.Name, rec.Episode);
+                        if (epLine != null) eatNpc.RememberFact(epLine);
+                    }
+                    catch (Exception) { }
                 }
 
                 // And mirror the merged life under the EATER's own body key, so an

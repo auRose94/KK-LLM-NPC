@@ -477,7 +477,19 @@ namespace KKLLMNPC
                 lock (_facts) foreach (var f in _facts) { facts.Add(f.Text); factUtc.Add(f.Utc); }
                 string fp = _boundBodyFp;
                 if (string.IsNullOrEmpty(fp)) fp = BodyFullFp(_kobold);
-                // NAME POLLUTION GUARD: before FinalizeIdentity lands, _npcName is the
+                // EPISODE SNAPSHOT (2026-11-16): the last waking hours ride the record
+                // — timestamped history entries, so absorb/drink/rebirth pass what the
+                // person was DOING, not just their facts.
+                var episode = new List<string>();
+                try
+                {
+                    lock (_history)
+                    {
+                        int skip = _history.Count - 8;
+                        foreach (var e in _history) { if (skip-- > 0) continue; episode.Add(e); }
+                    }
+                }
+                catch (Exception) { }
                 // prefab placeholder ("Porcupine") — a save in that window would
                 // overwrite a previous life's real name in the record (field log
                 // 2026-11-15: a body's record saved as 'Porcupine' mid-limbo, then
@@ -497,7 +509,8 @@ namespace KKLLMNPC
                 }
                 MemoryStore.Save(bodyKey, saveName, _persona, facts, goal, _pronounsOverride, SkillsSnapshotLines(),
                     bodyFp: fp, species: BodySpecies(_kobold),
-                    voreTarget: VoreTargetOverride, voreMode: VoreModeOverride, factUtc: factUtc);
+                    voreTarget: VoreTargetOverride, voreMode: VoreModeOverride, factUtc: factUtc,
+                    episode: episode);
                 try { Logger.LogInfo("KKLLMNPC: saved '" + _npcName + "' — " + facts.Count + " facts keyed to body '" + bodyKey + "'"); } catch (Exception) { }
             }
             catch (Exception) { }
@@ -569,6 +582,14 @@ namespace KKLLMNPC
                 }
                 if (!string.IsNullOrEmpty(rec.Goal)) lock (_goalLock) { _goal = rec.Goal; _goalTick = _tick; }
                 SkillsLoadFrom(rec.Skills); // learned procedures come back with the body
+                // EPISODE WAKE (2026-11-16): the restored person remembers their last
+                // waking moments — a reborn victim remembers being eaten.
+                try
+                {
+                    string wake = MemoryCompaction.WakingMemoryLine(rec.Episode);
+                    if (wake != null) _facts.Add(new FactRec { Text = wake, Tick = _tick, Utc = MemoryStore.UtcNow() });
+                }
+                catch (Exception) { }
                 // VoreControls: the person's own vore preferences wake with them.
                 _voreTargetOverride = string.IsNullOrEmpty(rec.VoreTarget) ? null : rec.VoreTarget;
                 _voreModeOverride = string.IsNullOrEmpty(rec.VoreMode) ? null : rec.VoreMode;

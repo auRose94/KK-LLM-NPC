@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — episodic memory transfer: victims pass their last waking hours)
+
+Memory records now carry an EPISODE — the last 8 timestamped short-term
+history entries snapshotted at save time. On grow-absorb and drink-absorb it
+arrives as one origin-labeled line ("from Mochi's last hours: 00:12 nav->water
+the farm · 00:14 say->these tomatoes are coming along · …" — the final moments
+are kept when capping), so an absorbed or drunken person passes what they were
+DOING, not just their facts. On rebirth/soul-egg restore the same episode is
+injected first-person ("your last waking moments, before this body slept: …")
+— a reborn victim remembers being eaten. Legacy records without an episode
+are unaffected; `MemoryCompaction.EpisodeLine`/`WakingMemoryLine` are pure
+with suite coverage.
+
 ### Added (2026-11-16 — drunk roleplay: agents that drink MUST play it)
 
 New `[Intoxication]` section (Enabled default ON, Reagents = Wine,Beer,Vodka,

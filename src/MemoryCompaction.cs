@@ -135,6 +135,45 @@ namespace KKLLMNPC
         }
 
         /// <summary>
+        /// EPISODE (2026-11-16, Rose's episodic-transfer ask): the victim's last
+        /// waking hours — their timestamped short-term history entries
+        /// ("02:14 say->these tomatoes are coming along") — compacted into ONE
+        /// origin-labeled fact line. An absorbed or drunken person now passes not
+        /// just facts but what they were DOING; the final entries matter most, so
+        /// the tail is kept. Null when there is nothing to tell.
+        /// </summary>
+        internal static string EpisodeLine(string otherName, List<string> history, int cap = 6)
+        {
+            if (history == null || history.Count == 0) return null;
+            var kept = new List<string>();
+            for (int i = history.Count - 1; i >= 0 && kept.Count < cap; i--)
+            {
+                if (string.IsNullOrWhiteSpace(history[i])) continue;
+                kept.Insert(0, TrimMid(history[i], 64));
+            }
+            if (kept.Count == 0) return null;
+            return TrimMid("from " + ProvenanceName(otherName) + "'s last hours: " + string.Join(" · ", kept.ToArray()), SummaryTrim);
+        }
+
+        /// <summary>
+        /// The same episode, framed for the person THEMSELVES waking back up
+        /// (rebirth/soul-egg restore): "your last waking moments, before this
+        /// body slept: …" — a hatched victim remembers being eaten.
+        /// </summary>
+        internal static string WakingMemoryLine(List<string> history, int cap = 6)
+        {
+            if (history == null || history.Count == 0) return null;
+            var kept = new List<string>();
+            for (int i = history.Count - 1; i >= 0 && kept.Count < cap; i--)
+            {
+                if (string.IsNullOrWhiteSpace(history[i])) continue;
+                kept.Insert(0, TrimMid(history[i], 64));
+            }
+            if (kept.Count == 0) return null;
+            return TrimMid("your last waking moments, before this body slept: " + string.Join(" · ", kept.ToArray()), SummaryTrim);
+        }
+
+        /// <summary>
         /// Egg-rebirth child blend: the child's OWN previous life (the swallowed
         /// person) plus a SHORT taste of the eater's life (the body/person that
         /// carried them). "A compaction of the two" — the child remembers being

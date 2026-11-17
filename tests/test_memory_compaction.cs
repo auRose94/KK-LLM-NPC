@@ -103,6 +103,23 @@ internal static class TestMemoryCompaction
         var labeledEmpty = MemoryCompaction.OriginLabeledFacts("Ghost", new List<string>(), 5);
         Assert(labeledEmpty.Count == 0, "nothing to label → no lines (the summary line speaks)");
 
+        // EpisodeLine / WakingMemoryLine (2026-11-16): the last waking hours ride
+        // the record — origin-labeled for absorb/drink, first-person for rebirth.
+        var ep = MemoryCompaction.EpisodeLine("Mochi", new List<string> {
+            "00:12 nav->water the farm", "00:14 say->these tomatoes are coming along",
+            "00:15 think->the well is close", "00:16 say->oh no. Zivka. ZIVKA—" });
+        Assert(ep != null && ep.StartsWith("from Mochi's last hours:", StringComparison.Ordinal), "episode line is origin-labeled");
+        Assert(ep.IndexOf("tomatoes", StringComparison.OrdinalIgnoreCase) >= 0, "episode carries what they were doing");
+        Assert(ep.IndexOf("ZIVKA", StringComparison.Ordinal) >= 0, "the final moments matter most — the tail is kept");
+        Assert(ep.Length <= MemoryCompaction.SummaryTrim, "episode line bounded");
+        Assert(null == MemoryCompaction.EpisodeLine("Mochi", new List<string>()), "no history → no episode line");
+        var epCapped = MemoryCompaction.EpisodeLine("M", new List<string> {
+            "aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii", "jj" }, 4);
+        Assert(epCapped.IndexOf("jj") >= 0 && epCapped.IndexOf("aa") < 0, "cap keeps the TAIL (final moments), drops the oldest");
+        var wake = MemoryCompaction.WakingMemoryLine(new List<string> { "00:16 say->ZIVKA—" });
+        Assert(wake.StartsWith("your last waking moments", StringComparison.Ordinal), "waking line is first-person");
+        Assert(null == MemoryCompaction.WakingMemoryLine(null), "no history → no waking line");
+
         // MergeRebirth: child life + hatch line + a taste of the carrier.
         var child = MemoryCompaction.MergeRebirth(L("place: I knew the barn", "me: I was eaten once"),
             "Kira", L("social: Kira likes jokes", "place: Kira's bed is by the window"),

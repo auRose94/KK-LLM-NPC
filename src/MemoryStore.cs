@@ -41,6 +41,12 @@ namespace KKLLMNPC
             // life + the rebirth copy so a reborn person keeps their own way of eating.
             public string VoreTarget; // may be null
             public string VoreMode;   // may be null
+            // EPISODE (2026-11-16): the last waking hours — timestamped short-term
+            // history entries snapshotted at save time. Transferred on absorb/drink
+            // ("from X's last hours: …") and injected at rebirth-restore ("your last
+            // waking moments…"), so victims pass what they were DOING, not just
+            // facts. Null on legacy records.
+            public List<string> Episode;
         }
 
         private static readonly object _lock = new object();
@@ -88,7 +94,8 @@ namespace KKLLMNPC
         // up as a stranger who happened to share its serialized object name.
         internal static void Save(string bodyKey, string name, string persona, List<string> facts, string goal, string pronouns,
             List<string> skills = null, string bodyFp = null, string species = null,
-            string voreTarget = null, string voreMode = null, List<long> factUtc = null)
+            string voreTarget = null, string voreMode = null, List<long> factUtc = null,
+            List<string> episode = null)
         {
             try
             {
@@ -100,6 +107,12 @@ namespace KKLLMNPC
                 var fs = new List<object>();
                 if (facts != null) foreach (var f in facts) if (!string.IsNullOrEmpty(f)) fs.Add(f);
                 d["facts"] = fs.ToArray();
+                if (episode != null && episode.Count > 0)
+                {
+                    var es = new List<object>();
+                    foreach (var e in episode) if (!string.IsNullOrEmpty(e)) es.Add(e);
+                    if (es.Count > 0) d["episode"] = es.ToArray();
+                }
                 // Per-fact wall-clock ages, stored as invariant strings so no JSON
                 // number-typing ambiguity survives the round trip.
                 if (factUtc != null && facts != null && factUtc.Count == facts.Count)
@@ -205,6 +218,11 @@ namespace KKLLMNPC
                 rec.Species = raw.GetValueOrDefault("species") as string;
                 rec.VoreTarget = raw.GetValueOrDefault("vore_target") as string;
                 rec.VoreMode = raw.GetValueOrDefault("vore_mode") as string;
+                if (raw.TryGetValue("episode", out var epObj) && epObj is List<object> epl)
+                {
+                    rec.Episode = new List<string>();
+                    foreach (var o in epl) { string s = o as string; if (!string.IsNullOrEmpty(s)) rec.Episode.Add(s); }
+                }
                 if (raw.TryGetValue("skills", out var skObj) && skObj is List<object> skl)
                 {
                     rec.Skills = new List<string>();
