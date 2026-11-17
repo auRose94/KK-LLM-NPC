@@ -573,6 +573,16 @@ namespace KKLLMNPC
             return struggle >= StruggleVomitThreshold ? 1f : struggle / StruggleVomitThreshold;
         }
 
+        // REINCARNATION roll: a consumed mind's rare second chance (the soul
+        // egg). chance 0 = never; >= 1 = every destruction; roll is the drawn
+        // 0..1 value. Pure so the suite covers the clamps.
+        public static bool Reincarnates(float chance, float roll)
+        {
+            if (chance <= 0f) return false;
+            if (chance >= 1f) return true;
+            return roll <= chance;
+        }
+
         // Belly bulge in the game's inflatable units (1.0 = the full belly
         // blendshape, beyond = the "continue" overflow shape): visible at an
         // even match, enormous at the capacity ceiling, easing down as the

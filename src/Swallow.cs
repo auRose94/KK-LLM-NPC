@@ -111,6 +111,8 @@ namespace KKLLMNPC
             public bool Stretching;         // the meal is over the ceiling but within the stretch band
             public float PlayerStruggle;    // the PLAYER's mash-meter when THEY are the meal (mini-game)
             public int PlayerMashCount;     // presses so far (narration throttle)
+            public bool PreyReagentActive;  // the live-prey reagent rides the belly (native bulge)
+            public float PreyVolume0;       // units poured at Begin (conversion/drain reference)
             public Vector3 PullStartPos;
             public int Milestone;          // last narrated digest mark
             public int LastPhase = -9;     // previous Advance phase (for the 0→1 full-insert edge)
@@ -1484,6 +1486,7 @@ namespace KKLLMNPC
             };
             lock (_lock) _active.Add(st);
             RefreshBellyBulge(eater); // the meal SHOWS from the first moment
+            PourPreyReagent(st, planRatio); // …and as REAL reagent when registration took (native bulge)
             DisarmVictimPenetrators(st);
             SpawnVirtualPen(st);
             // MOD EVENT CHANNEL (multiplayer): a remote victim's mod learns of the
@@ -2324,6 +2327,7 @@ namespace KKLLMNPC
             catch (Exception) { }
             lock (_lock) _active.Remove(st);
             try { DestroyVirtualPen(st); } catch (Exception) { }
+            try { ClearPreyReagent(st.Eater); } catch (Exception) { }
             try { ClearBellyBulge(st.Eater); } catch (Exception) { }
             try { ReleaseSwallowed(st); } catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow vomit release: " + e.Message); } catch (Exception) { } }
         }
@@ -2434,6 +2438,7 @@ namespace KKLLMNPC
                     foreach (var st in _active)
                     {
                         if (st == null || st.Eater != eater) continue;
+                        if (st.PreyReagentActive) continue; // the reagent volume IS the bulge (native)
                         float elapsed = Time.unscaledTime - st.StartUnscaled - st.PullSeconds;
                         float prog = st.DigestSeconds > 0f ? Mathf.Clamp01(elapsed / st.DigestSeconds) : 1f;
                         total += SwallowLogic.BellyBulge(st.SizeRatio, prog) * (st.Stretching ? SwallowLogic.StretchBulgeMult : 1f);
@@ -2459,6 +2464,106 @@ namespace KKLLMNPC
         internal static void ClearBellyBulge(Kobold k)
         {
             try { if (k != null) SetBellySize(k, GameBellySize(k)); } catch (Exception) { }
+        }
+
+        // ------------------------------------------------------------------
+        // LIVE-PREY REAGENT — the churn system, phase 1 (2026-11-16, Rose's
+        // design; see docs/VORE.md): a swallowed victim becomes REAL belly
+        // reagent, and the reagent level IS the digestion. Registered at
+        // runtime (clone of Egg — safe LocalizedString — with a long-enough
+        // metabolization half-life that the game's own metabolism slow-cooks
+        // it across a default digest). The container volume drives the belly
+        // visual NATIVELY, so the reflection shim above retires to fallback
+        // whenever the reagent took.
+        // ------------------------------------------------------------------
+        private static ScriptableReagent _preyReagent;
+
+        // The LivePrey asset (null when registration failed — the shim bulge covers).
+        private static ScriptableReagent PreyReagent()
+        {
+            if (_preyReagent != null) return _preyReagent;
+            try
+            {
+                ScriptableReagent egg;
+                if (!ReagentDatabase.TryGetAsset("Egg", out egg) || egg == null) return null;
+                var prey = UnityEngine.Object.Instantiate(egg);
+                prey.name = "LivePrey";
+                // Distinct look in every belly-contents UI: an unmistakable warm pink.
+                try
+                {
+                    var f = typeof(ScriptableReagent).GetField("color", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (f != null) f.SetValue(prey, new Color(1f, 0.36f, 0.46f));
+                    var fe = typeof(ScriptableReagent).GetField("emission", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (fe != null) fe.SetValue(prey, new Color(0.9f, 0.12f, 0.26f));
+                }
+                catch (Exception) { }
+                // Slow-cook: the game's metabolism drains it across a default-length
+                // digest (45s * ln2 ≈ 31s half-life). The swallow STATE stays the
+                // master clock; this is the visual/readable mirror.
+                try
+                {
+                    var fm = typeof(ScriptableReagent).GetField("metabolizationHalfLife", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (fm != null) fm.SetValue(prey, 31f);
+                }
+                catch (Exception) { }
+                // Reflection: the AddAsset signature's ModStub? parameter lives in
+                // naelstrof.Modding, which the build does not reference (and does not
+                // need for one null pass-through).
+                typeof(ReagentDatabase).GetMethod("AddAsset",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                    .Invoke(null, new object[] { prey, null });
+                ScriptableReagent registered;
+                ReagentDatabase.TryGetAsset("LivePrey", out registered);
+                _preyReagent = registered != null ? registered : prey;
+                try { LLMNPCPlugin.Log.LogInfo("swallow: LivePrey reagent registered (the churn system, phase 1)"); } catch (Exception) { }
+            }
+            catch (Exception e)
+            {
+                try { LLMNPCPlugin.Log.LogWarning("swallow: LivePrey registration failed — fallback bulge in use (" + e.Message + ")"); } catch (Exception) { }
+                _preyReagent = null;
+            }
+            return _preyReagent;
+        }
+
+        // Pour the victim into the eater's belly as reagent (called at Begin).
+        private static void PourPreyReagent(SwallowState st, float ratio)
+        {
+            try
+            {
+                var prey = PreyReagent();
+                var belly = st.Eater != null ? st.Eater.bellyContainer : null;
+                if (prey == null || belly == null) return;
+                float maxv = belly.maxVolume;
+                if (maxv <= 1f) maxv = 20f;
+                float vol = 4f + 6f * ratio;
+                if (vol > maxv * 0.85f) vol = maxv * 0.85f;
+                if (vol < 2f) vol = 2f;
+                var contents = new ReagentContents();
+                contents.AddMix(prey.GetReagent(vol));
+                belly.AddMix(contents, GenericReagentContainer.InjectType.Inject);
+                st.PreyReagentActive = true;
+                st.PreyVolume0 = vol;
+            }
+            catch (Exception) { }
+        }
+
+        // Remove the prey reagent exactly (release/abort/end — the meal LEFT).
+        // GetContents() is the live object: OverrideReagent zeroes just the prey,
+        // and a tiny spill fires the container's change events (visual + photon).
+        private static void ClearPreyReagent(Kobold eater)
+        {
+            try
+            {
+                var prey = _preyReagent;
+                var belly = eater != null ? eater.bellyContainer : null;
+                if (prey == null || belly == null) return;
+                if (belly.GetVolumeOf(prey) > 0.01f)
+                {
+                    try { belly.GetContents().OverrideReagent((byte)ReagentDatabase.GetID(prey), 0f); } catch (Exception) { }
+                    try { belly.Spill(0.01f); } catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
         }
 
         // `surrender`: the victim goes limp and accepting; the pred's mind learns
@@ -2882,6 +2987,7 @@ namespace KKLLMNPC
                     var st = _active[i];
                     _active.RemoveAt(i);
                     DestroyVirtualPen(st);
+                    try { ClearPreyReagent(st.Eater); } catch (Exception) { }
                     try { ClearBellyBulge(st.Eater); } catch (Exception) { }
                     try { ReleaseSwallowed(st); }
                     catch (Exception e)
@@ -2900,6 +3006,7 @@ namespace KKLLMNPC
         private static void EndSwallow(SwallowState st)
         {
             if (st.EaterNpc != null) { try { st.EaterNpc.Digesting = false; } catch (Exception) { } }
+            try { ClearPreyReagent(st.Eater); } catch (Exception) { } // the meal is over — no person-reagent lingers
             try { ClearBellyBulge(st.Eater); } catch (Exception) { } // meal over — the game's own belly sizing resumes
         }
 
@@ -3395,7 +3502,16 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
             try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' consumed entirely (Destroy mode)"); } catch (Exception) { }
-            try { if (st.Npc != null) st.Npc.PushWorldEvent("the conversion is complete — you have been consumed entirely. There is no egg, no rebirth."); } catch (Exception) { }
+            // REINCARNATION (2026-11-16, Rose's design): the Destroy fate's rare
+            // second chance — roll BEFORE the narration so the words stay honest.
+            bool soulEgg = MaybeLaySoulEgg(st);
+            try
+            {
+                if (st.Npc != null) st.Npc.PushWorldEvent(soulEgg
+                    ? "the conversion is complete — you have been consumed entirely... and yet something of you REFUSED to end. An egg carrying your own body's shape slipped free of them. If someone plants it in soil — you come back."
+                    : "the conversion is complete — you have been consumed entirely. There is no egg, no rebirth.");
+            }
+            catch (Exception) { }
             // SWIFT SILENCE (2026-11-16): fully consumed = gone now; no post-mortem chatter.
             try { if (st.Npc != null) st.Npc.MarkGone("fully consumed by " + BodyLabel(st.Eater)); } catch (Exception) { }
 
@@ -3413,8 +3529,70 @@ namespace KKLLMNPC
             }
             if (MaybeFinishRemoteVictim(st, "released")) return true;
             if (!DestroyVictim(st)) return false;
-            ForgetVictim(st);
+            // A soul egg carries their saved life for the rebirth — only a final,
+            // un-egged destruction forgets them.
+            if (!soulEgg) ForgetVictim(st);
             return true;
+        }
+
+        // ------------------------------------------------------------------
+        // THE SOUL EGG (2026-11-16, Rose's reincarnation): a rare chance that a
+        // fully-consumed mind refuses the end — an egg carrying the VICTIM'S OWN
+        // genes (so the hatch looks like them) slips free, their saved life
+        // linked through the same RebirthLink the egg fate uses. Plant it in
+        // soil and THEY return. Chance via [LittleTreats].SwallowReincarnateChance
+        // (0 = never, 1 = every destruction leaves an egg).
+        // ------------------------------------------------------------------
+        private static bool MaybeLaySoulEgg(SwallowState st)
+        {
+            try
+            {
+                float chance = 0f;
+                try { var cfg = LLMNPCPlugin.Alive(Plugin) ? Plugin._cfgSwallowReincarnateChance : null; if (cfg != null) chance = cfg.Value; } catch (Exception) { }
+                if (!SwallowLogic.Reincarnates(chance, UnityEngine.Random.value)) return false;
+                var victimGenes = st.Victim != null ? st.Victim.GetGenes() : null;
+                if (victimGenes == null) return false;
+                string fingerprint = NPCInstance.GenesFingerprint(victimGenes);
+                if (string.IsNullOrEmpty(fingerprint)) return false;
+
+                GameObject eggObj = null;
+                try
+                {
+                    var spawnData = new NetStack.Serialization.BitBuffer(16);
+                    spawnData.AddKoboldGenes(victimGenes);
+                    eggObj = PhotonNetwork.InstantiateRoomObject(EggPhotonName, EggPopPos(st.Eater), Quaternion.identity, 0,
+                        new object[] { spawnData });
+                }
+                catch (Exception e)
+                {
+                    try { LLMNPCPlugin.Log.LogWarning("swallow soul egg spawn: " + e.Message); } catch (Exception) { }
+                    return false;
+                }
+                if (eggObj == null) return false;
+                lock (_lock)
+                {
+                    if (st.VictimIsPlayer)
+                        _awaitingRebirth[fingerprint] = new RebirthLink { EaterLabel = BodyLabel(st.Eater), EaterKey = st.EaterKey, IsPlayer = true };
+                    else
+                        _awaitingRebirth[fingerprint] = new RebirthLink { OldKey = st.OldBodyKey, EaterLabel = BodyLabel(st.Eater), EaterKey = st.EaterKey };
+                    _rebirthNames[fingerprint] = st.Name;
+                }
+                try
+                {
+                    if (st.EaterNpc != null)
+                        st.EaterNpc.PushWorldEvent("[vore] as " + st.Name + " finishes dissolving, something slips free of you — an egg, warm and unmistakably shaped like THEM. Plant it in soil and they come back. What you hold now is their SECOND CHANCE; it is yours to deliver or devour.");
+                    try { Plugin.FanoutWorldEventExcept("[vore] an egg slides free of " + BodyLabel(st.Eater) + " — shaped uncannily like the " + st.Name + " who was just consumed. Legends say a planted soul-egg returns the person whole.", st.EaterNpc, st.Npc); } catch (Exception) { }
+                    try { Bubble(st.Eater, "A soul-egg of " + st.Name + " slips free — plant it to bring them back."); } catch (Exception) { }
+                }
+                catch (Exception) { }
+                try { LLMNPCPlugin.Log.LogInfo("swallow: soul egg laid — '" + st.Name + "' gets a second chance (reincarnation)"); } catch (Exception) { }
+                return true;
+            }
+            catch (Exception e)
+            {
+                try { LLMNPCPlugin.Log.LogWarning("swallow soul egg: " + e.Message); } catch (Exception) { }
+                return false;
+            }
         }
 
         // ------------------------------------------------------------------
@@ -3903,6 +4081,8 @@ namespace KKLLMNPC
         internal ConfigEntry<SwallowEffect> _cfgSwallowEffect;
         // Size-balanced vore (2026-11-16): capacity gate for oversized meals.
         internal ConfigEntry<bool> _cfgSwallowSizeGates;
+        // Reincarnation (2026-11-16): the Destroy fate's rare soul-egg second chance.
+        internal ConfigEntry<float> _cfgSwallowReincarnateChance;
         internal ConfigEntry<bool> _cfgSwallowGrowLarger;
         internal ConfigEntry<bool> _cfgSwallowGrowStrength;
         internal ConfigEntry<bool> _cfgSwallowGrowSex;

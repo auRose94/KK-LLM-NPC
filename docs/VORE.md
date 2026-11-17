@@ -173,7 +173,13 @@ format — the rebirth match is fingerprint-exact, so a swallowed person always
 comes back as THEMSELVES. Player escape is the SPACE-mash mini-game (the old
 chat-abort command was removed 2026-11-16).
 
-## Design (2026-11-16, not yet built): live-prey reagent — the churn system
+## Design (2026-11-16): live-prey reagent — the churn system
+
+**Phase 1 BUILT 2026-11-16** (reagent registration + presence + metabolism
+drain + native bulge + clean removal on every release path), together with
+**reincarnation** (`SwallowReincarnateChance`: the Destroy fate's soul egg —
+the victim's OWN genes, their record linked via RebirthLink, "their SECOND
+CHANCE; yours to deliver or devour"). Remaining phases below.
 
 Rose's design: a swallowed victim becomes a REAL belly reagent, and the reagent
 level IS the digestion. Game-side feasibility verified against the decompile:

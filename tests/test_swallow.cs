@@ -328,6 +328,14 @@ internal static class TestSwallow
         Near(0.0, SwallowLogic.Struggle01(0f), "struggle meter idle");
         Near(0.5, SwallowLogic.Struggle01(6f), "struggle meter half");
         Near(1.0, SwallowLogic.Struggle01(99f), "struggle meter clamps full");
+
+        // ---- reincarnation roll (the soul egg) ----
+        Eq(false, SwallowLogic.Reincarnates(0f, 0f), "chance 0 never reincarnates");
+        Eq(false, SwallowLogic.Reincarnates(0f, 0.99f), "chance 0 never reincarnates (lucky roll)");
+        Eq(true, SwallowLogic.Reincarnates(1f, 0.999f), "chance 1 always reincarnates");
+        Eq(true, SwallowLogic.Reincarnates(0.15f, 0.1f), "a roll under the chance reincarnates");
+        Eq(false, SwallowLogic.Reincarnates(0.15f, 0.2f), "a roll over the chance does not");
+        Eq(true, SwallowLogic.Reincarnates(1.5f, 0.99f), "chance above 1 clamps to always");
         Near(1.0, SwallowLogic.KickStruggle(1f), "same-size kick = 1 struggle");
         Near(3.0, SwallowLogic.KickStruggle(3f), "ceiling meal kicks at 3x");
         Near(0.5, SwallowLogic.KickStruggle(0.2f), "tiny meal kicks at 0.5x");

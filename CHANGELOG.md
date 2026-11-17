@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — the churn system phase 1 + reincarnation: the soul egg)
+
+- **LivePrey reagent**: a swallowed victim now rides the eater's belly as
+  REAL reagent — registered at runtime (clone of Egg: safe LocalizedString,
+  warm pink color/emission, ~31s metabolization half-life via reflection;
+  AddAsset invoked reflectively so the build never references
+  naelstrof.Modding), poured at Begin (units scale with the meal, capped to
+  the stomach), slow-cooked by the game's OWN metabolism — the reagent
+  level IS the digestion, visible to any reagent scanner, and the belly
+  bulge becomes NATIVE (the reflection shim retires to fallback whenever
+  the reagent took). Clean removal on every release path (vomit, abort,
+  end): OverrideReagent-to-zero on the live contents + a 0.01 spill to fire
+  the container's change events.
+- **Reincarnation** (`[LittleTreats].SwallowReincarnateChance`, default
+  0.15): the Destroy fate's rare second chance — a SOUL EGG carrying the
+  victim's OWN genes slips free, their saved life linked through the same
+  RebirthLink machinery the egg fate uses: plant it in soil and they return
+  as themselves, memories intact. The eater is told exactly what they hold:
+  "their SECOND CHANCE; yours to deliver or devour." Grow absorptions stay
+  integrated — no second chance for those. Honest narration either way
+  (the victim's final line reflects whether an egg came of them).
+
 ### Added (2026-11-16 — stretch stomachs, kick training, and the player escape mini-game)
 
 - **The stretch band**: a meal slightly over the ceiling (up to +0.6 ratio)
