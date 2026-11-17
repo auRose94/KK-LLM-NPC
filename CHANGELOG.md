@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — drunk roleplay: agents that drink MUST play it)
+
+New `[Intoxication]` section (Enabled default ON, Reagents = Wine,Beer,Vodka,
+Mead resolved against the game's reagent database — uninstalled names skip and
+log; Potency multiplier). The belly postfix feeds a per-agent blood-alcohol
+tracker: a RISE in the belly's alcohol volume is a drink (~13 units ≈ one
+tier step; one event caps at half a bar), metabolism is slow (0.013/min — a
+full drunk sobers across ~45 minutes of play). Three tiers — tipsy, DRUNK,
+WASTED — ride the state anchor EVERY turn with an explicit PLAY IT contract
+("heavy tongue, grand wrong ideas that feel BRILLIANT, leaning on things"),
+tier-hit events on the way up, and honest sobering on the way down (coming
+off WASTED is a hangover: "quiet, slow, suspicious of light and of
+yesterday's decisions"). A new prompt-extra makes the contract absolute: the
+body says it, the mind plays it — never narrate yourself sober while the
+line says otherwise. Pure math in `DrunkCore` (25th suite).
+
 ### Added (2026-11-16 — the ghost-milk variants: held charges released by the body's own acts)
 
 `SwallowEffect.HeldMilk` / `HeldCum` (`vore_mode(heldmilk|udder|heldcum|load|charged…)`

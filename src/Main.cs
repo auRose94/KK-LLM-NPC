@@ -160,6 +160,10 @@ namespace KKLLMNPC
         // Max concurrent LLM HTTP calls process-wide (local servers answer serially;
         // SafeHttp queues extra callers). 0 = unlimited.
         internal ConfigEntry<int> _cfgParallelCalls;
+        // [Intoxication] — the drunk-roleplay tracker (src/Drunk.cs / DrunkCore.cs).
+        internal ConfigEntry<bool> _cfgDrunkEnabled;
+        internal ConfigEntry<string> _cfgDrunkReagents;
+        internal ConfigEntry<float> _cfgDrunkPotency;
         internal ConfigEntry<float> _cfgFarmScanRadius;
         internal ConfigEntry<bool> _cfgWateringAssist;
         internal ConfigEntry<int> _cfgFarmScanMax;
@@ -614,6 +618,12 @@ namespace KKLLMNPC
                 "Cross-session age prune (HOURS of real time): a fact not re-remembered within this many hours drops from memory even across saves — finished business stops haunting new sessions. 0 = off. Exempt: identity notes (me:/name:) and the latest player_wants. Old save files get their fact ages backfilled from each record's save stamp, so the first boot after updating already cleans up.");
             _cfgParallelCalls = Config.Bind("LLM", "ParallelCalls", 8,
                 "Max simultaneous LLM HTTP calls made toward the endpoint by the whole mod (every NPC competes for a serial local server otherwise — the burst was the source of most 'WebException(Timeout)' log spam; extra calls queue). 0 = unlimited. 2 is right for llama.cpp/KoboldCpp/solo-GPU LM Studio. Ollama queues extra requests itself (no timeouts), but serves only OLLAMA_NUM_PARALLEL slots and each parallel slot splits the model's KV window — 2-4 is the sweet spot there. Raise toward 8 only for genuinely parallel (vLLM-class) servers. Edits apply live, no restart.");
+            _cfgDrunkEnabled = Config.Bind("Intoxication", "Enabled", true,
+                "Agents that drink alcohol roleplay being drunk — the belly's alcohol volume is tracked as blood-alcohol (tipsy/drunk/wasted tiers), carried in the state anchor every turn with an explicit PLAY IT contract, with tier-change events on the way up and sobering (and the hangover, from wasted) on the way down. Metabolism is slow: a full drunk sobers across ~45 minutes of play. Off = agents are magically immune.");
+            _cfgDrunkReagents = Config.Bind("Intoxication", "Reagents", "Wine,Beer,Vodka,Mead",
+                "Which reagents count as alcohol (comma-separated; resolved against the game's reagent database at first use — names not installed are skipped and logged). The game ships wine (the wine press); add or rename to match your mods.");
+            _cfgDrunkPotency = Config.Bind("Intoxication", "Potency", 1f,
+                "Multiplier on blood-alcohol gain per drink (1 = default: ~13 units for a solid glass ≈ one tier step; 0.5 = hardy drinkers, 2 = lightweights).");
             _cfgIdentityBot = Config.Bind("Multiplayer", "IdentityBot", false,
                 "Run a second Photon client in the room under the NPC's own name so its chat renders as 'KoboldName: text' to EVERYONE (not attributed to you). OFF = safe default (chat shows 'YourName: KoboldName: text' to others). Opt-in: adds a room player, may affect player count / host logic.");
             _cfgIdentityAppId = Config.Bind("Multiplayer", "IdentityAppId", "",

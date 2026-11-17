@@ -71,6 +71,27 @@ The **installed models** picker lists every local model (`ollama pull` to add on
 hot-swaps the served model. Adoption is opt-in and reversible — `[LLM].Endpoint` is left untouched,
 so pointing back at any other endpoint is a one-line config change.
 
+## [Intoxication] — Drunk roleplay (2026-11-16)
+
+Agents that drink alcohol roleplay being drunk — the belly's alcohol volume is
+tracked as blood-alcohol, carried in the state anchor **every turn** with an
+explicit PLAY IT contract, with tier-change events going up and sobering (and
+the hangover, from wasted) coming down. Metabolism is slow — a full drunk
+sobers across ~45 minutes of play.
+
+```ini
+[Intoxication]
+Enabled   = true
+Reagents  = Wine,Beer,Vodka,Mead
+Potency   = 1.0
+```
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `Enabled` | `true` | bool | Track blood alcohol and require the drunk roleplay (tipsy → drunk → WASTED; ~13 units ≈ one tier step; only time sobers — the anchor says how long). Off = agents are magically immune. |
+| `Reagents` | `Wine,Beer,Vodka,Mead` | csv | Which reagents count as alcohol — resolved against the game's reagent database at first use; names not installed are skipped and logged (the game ships wine via the wine press; adjust to match your mods). |
+| `Potency` | `1.0` | 0.1–5 | Multiplier on blood-alcohol gain per drink (0.5 = hardy drinkers, 2 = lightweights). |
+
 ## [Vision] — Background Vision Pass
 
 | Key | Default | Range | Purpose |

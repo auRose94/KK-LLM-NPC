@@ -1480,6 +1480,13 @@ namespace KKLLMNPC
         {
             RefreshBellyBulge(k);
             try { MaybeDrinkAbsorb(k); } catch (Exception) { }
+            // Drunk tracker: a rise in the belly's alcohol volume is a drink.
+            try
+            {
+                var npc = Plugin.InstanceForBody(k);
+                if (npc != null) npc.NoteBellyContents(k.bellyContainer);
+            }
+            catch (Exception) { }
         }
 
         private static void MaybeDrinkAbsorb(Kobold k)

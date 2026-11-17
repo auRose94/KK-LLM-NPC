@@ -107,6 +107,7 @@ run_headless_suites() {
   run_suite decisionparse tests/test_decisionparse.cs -- src/DecisionParse.cs src/Guidance.cs src/Json.cs
   run_suite compass     tests/test_compass.cs -- src/Compass.cs
   run_suite swallow     tests/test_swallow.cs -- src/SwallowLogic.cs
+  run_suite drunkcore   tests/test_drunkcore.cs -- src/DrunkCore.cs
   run_suite spectate    tests/test_spectate.cs -- src/SpectateLogic.cs
   run_suite httpretry   tests/test_httpretry.cs -- src/HttpRetry.cs src/Json.cs
   run_suite safehttp    tests/test_safehttp.cs -- src/SafeHttp.cs

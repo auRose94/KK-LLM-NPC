@@ -536,6 +536,14 @@ namespace KKLLMNPC
                 if (bellyLine != null) parts.Add(bellyLine);
             }
             catch (Exception) { }
+            // Blood alcohol — a body that drank MUST play it (2026-11-16): the
+            // drunk line rides the anchor every turn until it sobers.
+            try
+            {
+                string drunkLine = DrunkAnchorLine();
+                if (drunkLine != null) parts.Add(drunkLine);
+            }
+            catch (Exception) { }
             // Identity heartbeat: as the conversation grows, the system prompt's voice
             // fades for chat-template models — a one-line reminder of WHO this is
             // every turn keeps the persona from drifting into generic assistant prose.
