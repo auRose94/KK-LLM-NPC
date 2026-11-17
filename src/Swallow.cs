@@ -1372,7 +1372,84 @@ namespace KKLLMNPC
             }
         }
 
-        // Take one held victim. Main-thread only (Harmony prefix). False = don't.
+        // ------------------------------------------------------------------
+        // SUBSTRATE LIBERATION + DRINK-ABSORB (phase 3, 2026-11-16, Rose's
+        // substrate principle: the mind follows the REAGENT). Draining a
+        // pred's belly mid-digest spills the meal free; churned fluid (Milk/
+        // Cum with the victim's genes riding it) carries their memories —
+        // whoever drinks it absorbs them, origin-labeled.
+        // ------------------------------------------------------------------
+        private static void PourLiberation(SwallowState st)
+        {
+            try { LLMNPCPlugin.Log.LogInfo("swallow: " + st.Name + " POURED free — the prey reagent left " + BodyLabel(st.Eater) + "'s belly"); } catch (Exception) { }
+            try
+            {
+                if (st.EaterNpc != null)
+                    st.EaterNpc.PushWorldEvent("[vore] the essence of your meal POURS out of you — someone drained " + st.Name + "'s very substance from your belly — and with it your grip fails: they spill free, half-melted and ALIVE.");
+                if (st.Npc != null)
+                    st.Npc.PushWorldEvent("[vore] the walls around you liquefy and everything POURS — you're sliding out of them, out into the light, slick and gasping. Someone poured you free.");
+                try { Plugin.FanoutWorldEventExcept("[vore] fluid gushes from " + BodyLabel(st.Eater) + " — and " + st.Name + " comes with it, spilled free and alive.", st.EaterNpc, st.Npc); } catch (Exception) { }
+            }
+            catch (Exception) { }
+            lock (_lock) _active.Remove(st);
+            try { DestroyVirtualPen(st); } catch (Exception) { }
+            try { ClearPreyReagent(st.Eater); } catch (Exception) { }
+            try { ClearBellyBulge(st.Eater); } catch (Exception) { }
+            try { if (st.VictimIsPlayer) SpectateManager.ReleaseFor(null, SpectateLogic.CauseAbort); } catch (Exception) { }
+            try { ReleaseSwallowed(st); } catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow pour-liberation release: " + e.Message); } catch (Exception) { } }
+        }
+
+        // Churned people whose substance rides fluid: fingerprint → who + record.
+        // The game's own transfers carry container genes (TransferMix SetGenes),
+        // so the fingerprint follows the fluid through buckets, pumps and bellies.
+        private sealed class SubstrateEntry { public string Name; public string OldKey; }
+        private static readonly Dictionary<string, SubstrateEntry> _substrate = new Dictionary<string, SubstrateEntry>();
+
+        internal static void RegisterSubstrate(string fingerprint, string name, string oldKey)
+        {
+            if (string.IsNullOrEmpty(fingerprint) || string.IsNullOrEmpty(oldKey)) return;
+            lock (_substrate) _substrate[fingerprint] = new SubstrateEntry { Name = name, OldKey = oldKey };
+        }
+
+        // Belly contents changed (Harmony postfix): keep the bulge term AND check
+        // whether an agent just drank someone (their belly's genes match a churn
+        // registration). One-shot per churn: the substance settles once.
+        internal static void OnBellyChanged(Kobold k)
+        {
+            RefreshBellyBulge(k);
+            try { MaybeDrinkAbsorb(k); } catch (Exception) { }
+        }
+
+        private static void MaybeDrinkAbsorb(Kobold k)
+        {
+            if (k == null || _substrate.Count == 0) return;
+            var npc = Plugin.InstanceForBody(k);
+            if (npc == null) return;
+            var belly = k.bellyContainer;
+            if (belly == null) return;
+            var g = belly.GetGenes();
+            if (g == null) return;
+            string fp;
+            try { fp = NPCInstance.GenesFingerprint(g); } catch (Exception) { return; }
+            if (string.IsNullOrEmpty(fp)) return;
+            SubstrateEntry e;
+            lock (_substrate)
+            {
+                if (!_substrate.TryGetValue(fp, out e)) return;
+                _substrate.Remove(fp); // one-shot: the substance settles exactly once
+            }
+            try
+            {
+                var rec = MemoryStore.Load(e.OldKey);
+                var facts = rec != null && rec.Facts != null ? rec.Facts : null;
+                npc.PushWorldEvent("[vore] you taste someone in what you drank — " + e.Name + "'s substance, and with it their MEMORIES pour into you. You know things now. You know them FROM " + e.Name + " — remember who taught you.");
+                if (facts != null && facts.Count > 0) npc.AbsorbVictimFacts(e.Name, facts);
+                else npc.RememberFact("from " + e.Name + ": drunk whole — their substance carried nothing else readable");
+                try { LLMNPCPlugin.Log.LogInfo("swallow: substrate absorb — '" + e.Name + "' drunk by " + BodyLabel(k)); } catch (Exception) { }
+            }
+            catch (Exception ex) { try { LLMNPCPlugin.Log.LogWarning("substrate absorb: " + ex.Message); } catch (Exception) { } }
+        }
+
         // actor = whoever swallowed them into `eater`: the eater themself (self-eat,
         // the player's look-up gesture) or a different kobold force-feeding.
         // playerVictim = the LOCAL PLAYER is the one being swallowed: the spectate
@@ -2630,6 +2707,31 @@ namespace KKLLMNPC
             int phase = SwallowLogic.PhaseFor(st.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
             float phaseT = SwallowLogic.PhaseT(st.PullSeconds, st.DigestSeconds, SwallowLogic.SettleSeconds, t);
 
+            // SUBSTRATE LIBERATION (phase 3, 2026-11-16): the prey reagent IS the
+            // digestion's grip. If most of it left the belly unexpectedly — poured,
+            // milked, spat into a bucket — the conversion loses hold and the meal
+            // spills free (Rose's substrate principle: the fluid carries the
+            // person). Expected volume = the metabolism curve (31s half-life).
+            if (st.PreyReagentActive && phase == 1 && _preyReagent != null && st.Eater != null)
+            {
+                try
+                {
+                    var belly = st.Eater.bellyContainer;
+                    if (belly != null)
+                    {
+                        float digestT = Mathf.Max(0f, t - st.PullSeconds);
+                        float expected = st.PreyVolume0 * Mathf.Pow(0.5f, digestT / 31f);
+                        float actual = belly.GetVolumeOf(_preyReagent);
+                        if (actual < expected * 0.5f)
+                        {
+                            PourLiberation(st);
+                            return;
+                        }
+                    }
+                }
+                catch (Exception) { }
+            }
+
             // LAUNCH BRAKE: nothing in the pin/pull escalates vertically, so a fast,
             // sustained climb of the pred is a physics/animation break carrying the
             // pair out of the world. End the session NOW and put the victim back
@@ -3147,8 +3249,20 @@ namespace KKLLMNPC
                     var contents = new ReagentContents();
                     contents.AddMix(r.GetReagent(vol));
                     belly.AddMix(contents, GenericReagentContainer.InjectType.Inject);
-                    // The fluid remembers who it was — their genes ride it.
-                    try { var vg = st.Victim != null ? st.Victim.GetGenes() : null; if (vg != null) belly.SetGenes(vg); } catch (Exception) { }
+                    // The fluid remembers who it was — their genes ride it, and the
+                    // game's own transfers carry container genes with the fluid
+                    // (TransferMix SetGenes): pour it into a bucket, pump it into
+                    // another belly, and the fingerprint follows.
+                    try
+                    {
+                        var vg = st.Victim != null ? st.Victim.GetGenes() : null;
+                        if (vg != null)
+                        {
+                            belly.SetGenes(vg);
+                            RegisterSubstrate(NPCInstance.GenesFingerprint(vg), st.Name, st.OldBodyKey);
+                        }
+                    }
+                    catch (Exception) { }
                 }
             }
             catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow churn pour: " + e.Message); } catch (Exception) { } }
@@ -3183,7 +3297,8 @@ namespace KKLLMNPC
             }
             if (MaybeFinishRemoteVictim(st, "released")) return true;
             if (!DestroyVictim(st)) return false;
-            if (!soulEgg) ForgetVictim(st);
+            // The churned person's record RIDES the fluid (drink-absorb payload +
+            // the soul egg's rebirth link) — never forgotten, unlike a bare Destroy.
             return true;
         }
 
@@ -4246,7 +4361,15 @@ namespace KKLLMNPC
         internal void AbsorbVictimFacts(string victimName, List<string> facts)
         {
             if (facts == null) return;
-            try { RememberFact(MemoryCompaction.LiveAbsorbLine(victimName, facts)); }
+            try
+            {
+                // ORIGIN-LABELED (2026-11-16): each surviving memory lands with its
+                // source's name — "from Mochi: the farm is east" — so the eater can
+                // attribute what they now know; the summary line keeps the headline.
+                foreach (var line in MemoryCompaction.OriginLabeledFacts(victimName, facts))
+                    RememberFact(line);
+                RememberFact(MemoryCompaction.LiveAbsorbLine(victimName, facts));
+            }
             catch (Exception) { }
         }
 

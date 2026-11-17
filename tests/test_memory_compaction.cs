@@ -89,6 +89,20 @@ internal static class TestMemoryCompaction
         var liveEmpty = MemoryCompaction.LiveAbsorbLine("Ghost", new List<string>());
         Assert(liveEmpty.IndexOf("no memories", StringComparison.OrdinalIgnoreCase) >= 0, "empty life says so honestly");
 
+        // OriginLabeledFacts (2026-11-16): every surviving memory carries its
+        // source's name — "from Kira: …" — instead of one anonymous blob.
+        var labeled = MemoryCompaction.OriginLabeledFacts("Kira", L("place: the pantry has apples",
+            "danger: the pond edge is slippery", "danger2: the well is behind me"), 5);
+        Assert(labeled.Count >= 2, "labeled facts survive (" + labeled.Count + ")");
+        Assert(labeled.TrueForAll(x => x.StartsWith("from Kira:", StringComparison.Ordinal)), "every label names the source");
+        Assert(HasLine(labeled, "pantry has apples"), "labeled facts carry real knowledge");
+        Assert(labeled.TrueForAll(x => x.Length <= MemoryCompaction.SummaryTrim), "labeled facts bounded");
+        var labeledCapped = MemoryCompaction.OriginLabeledFacts("Kira",
+            L("a1:1", "a2:2", "a3:3", "a4:4", "a5:5", "a6:6", "a7:7", "a8:8"), 3);
+        Assert(labeledCapped.Count <= 3, "label cap respected (" + labeledCapped.Count + ")");
+        var labeledEmpty = MemoryCompaction.OriginLabeledFacts("Ghost", new List<string>(), 5);
+        Assert(labeledEmpty.Count == 0, "nothing to label → no lines (the summary line speaks)");
+
         // MergeRebirth: child life + hatch line + a taste of the carrier.
         var child = MemoryCompaction.MergeRebirth(L("place: I knew the barn", "me: I was eaten once"),
             "Kira", L("social: Kira likes jokes", "place: Kira's bed is by the window"),

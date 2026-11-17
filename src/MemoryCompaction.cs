@@ -116,6 +116,25 @@ namespace KKLLMNPC
         }
 
         /// <summary>
+        /// ORIGIN-LABELED absorb (2026-11-16, Rose's provenance ask): the digested
+        /// person's memories land as individual "from <Name>: <fact>" lines instead
+        /// of one amalgamated blob, so the eater can attribute what they now know
+        /// (the blob lost the attribution — "Zivka couldn't remember anything Mochi
+        /// did historically"). Pair with LiveAbsorbLine: labels carry the substance,
+        /// the summary line carries the headline.
+        /// </summary>
+        internal static List<string> OriginLabeledFacts(string otherName, List<string> otherFacts, int cap = 5)
+        {
+            var labeled = new List<string>();
+            if (otherFacts == null || otherFacts.Count == 0) return labeled;
+            var other = CleanFacts(otherFacts, cap);
+            string pn = ProvenanceName(otherName);
+            foreach (var f in other)
+                labeled.Add(TrimMid("from " + pn + ": " + f, SummaryTrim));
+            return labeled;
+        }
+
+        /// <summary>
         /// Egg-rebirth child blend: the child's OWN previous life (the swallowed
         /// person) plus a SHORT taste of the eater's life (the body/person that
         /// carried them). "A compaction of the two" — the child remembers being

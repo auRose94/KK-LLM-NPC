@@ -188,10 +188,11 @@ namespace KKLLMNPC
         }
 
         // Postfix on Kobold.OnBellyContentsChanged: re-apply the swallow meal's
-        // bulge term after the game re-sizes the belly from reagent volume.
+        // bulge term after the game re-sizes the belly from reagent volume, and
+        // give the substrate system its shot (an agent drinking churned someone).
         private static void Kobold_OnBellyContentsChanged_Postfix(Kobold __instance)
         {
-            try { if (__instance != null) SwallowManager.RefreshBellyBulge(__instance); } catch (Exception) { }
+            try { if (__instance != null) SwallowManager.OnBellyChanged(__instance); } catch (Exception) { }
         }
     }
 }

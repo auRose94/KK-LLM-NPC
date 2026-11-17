@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — the substrate principle, v1: pour-liberation + drink-absorb + origin-labeled memories)
+
+- **Pour-liberation**: the prey reagent IS the digestion's grip — drain a
+  pred's belly mid-digest (pump, bucket, mouth) and when most of the LivePrey
+  volume leaves unexpectedly (below half the metabolism curve), the
+  conversion loses hold: the meal spills free, half-melted and ALIVE, with
+  honest narration for everyone watching.
+- **Drink-absorb**: churned fluid carries the person — their genes ride the
+  container (and the game's own transfers carry container genes with the
+  fluid, so the fingerprint follows through buckets and pumps). Whoever's
+  belly next holds the churn gets one-shot absorption of the victim's
+  memories: "you taste someone in what you drank — <name>'s substance, and
+  with it their MEMORIES pour into you." Churned records are never
+  forgotten now — they ride the fluid (and the soul egg's rebirth link).
+- **Origin-labeled memories** (the provenance ask): absorbed facts land as
+  individual "from Mochi: <fact>" lines (capped) alongside the summary —
+  the eater can finally attribute what they know. Applies to grow-absorb
+  AND drink-absorb; pure `MemoryCompaction.OriginLabeledFacts` with suite
+  coverage.
+
 ### Added (2026-11-16 — churn phase 2: the Milk and Cum fates)
 
 Two new digestion fates (Rose's design — "stuffing them into breasts churns
