@@ -285,11 +285,26 @@ internal static class TestSwallow
         Eq("BellyEgg", SwallowLogic.NextEffect(SwallowEffect.Egg).ToString(), "egg → bellyegg cycles");
         Eq("Grow", SwallowLogic.NextEffect(SwallowEffect.BellyEgg).ToString(), "bellyegg → grow cycles");
         Eq("Destroy", SwallowLogic.NextEffect(SwallowEffect.Grow).ToString(), "grow → destroy cycles");
-        Eq("Egg", SwallowLogic.NextEffect(SwallowEffect.Destroy).ToString(), "destroy → egg cycles");
+        Eq("Milk", SwallowLogic.NextEffect(SwallowEffect.Destroy).ToString(), "destroy → milk cycles (churn phase 2)");
+        Eq("Cum", SwallowLogic.NextEffect(SwallowEffect.Milk).ToString(), "milk → cum cycles");
+        Eq("Egg", SwallowLogic.NextEffect(SwallowEffect.Cum).ToString(), "cum → egg cycles");
         Eq("EGG", SwallowLogic.EffectLabel(SwallowEffect.Egg), "egg label");
         Eq("BELLY-EGG", SwallowLogic.EffectLabel(SwallowEffect.BellyEgg), "bellyegg label");
         Eq("GROW", SwallowLogic.EffectLabel(SwallowEffect.Grow), "grow label");
         Eq("DESTROY", SwallowLogic.EffectLabel(SwallowEffect.Destroy), "destroy label");
+        Eq("MILK", SwallowLogic.EffectLabel(SwallowEffect.Milk), "milk label");
+        Eq("CUM", SwallowLogic.EffectLabel(SwallowEffect.Cum), "cum label");
+        {
+            SwallowEffect pm; bool pclr, pbad;
+            Eq(true, SwallowLogic.TryParseEffect("milk", out pm, out pclr, out pbad) && pm == SwallowEffect.Milk && !pclr && !pbad,
+                "vore_mode word 'milk' parses to the Milk fate");
+            Eq(true, SwallowLogic.TryParseEffect("churn", out pm, out pclr, out pbad) && pm == SwallowEffect.Milk,
+                "'churn' is a milk synonym");
+            Eq(true, SwallowLogic.TryParseEffect("cum", out pm, out pclr, out pbad) && pm == SwallowEffect.Cum,
+                "vore_mode word 'cum' parses to the Cum fate");
+            Eq(true, SwallowLogic.TryParseEffect("seed", out pm, out pclr, out pbad) && pm == SwallowEffect.Cum,
+                "'seed' is a cum synonym");
+        }
 
         // --- clear-word set shared by both knobs ---
         Eq(true, SwallowLogic.IsPreferenceClearWord("off") && SwallowLogic.IsPreferenceClearWord("global")

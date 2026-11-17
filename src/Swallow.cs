@@ -208,6 +208,8 @@ namespace KKLLMNPC
                         case SwallowEffect.BellyEgg: fate = "they become egg reagent + genes in you; a nest lay brings them back"; break;
                         case SwallowEffect.Grow: fate = "their body (size, curves, groin) and memories absorb into you"; break;
                         case SwallowEffect.Destroy: fate = "nothing will be left of them"; break;
+                        case SwallowEffect.Milk: fate = "they slowly CHURN into warm milk inside you — a person, becoming a drink"; break;
+                        case SwallowEffect.Cum: fate = "they slowly CHURN into cum — your body will spend them"; break;
                         default: fate = "an egg carrying their mixed genes pops out of you"; break;
                     }
                     string noun = SwallowLogic.InsideNoun(st.Entry);
@@ -1349,7 +1351,9 @@ namespace KKLLMNPC
             {
                 case SwallowEffect.BellyEgg: return "the egg reagent around them waits in your belly — nest-lay them and plant the egg";
                 case SwallowEffect.Grow:
-                case SwallowEffect.Destroy: return null;
+                case SwallowEffect.Destroy:
+                case SwallowEffect.Milk:
+                case SwallowEffect.Cum: return null;
                 default: return "after conversion you lay an egg — plant it in soil and they hatch out of it";
             }
         }
@@ -1360,8 +1364,10 @@ namespace KKLLMNPC
             switch (EffectFor(eater))
             {
                 case SwallowEffect.BellyEgg: return "the conversion turns them into egg reagent + genes in YOUR belly — nest-lay them, then plant the egg to hatch them out (a nest lay needs energy >1 as well as the egg — eat before sitting if you're low)";
-                case SwallowEffect.Grow: return "the conversion absorbs them into your body — their genes (size, strength, curves) and memories pour into yours (no egg, no hatch — their escape is the swallow-abort chat command)";
-                case SwallowEffect.Destroy: return "the conversion consumes them entirely (no egg, no hatch — their escape is the swallow-abort chat command)";
+                case SwallowEffect.Grow: return "the conversion absorbs them into your body — their genes (size, strength, curves) and memories pour into yours (no egg, no hatch — their escape is fighting: they MASH SPACE and can churn your stomach into letting go)";
+                case SwallowEffect.Destroy: return "the conversion consumes them entirely (no egg usually, no hatch — though a rare soul egg sometimes slips free; their escape is fighting: they MASH SPACE)";
+                case SwallowEffect.Milk: return "the conversion slowly CHURNS them into warm milk in your belly — a drinkable, spillable fluid carrying their genes (their escape is fighting: they MASH SPACE)";
+                case SwallowEffect.Cum: return "the conversion slowly CHURNS them into cum in your belly — spendable fluid carrying their genes (their escape is fighting: they MASH SPACE)";
                 default: return "after conversion an egg pops out at your feet — plant it in soil and they hatch out of it";
             }
         }
@@ -3112,8 +3118,73 @@ namespace KKLLMNPC
                 case SwallowEffect.BellyEgg: return PourIntoBelly(st);
                 case SwallowEffect.Grow: return AbsorbIntoEater(st);
                 case SwallowEffect.Destroy: return EraseVictim(st);
+                case SwallowEffect.Milk: return ChurnToReagent(st, "Milk");
+                case SwallowEffect.Cum: return ChurnToReagent(st, "Cum");
                 default: return LayEggAtFeet(st);
             }
+        }
+
+        // ------------------------------------------------------------------
+        // CHURN TARGETS (phase 2, 2026-11-16, Rose's design): the Milk and Cum
+        // fates — the meal converts into real reagent in the eater's belly (the
+        // same place the game's own Cum lands), carrying the victim's genes:
+        // drinkable, milkable, spillable fluid that used to be a person. Churned
+        // is NOT integrated — the soul-egg second chance applies.
+        // ------------------------------------------------------------------
+        private static bool ChurnToReagent(SwallowState st, string reagentName)
+        {
+            string fluidWord = reagentName == "Milk" ? "warm milk" : "cum";
+            try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' churned into " + reagentName + " by " + BodyLabel(st.Eater)); } catch (Exception) { }
+            // Read the victim's genes + pour the churned result BEFORE the body
+            // goes (DestroyVictim tears it down).
+            try
+            {
+                var belly = st.Eater != null ? st.Eater.bellyContainer : null;
+                ScriptableReagent r;
+                if (belly != null && ReagentDatabase.TryGetAsset(reagentName, out r) && r != null)
+                {
+                    float vol = st.PreyVolume0 > 8f ? st.PreyVolume0 : 20f;
+                    var contents = new ReagentContents();
+                    contents.AddMix(r.GetReagent(vol));
+                    belly.AddMix(contents, GenericReagentContainer.InjectType.Inject);
+                    // The fluid remembers who it was — their genes ride it.
+                    try { var vg = st.Victim != null ? st.Victim.GetGenes() : null; if (vg != null) belly.SetGenes(vg); } catch (Exception) { }
+                }
+            }
+            catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow churn pour: " + e.Message); } catch (Exception) { } }
+            bool soulEgg = MaybeLaySoulEgg(st);
+            try
+            {
+                if (st.EaterNpc != null)
+                    st.EaterNpc.PushWorldEvent("[vore] the churn completes — " + st.Name + " finishes converting. Your belly fills with " + fluidWord
+                        + " that used to be a whole person. They're fluid now: yours to drink, to share, to spill — and their shape rides it (the reagent carries their genes)."
+                        + (soulEgg ? " ...and yet an egg shaped like THEM slipped free with it — their second chance, in your hands." : ""));
+                if (st.Npc != null)
+                    st.Npc.PushWorldEvent(soulEgg
+                        ? "the churn completes — you have become " + fluidWord + "... and yet something of you refused to end: an egg shaped like YOU slipped free. If someone plants it, you return."
+                        : "the churn completes — you have become " + fluidWord + ". There is no egg, no rebirth — just warmth in someone's belly.");
+                try { Plugin.FanoutWorldEventExcept("[vore] " + BodyLabel(st.Eater) + "'s stomach settles — " + st.Name + " has finished churning into " + fluidWord + ".", st.EaterNpc, st.Npc); } catch (Exception) { }
+                try { Bubble(st.Eater, st.Name + " is " + fluidWord + " now."); } catch (Exception) { }
+            }
+            catch (Exception) { }
+            // SWIFT SILENCE: churned = gone (unless a soul egg carries them).
+            try { if (st.Npc != null) st.Npc.MarkGone("churned into " + fluidWord + " by " + BodyLabel(st.Eater)); } catch (Exception) { }
+            if (st.VictimIsPlayer)
+            {
+                try
+                {
+                    if (SpectateManager.IsSpectating(st.Victim))
+                    {
+                        SpectateManager.MarkNoHatch(st.Victim);
+                        return true;
+                    }
+                }
+                catch (Exception) { }
+            }
+            if (MaybeFinishRemoteVictim(st, "released")) return true;
+            if (!DestroyVictim(st)) return false;
+            if (!soulEgg) ForgetVictim(st);
+            return true;
         }
 
         // Snapshot + remove the eaten body. False only when Photon refuses (victim

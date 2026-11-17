@@ -38,6 +38,10 @@ namespace KKLLMNPC
                      // sit on a nest to lay (vanilla oviposition flow) — the person is in THAT egg
         Grow = 2,    // no egg — the player absorbs them: bigger, stronger and/or curvier
         Destroy = 3, // no egg — they are simply gone
+        Milk = 4,    // churn phase 2 (2026-11-16): they slowly convert into Milk reagent
+                     // in the eater's belly — drinkable, milkable, spillable fluid that
+                     // used to be a person (their genes ride it)
+        Cum = 5,     // the same churn, ending as Cum reagent
     }
 
     internal static class SwallowLogic
@@ -364,7 +368,7 @@ namespace KKLLMNPC
         // FATE mode (enum SwallowEffect) — the F8/WebUI cycle + labels, and the
         // per-agent word parsers for `vore_target` / `vore_mode`. Pure.
         // ------------------------------------------------------------------
-        // Cycle: egg -> bellyegg -> grow -> destroy -> egg.
+        // Cycle: egg -> bellyegg -> grow -> destroy -> milk -> cum -> egg.
         public static SwallowEffect NextEffect(SwallowEffect m)
         {
             switch (m)
@@ -372,6 +376,8 @@ namespace KKLLMNPC
                 case SwallowEffect.Egg: return SwallowEffect.BellyEgg;
                 case SwallowEffect.BellyEgg: return SwallowEffect.Grow;
                 case SwallowEffect.Grow: return SwallowEffect.Destroy;
+                case SwallowEffect.Destroy: return SwallowEffect.Milk;
+                case SwallowEffect.Milk: return SwallowEffect.Cum;
                 default: return SwallowEffect.Egg;
             }
         }
@@ -383,6 +389,8 @@ namespace KKLLMNPC
                 case SwallowEffect.BellyEgg: return "BELLY-EGG";
                 case SwallowEffect.Grow: return "GROW";
                 case SwallowEffect.Destroy: return "DESTROY";
+                case SwallowEffect.Milk: return "MILK";
+                case SwallowEffect.Cum: return "CUM";
                 default: return "EGG";
             }
         }
@@ -459,6 +467,10 @@ namespace KKLLMNPC
                     m = SwallowEffect.Grow; return true;
                 case "destroy": case "kill": case "erased": case "erase": case "goneforever":
                     m = SwallowEffect.Destroy; return true;
+                case "milk": case "milking": case "churn": case "dairy":
+                    m = SwallowEffect.Milk; return true;
+                case "cum": case "seed": case "cumflation": case "jizz":
+                    m = SwallowEffect.Cum; return true;
                 default:
                     bad = true; return false;
             }

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — churn phase 2: the Milk and Cum fates)
+
+Two new digestion fates (Rose's design — "stuffing them into breasts churns
+them into milk"): `SwallowEffect.Milk` and `Cum`, cycled by F8
+(egg→bellyegg→grow→destroy→**milk→cum**→egg) and pickable per-agent with
+`vore_mode(milk|churn|cum|seed…)`. The meal converts at completion into real
+`Milk`/`Cum` reagent in the eater's belly (where the game's own Cum lands),
+volume matched to the meal, **the victim's genes riding the fluid** —
+drinkable, milkable, spillable. Honest narration on all sides ("a person,
+becoming a drink"); churned ≠ integrated, so the **soul-egg second chance
+applies** (an egg shaped like them can slip free with the churn). Player-
+victim fate hints and the eat_player outcome notes teach the new modes —
+and the stale "swallow-abort chat command" mentions were rewritten to the
+SPACE-mash escape. Suite covers the extended cycle, labels, and word
+parsing.
+
 ### Fixed (2026-11-16 — dildo models are not people: owner-aware penetrator naming)
 
 The game's penetrators are named after their MODEL — 'BDDiego', 'KDEFuta',
