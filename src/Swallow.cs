@@ -210,6 +210,8 @@ namespace KKLLMNPC
                         case SwallowEffect.Destroy: fate = "nothing will be left of them"; break;
                         case SwallowEffect.Milk: fate = "they slowly CHURN into warm milk inside you — a person, becoming a drink"; break;
                         case SwallowEffect.Cum: fate = "they slowly CHURN into cum — your body will spend them"; break;
+                        case SwallowEffect.MilkHeld: fate = "they settle as a CHARGE — released only when you are MILKED, riding every drop"; break;
+                        case SwallowEffect.CumHeld: fate = "they settle as a CHARGED LOAD — released only when you CUM, riding it into the receiver"; break;
                         default: fate = "an egg carrying their mixed genes pops out of you"; break;
                     }
                     string noun = SwallowLogic.InsideNoun(st.Entry);
@@ -1353,7 +1355,9 @@ namespace KKLLMNPC
                 case SwallowEffect.Grow:
                 case SwallowEffect.Destroy:
                 case SwallowEffect.Milk:
-                case SwallowEffect.Cum: return null;
+                case SwallowEffect.Cum:
+                case SwallowEffect.MilkHeld:
+                case SwallowEffect.CumHeld: return null;
                 default: return "after conversion you lay an egg — plant it in soil and they hatch out of it";
             }
         }
@@ -1368,6 +1372,8 @@ namespace KKLLMNPC
                 case SwallowEffect.Destroy: return "the conversion consumes them entirely (no egg usually, no hatch — though a rare soul egg sometimes slips free; their escape is fighting: they MASH SPACE)";
                 case SwallowEffect.Milk: return "the conversion slowly CHURNS them into warm milk in your belly — a drinkable, spillable fluid carrying their genes (their escape is fighting: they MASH SPACE)";
                 case SwallowEffect.Cum: return "the conversion slowly CHURNS them into cum in your belly — spendable fluid carrying their genes (their escape is fighting: they MASH SPACE)";
+                case SwallowEffect.MilkHeld: return "the conversion settles them into you as a HELD charge — no fluid until you are MILKED: then they ride your milk into whatever receives it, genes and memories delivered (a bucket, a pump, a waiting mouth)";
+                case SwallowEffect.CumHeld: return "the conversion settles them into you as a CHARGED LOAD — released only when you CUM: they ride it into whatever (or whoever) receives you — cum into a kobold and their genes may express in the child";
                 default: return "after conversion an egg pops out at your feet — plant it in soil and they hatch out of it";
             }
         }
@@ -1409,6 +1415,62 @@ namespace KKLLMNPC
         {
             if (string.IsNullOrEmpty(fingerprint) || string.IsNullOrEmpty(oldKey)) return;
             lock (_substrate) _substrate[fingerprint] = new SubstrateEntry { Name = name, OldKey = oldKey };
+        }
+
+        // ---- HELD CHARGES (ghost milk / the held load, 2026-11-16) -------------
+        // The held churn variants: the victim converts into a CHARGE the holder
+        // carries — no fluid, no pour. It releases only when the holder's OWN
+        // milk/cum lands somewhere (the game's sprays and climaxes all route
+        // through GenericReagentContainer.AddMixRPC with the source viewID), at
+        // which point the receiver takes the victim's genes + the substrate
+        // registration — buckets, pumps, bellies and wombs included.
+        internal sealed class HeldCharge
+        {
+            public string Kind;        // "Milk" | "Cum"
+            public string Name;        // the victim's name
+            public string OldKey;      // their MemoryStore record (rides the charge)
+            public string Fingerprint; // their genes' fingerprint
+            public KoboldGenes Genes;  // a copy — stamped on whatever receives them
+        }
+        private static readonly Dictionary<int, HeldCharge> _held = new Dictionary<int, HeldCharge>();
+
+        internal static void HoldCharge(Kobold holder, HeldCharge charge)
+        {
+            if (holder == null || charge == null) return;
+            lock (_held) _held[holder.GetInstanceID()] = charge;
+        }
+        internal static bool HasHeldCharge(Kobold holder)
+        {
+            if (holder == null) return false;
+            lock (_held) return _held.ContainsKey(holder.GetInstanceID());
+        }
+
+        // Called from the AddMixRPC postfix: `source` kobold's fluid landed in
+        // `receiver`. If the source holds a matching charge, THIS is the release:
+        // the receiver takes the victim's genes + substrate registration.
+        internal static void MaybeReleaseHeldCharge(Kobold source, GenericReagentContainer receiver)
+        {
+            if (source == null || receiver == null) return;
+            HeldCharge c;
+            lock (_held)
+            {
+                if (!_held.TryGetValue(source.GetInstanceID(), out c)) return;
+            }
+            try
+            {
+                ScriptableReagent r;
+                if (!ReagentDatabase.TryGetAsset(c.Kind, out r) || r == null) return;
+                if (receiver.GetVolumeOf(r) < 0.5f) return; // this spray wasn't their kind
+                lock (_held) _held.Remove(source.GetInstanceID()); // one-shot release
+                try { receiver.SetGenes(c.Genes); } catch (Exception) { }
+                RegisterSubstrate(c.Fingerprint, c.Name, c.OldKey);
+                var holderNpc = Plugin.InstanceForBody(source);
+                if (holderNpc != null)
+                    holderNpc.PushWorldEvent("[vore] it happens — your " + (c.Kind == "Milk" ? "milk lets down" : "climax crashes out")
+                        + ", and " + c.Name + " GOES WITH IT, into whatever just received you. Their genes, their memories: delivered. Whoever drinks that will know them.");
+                try { LLMNPCPlugin.Log.LogInfo("swallow: held charge released — '" + c.Name + "' rode " + source.name + "'s " + c.Kind.ToLowerInvariant() + " into a container"); } catch (Exception) { }
+            }
+            catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("held charge release: " + e.Message); } catch (Exception) { } }
         }
 
         // Belly contents changed (Harmony postfix): keep the bulge term AND check
@@ -3222,6 +3284,8 @@ namespace KKLLMNPC
                 case SwallowEffect.Destroy: return EraseVictim(st);
                 case SwallowEffect.Milk: return ChurnToReagent(st, "Milk");
                 case SwallowEffect.Cum: return ChurnToReagent(st, "Cum");
+                case SwallowEffect.MilkHeld: return ChurnToReagent(st, "Milk", true);
+                case SwallowEffect.CumHeld: return ChurnToReagent(st, "Cum", true);
                 default: return LayEggAtFeet(st);
             }
         }
@@ -3233,52 +3297,79 @@ namespace KKLLMNPC
         // drinkable, milkable, spillable fluid that used to be a person. Churned
         // is NOT integrated — the soul-egg second chance applies.
         // ------------------------------------------------------------------
-        private static bool ChurnToReagent(SwallowState st, string reagentName)
+        private static bool ChurnToReagent(SwallowState st, string reagentName, bool held = false)
         {
             string fluidWord = reagentName == "Milk" ? "warm milk" : "cum";
-            try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' churned into " + reagentName + " by " + BodyLabel(st.Eater)); } catch (Exception) { }
+            try { LLMNPCPlugin.Log.LogInfo("swallow: '" + st.Name + "' churned into " + (held ? "held " : "") + reagentName + " by " + BodyLabel(st.Eater)); } catch (Exception) { }
             // Read the victim's genes + pour the churned result BEFORE the body
-            // goes (DestroyVictim tears it down).
+            // goes (DestroyVictim tears it down). HELD variants pour nothing —
+            // the victim settles as a charge that releases with the holder's own
+            // milk/cum (ghost milk / the held load).
+            string victimFp = null;
+            KoboldGenes victimGenesCopy = null;
             try
             {
-                var belly = st.Eater != null ? st.Eater.bellyContainer : null;
-                ScriptableReagent r;
-                if (belly != null && ReagentDatabase.TryGetAsset(reagentName, out r) && r != null)
+                var vg = st.Victim != null ? st.Victim.GetGenes() : null;
+                if (vg != null)
                 {
-                    float vol = st.PreyVolume0 > 8f ? st.PreyVolume0 : 20f;
-                    var contents = new ReagentContents();
-                    contents.AddMix(r.GetReagent(vol));
-                    belly.AddMix(contents, GenericReagentContainer.InjectType.Inject);
-                    // The fluid remembers who it was — their genes ride it, and the
-                    // game's own transfers carry container genes with the fluid
-                    // (TransferMix SetGenes): pour it into a bucket, pump it into
-                    // another belly, and the fingerprint follows.
-                    try
-                    {
-                        var vg = st.Victim != null ? st.Victim.GetGenes() : null;
-                        if (vg != null)
-                        {
-                            belly.SetGenes(vg);
-                            RegisterSubstrate(NPCInstance.GenesFingerprint(vg), st.Name, st.OldBodyKey);
-                        }
-                    }
-                    catch (Exception) { }
+                    victimGenesCopy = vg;
+                    victimFp = NPCInstance.GenesFingerprint(vg);
                 }
             }
-            catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow churn pour: " + e.Message); } catch (Exception) { } }
+            catch (Exception) { }
+            if (held)
+            {
+                HoldCharge(st.Eater, new HeldCharge
+                {
+                    Kind = reagentName,
+                    Name = st.Name,
+                    OldKey = st.OldBodyKey,
+                    Fingerprint = victimFp,
+                    Genes = victimGenesCopy,
+                });
+            }
+            else
+            {
+                try
+                {
+                    var belly = st.Eater != null ? st.Eater.bellyContainer : null;
+                    ScriptableReagent r;
+                    if (belly != null && victimGenesCopy != null && ReagentDatabase.TryGetAsset(reagentName, out r) && r != null)
+                    {
+                        float vol = st.PreyVolume0 > 8f ? st.PreyVolume0 : 20f;
+                        var contents = new ReagentContents();
+                        contents.AddMix(r.GetReagent(vol));
+                        belly.AddMix(contents, GenericReagentContainer.InjectType.Inject);
+                        // The fluid remembers who it was — their genes ride it, and the
+                        // game's own transfers carry container genes with the fluid
+                        // (TransferMix SetGenes): pour it into a bucket, pump it into
+                        // another belly, and the fingerprint follows.
+                        try { belly.SetGenes(victimGenesCopy); } catch (Exception) { }
+                        RegisterSubstrate(victimFp, st.Name, st.OldBodyKey);
+                    }
+                }
+                catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow churn pour: " + e.Message); } catch (Exception) { } }
+            }
             bool soulEgg = MaybeLaySoulEgg(st);
             try
             {
                 if (st.EaterNpc != null)
-                    st.EaterNpc.PushWorldEvent("[vore] the churn completes — " + st.Name + " finishes converting. Your belly fills with " + fluidWord
-                        + " that used to be a whole person. They're fluid now: yours to drink, to share, to spill — and their shape rides it (the reagent carries their genes)."
-                        + (soulEgg ? " ...and yet an egg shaped like THEM slipped free with it — their second chance, in your hands." : ""));
+                {
+                    if (held)
+                        st.EaterNpc.PushWorldEvent("[vore] the churn completes — " + st.Name + " settles into you as a CHARGED warmth, nothing poured: they go where YOUR "
+                            + (reagentName == "Milk" ? "milk goes — get milked, and they ride every drop into whatever receives it" : "climax goes — cum, and they ride the load into whatever (or whoever) receives it")
+                            + ". Their genes, their memories — delivered on your release." + (soulEgg ? " ...and yet an egg shaped like THEM slipped free as well — their second chance, in your hands." : ""));
+                    else
+                        st.EaterNpc.PushWorldEvent("[vore] the churn completes — " + st.Name + " finishes converting. Your belly fills with " + fluidWord
+                            + " that used to be a whole person. They're fluid now: yours to drink, to share, to spill — and their shape rides it (the reagent carries their genes)."
+                            + (soulEgg ? " ...and yet an egg shaped like THEM slipped free with it — their second chance, in your hands." : ""));
+                }
                 if (st.Npc != null)
                     st.Npc.PushWorldEvent(soulEgg
-                        ? "the churn completes — you have become " + fluidWord + "... and yet something of you refused to end: an egg shaped like YOU slipped free. If someone plants it, you return."
-                        : "the churn completes — you have become " + fluidWord + ". There is no egg, no rebirth — just warmth in someone's belly.");
-                try { Plugin.FanoutWorldEventExcept("[vore] " + BodyLabel(st.Eater) + "'s stomach settles — " + st.Name + " has finished churning into " + fluidWord + ".", st.EaterNpc, st.Npc); } catch (Exception) { }
-                try { Bubble(st.Eater, st.Name + " is " + fluidWord + " now."); } catch (Exception) { }
+                        ? "the churn completes — you have become " + (held ? "a charge inside them" : fluidWord) + "... and yet something of you refused to end: an egg shaped like YOU slipped free. If someone plants it, you return."
+                        : "the churn completes — you have become " + (held ? "a charge inside them, waiting on their release" : fluidWord) + ". There is no egg, no rebirth — just what they make of you.");
+                try { Plugin.FanoutWorldEventExcept("[vore] " + BodyLabel(st.Eater) + "'s stomach settles — " + st.Name + " has finished churning into " + (held ? "something HELD" : fluidWord) + ".", st.EaterNpc, st.Npc); } catch (Exception) { }
+                try { Bubble(st.Eater, st.Name + " is " + (held ? "held in you now" : fluidWord + " now") + "."); } catch (Exception) { }
             }
             catch (Exception) { }
             // SWIFT SILENCE: churned = gone (unless a soul egg carries them).

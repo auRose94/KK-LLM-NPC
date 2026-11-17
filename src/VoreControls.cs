@@ -29,7 +29,7 @@ namespace KKLLMNPC
                 ["mode"] = new Dictionary<string, object>
                 {
                     ["type"] = new object[] { "string", "null" },
-                    ["description"] = "vore_mode: egg | bellyegg | grow | destroy | milk | cum — YOUR personal fate for meals you take (milk/cum = they churn into that fluid in your belly, genes riding it); omit to ask, 'off'/'global' = follow the human's setting again"
+                    ["description"] = "vore_mode: egg | bellyegg | grow | destroy | milk | cum | heldmilk/udder | heldcum/load — YOUR personal fate for meals you take (milk/cum = churn into that belly fluid; heldmilk = a CHARGE released when you're milked; heldcum/load = released when you CUM, genes riding into the receiver); omit to ask, 'off'/'global' = follow the human's setting again"
                 },
             };
             ModuleRegistry.Tool("vore_target", (n, p) => n.ToolVoreTarget(p), schemas);

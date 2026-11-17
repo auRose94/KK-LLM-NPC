@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — the ghost-milk variants: held charges released by the body's own acts)
+
+`SwallowEffect.HeldMilk` / `HeldCum` (`vore_mode(heldmilk|udder|heldcum|load|charged…)`
+, F8 cycle extended): the held churn — the victim converts into a CHARGE the
+holder carries, no fluid poured. Release happens through the body's own acts,
+discovered via a Harmony postfix on `GenericReagentContainer.AddMixRPC` (every
+milk spray and climax in the game routes through it carrying the source's
+viewID): when a charged holder's milk lands somewhere (the milking machine's
+spray into a bucket/pump/mouth) or their cum lands in a receiver, the charge
+goes with it — the receiver takes the victim's genes + the substrate
+registration, so the existing drink-absorb chain fires downstream and a
+cum-into-kobold can express the victim's genes in the child (mind-to-child
+reincarnation noted as future polish). Honest held-variant narration for
+eater, victim, and bystanders; suite covers the extended cycle, labels, and
+words.
+
 ### Added (2026-11-16 — the substrate principle, v1: pour-liberation + drink-absorb + origin-labeled memories)
 
 - **Pour-liberation**: the prey reagent IS the digestion's grip — drain a

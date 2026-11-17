@@ -42,6 +42,11 @@ namespace KKLLMNPC
                      // in the eater's belly — drinkable, milkable, spillable fluid that
                      // used to be a person (their genes ride it)
         Cum = 5,     // the same churn, ending as Cum reagent
+        MilkHeld = 6, // held variant (2026-11-16, Rose's ghost-milk): the churn settles
+                      // as a CHARGED warmth — released only when the holder is MILKED;
+                      // the spray carries them (genes + memories) into whatever receives it
+        CumHeld = 7,  // the held load: released only when the holder CUMS — the load
+                      // carries them into whatever (or whoever) receives it
     }
 
     internal static class SwallowLogic
@@ -368,7 +373,7 @@ namespace KKLLMNPC
         // FATE mode (enum SwallowEffect) — the F8/WebUI cycle + labels, and the
         // per-agent word parsers for `vore_target` / `vore_mode`. Pure.
         // ------------------------------------------------------------------
-        // Cycle: egg -> bellyegg -> grow -> destroy -> milk -> cum -> egg.
+        // Cycle: egg -> bellyegg -> grow -> destroy -> milk -> cum -> heldmilk -> heldcum -> egg.
         public static SwallowEffect NextEffect(SwallowEffect m)
         {
             switch (m)
@@ -378,6 +383,8 @@ namespace KKLLMNPC
                 case SwallowEffect.Grow: return SwallowEffect.Destroy;
                 case SwallowEffect.Destroy: return SwallowEffect.Milk;
                 case SwallowEffect.Milk: return SwallowEffect.Cum;
+                case SwallowEffect.Cum: return SwallowEffect.MilkHeld;
+                case SwallowEffect.MilkHeld: return SwallowEffect.CumHeld;
                 default: return SwallowEffect.Egg;
             }
         }
@@ -391,6 +398,8 @@ namespace KKLLMNPC
                 case SwallowEffect.Destroy: return "DESTROY";
                 case SwallowEffect.Milk: return "MILK";
                 case SwallowEffect.Cum: return "CUM";
+                case SwallowEffect.MilkHeld: return "HELD-MILK";
+                case SwallowEffect.CumHeld: return "HELD-CUM";
                 default: return "EGG";
             }
         }
@@ -471,6 +480,10 @@ namespace KKLLMNPC
                     m = SwallowEffect.Milk; return true;
                 case "cum": case "seed": case "cumflation": case "jizz":
                     m = SwallowEffect.Cum; return true;
+                case "heldmilk": case "holdmilk": case "udder":
+                    m = SwallowEffect.MilkHeld; return true;
+                case "heldcum": case "holdcum": case "load": case "charged":
+                    m = SwallowEffect.CumHeld; return true;
                 default:
                     bad = true; return false;
             }

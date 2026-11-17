@@ -287,13 +287,17 @@ internal static class TestSwallow
         Eq("Destroy", SwallowLogic.NextEffect(SwallowEffect.Grow).ToString(), "grow → destroy cycles");
         Eq("Milk", SwallowLogic.NextEffect(SwallowEffect.Destroy).ToString(), "destroy → milk cycles (churn phase 2)");
         Eq("Cum", SwallowLogic.NextEffect(SwallowEffect.Milk).ToString(), "milk → cum cycles");
-        Eq("Egg", SwallowLogic.NextEffect(SwallowEffect.Cum).ToString(), "cum → egg cycles");
+        Eq("MilkHeld", SwallowLogic.NextEffect(SwallowEffect.Cum).ToString(), "cum → heldmilk cycles (ghost milk)");
+        Eq("CumHeld", SwallowLogic.NextEffect(SwallowEffect.MilkHeld).ToString(), "heldmilk → heldcum cycles");
+        Eq("Egg", SwallowLogic.NextEffect(SwallowEffect.CumHeld).ToString(), "heldcum → egg cycles");
         Eq("EGG", SwallowLogic.EffectLabel(SwallowEffect.Egg), "egg label");
         Eq("BELLY-EGG", SwallowLogic.EffectLabel(SwallowEffect.BellyEgg), "bellyegg label");
         Eq("GROW", SwallowLogic.EffectLabel(SwallowEffect.Grow), "grow label");
         Eq("DESTROY", SwallowLogic.EffectLabel(SwallowEffect.Destroy), "destroy label");
         Eq("MILK", SwallowLogic.EffectLabel(SwallowEffect.Milk), "milk label");
         Eq("CUM", SwallowLogic.EffectLabel(SwallowEffect.Cum), "cum label");
+        Eq("HELD-MILK", SwallowLogic.EffectLabel(SwallowEffect.MilkHeld), "held-milk label");
+        Eq("HELD-CUM", SwallowLogic.EffectLabel(SwallowEffect.CumHeld), "held-cum label");
         {
             SwallowEffect pm; bool pclr, pbad;
             Eq(true, SwallowLogic.TryParseEffect("milk", out pm, out pclr, out pbad) && pm == SwallowEffect.Milk && !pclr && !pbad,
@@ -304,6 +308,10 @@ internal static class TestSwallow
                 "vore_mode word 'cum' parses to the Cum fate");
             Eq(true, SwallowLogic.TryParseEffect("seed", out pm, out pclr, out pbad) && pm == SwallowEffect.Cum,
                 "'seed' is a cum synonym");
+            Eq(true, SwallowLogic.TryParseEffect("udder", out pm, out pclr, out pbad) && pm == SwallowEffect.MilkHeld,
+                "'udder' parses to the held-milk fate");
+            Eq(true, SwallowLogic.TryParseEffect("load", out pm, out pclr, out pbad) && pm == SwallowEffect.CumHeld,
+                "'load' parses to the held-cum fate");
         }
 
         // --- clear-word set shared by both knobs ---

@@ -89,6 +89,17 @@ namespace KKLLMNPC
                     _harmony.Patch(bellyChanged,
                         postfix: new HarmonyMethod(typeof(Patches).GetMethod(nameof(Kobold_OnBellyContentsChanged_Postfix), BindingFlags.Static | BindingFlags.NonPublic)));
 
+                // HELD-CHARGE RELEASE (2026-11-16, ghost milk / the held load): every
+                // milk spray and climax in the game routes through AddMixRPC with the
+                // SOURCE's viewID — when the source kobold carries a held churn, this
+                // is the release moment: whatever received them takes the victim's
+                // genes + the substrate registration (buckets, pumps, bellies, wombs).
+                var addMixRpc = typeof(GenericReagentContainer).GetMethod("AddMixRPC",
+                    BindingFlags.Instance | BindingFlags.Public);
+                if (addMixRpc != null)
+                    _harmony.Patch(addMixRpc,
+                        postfix: new HarmonyMethod(typeof(Patches).GetMethod(nameof(GenericReagentContainer_AddMixRPC_Postfix), BindingFlags.Static | BindingFlags.NonPublic)));
+
                 log.LogInfo("KKLLMNPC: animator rotation patches applied.");
             }
             catch (Exception e)
@@ -193,6 +204,22 @@ namespace KKLLMNPC
         private static void Kobold_OnBellyContentsChanged_Postfix(Kobold __instance)
         {
             try { if (__instance != null) SwallowManager.OnBellyChanged(__instance); } catch (Exception) { }
+        }
+
+        // Postfix on GenericReagentContainer.AddMixRPC(BitBuffer, int geneViewID, byte):
+        // if the source view is a kobold carrying a held churn charge and the
+        // receiving container just took their kind of fluid — release the charge
+        // onto the receiver (genes + substrate registration, one-shot).
+        private static void GenericReagentContainer_AddMixRPC_Postfix(GenericReagentContainer __instance, int geneViewID)
+        {
+            try
+            {
+                if (__instance == null) return;
+                var view = Photon.Pun.PhotonNetwork.GetPhotonView(geneViewID);
+                var source = view != null ? view.GetComponentInParent<Kobold>() : null;
+                if (source != null) SwallowManager.MaybeReleaseHeldCharge(source, __instance);
+            }
+            catch (Exception) { }
         }
     }
 }
