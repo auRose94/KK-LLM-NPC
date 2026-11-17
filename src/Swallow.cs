@@ -68,7 +68,7 @@ namespace KKLLMNPC
         {
             public string OldKey;
             public string EaterLabel;
-            public string EaterKey;    // the EATER's MemoryStore key — the hatched child
+            public string EaterKey;    // the EATER's MemoryStore key — the hatched body
                                        // gets a compaction of BOTH lives (its own + tastes
                                        // of who carried them)
             public bool IsPlayer;      // the eaten one is the LOCAL PLAYER — hatch revives
@@ -1373,7 +1373,7 @@ namespace KKLLMNPC
                 case SwallowEffect.Milk: return "the conversion slowly CHURNS them into warm milk in your belly — a drinkable, spillable fluid carrying their genes (their escape is fighting: they MASH SPACE)";
                 case SwallowEffect.Cum: return "the conversion slowly CHURNS them into cum in your belly — spendable fluid carrying their genes (their escape is fighting: they MASH SPACE)";
                 case SwallowEffect.MilkHeld: return "the conversion settles them into you as a HELD charge — no fluid until you are MILKED: then they ride your milk into whatever receives it, genes and memories delivered (a bucket, a pump, a waiting mouth)";
-                case SwallowEffect.CumHeld: return "the conversion settles them into you as a CHARGED LOAD — released only when you CUM: they ride it into whatever (or whoever) receives you — cum into a kobold and their genes may express in the child";
+                case SwallowEffect.CumHeld: return "the conversion settles them into you as a CHARGED LOAD — released only when you CUM: they ride it into whatever (or whoever) receives you — cum into a kobold and their genes may express in whatever grows from it (a fully grown adult, as always in this world)";
                 default: return "after conversion an egg pops out at your feet — plant it in soil and they hatch out of it";
             }
         }
@@ -4038,7 +4038,7 @@ namespace KKLLMNPC
                 var rec = string.IsNullOrEmpty(oldKey) ? null : MemoryStore.Load(oldKey);
                 if (rec != null && !string.IsNullOrEmpty(newKey))
                 {
-                    // "A compaction of the two": the child keeps its OWN previous life
+                    // "A compaction of the two": the hatched body keeps its OWN previous life
                     // (the swallowed person's) and gets a SHORT taste of the carrier's
                     // life (whoever's genes ate/stored them into the egg) — MemoryCompaction
                     // caps and dedupes both halves so the blend fits a fact ring.
