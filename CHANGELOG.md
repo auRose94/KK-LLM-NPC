@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-11-16 — dildo models are not people: owner-aware penetrator naming)
+
+The game's penetrators are named after their MODEL — 'BDDiego', 'KDEFuta',
+'WhorseDick', 'dild 1' are Bad-Dragon-style dick attachments — and penetration
+events used the raw object name, so agents believed a stranger named Diego or
+KDEFuta was inside them ("I'm being penetrated by KDEFuta", field log). Every
+penetrator is now resolved to its OWNER: another kobold's part narrates as
+"<their name>'s KDEFuta-model penis" (agent name > player nick > body name);
+an ownerless penetrator is labeled a TOY ("a shaped dildo/prop with no body
+attached — an OBJECT, never a person"); our own is caught by the own-appendage
+guard or named as our own equipment. `whoami`/`body` now lists the body's own
+dick MODEL NAMES ("equipment names, never people"), and the system prompt
+teaches the pattern with examples.
+
 ### Added (2026-11-16 — the churn system phase 1 + reincarnation: the soul egg)
 
 - **LivePrey reagent**: a swallowed victim now rides the eater's belly as

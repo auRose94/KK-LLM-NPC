@@ -1051,7 +1051,28 @@ namespace KKLLMNPC
                 else hole = "none";
 
                 var parts = new List<string>();
-                if (penis) parts.Add("YOUR OWN penis"); // gained or bred — it is never someone else's
+                if (penis)
+                {
+                    // MODEL NAMES (2026-11-16): dicks are named after their MODEL
+                    // ('BDDiego', 'KDEFuta' — Bad-Dragon-style attachments). The
+                    // agent must know these are ITS OWN equipment names, or a
+                    // penetration event naming the model reads as a stranger.
+                    var models = new List<string>();
+                    try
+                    {
+                        foreach (var pr in _kobold.GetComponentsInChildren<PenetrationTech.Penetrator>(true))
+                            if (pr != null && pr.gameObject != null)
+                            {
+                                string m = CleanName(pr.gameObject.name);
+                                if (!string.IsNullOrEmpty(m) && !models.Contains(m)) models.Add(m);
+                            }
+                    }
+                    catch (Exception) { }
+                    parts.Add("YOUR OWN penis"
+                        + (models.Count > 0 ? " — model name" + (models.Count > 1 ? "s" : "") + " '" + string.Join("','", models.ToArray())
+                            + "' (equipment names, never people)" : "")
+                        + " — it is never someone else's"); // gained or bred
+                }
                 if (penetrables > 0) parts.Add(hole + " penetrable" + (penetrables > 1 ? "s" : "") + " (yours: vagina/an ass/tits — feel names them)");
                 if (g.breastSize > 0.15f) parts.Add("breasts (yours)");
                 if (parts.Count == 0) parts.Add("none");
@@ -1406,7 +1427,34 @@ namespace KKLLMNPC
                 }
                 catch (Exception) { }
 
-                string whoPen = penetrator.gameObject != null ? CleanName(penetrator.gameObject.name) : "something";
+                // OWNER-AWARE NAMING (2026-11-16, Rose's catch): the game's
+                // penetrators are named after their MODEL — 'BDDiego', 'KDEFuta',
+                // 'WhorseDick', 'dild 1' are Bad-Dragon-style dick models, not
+                // people. Raw names made agents believe a stranger named Diego was
+                // inside them ("I'm being penetrated by KDEFuta", field log). Name
+                // the OWNER (another kobold → their identity + the model; our own →
+                // filtered above / named as our own), and label ownerless
+                // penetrators as TOYS — objects, never people.
+                string model = penetrator.gameObject != null ? CleanName(penetrator.gameObject.name) : null;
+                string whoPen;
+                Kobold owner = null;
+                try { owner = penetrator != null && penetrator.transform != null ? penetrator.transform.GetComponentInParent<Kobold>() : null; } catch (Exception) { }
+                if (owner != null && owner != _kobold)
+                {
+                    string ownerName = null;
+                    try { string an = NPCInstance.AgentNameForBody(owner.GetInstanceID()); if (!string.IsNullOrEmpty(an)) ownerName = an; } catch (Exception) { }
+                    if (string.IsNullOrEmpty(ownerName)) { try { ownerName = KoboldOwnerNick(owner); } catch (Exception) { } }
+                    if (string.IsNullOrEmpty(ownerName)) ownerName = CleanName(owner.name);
+                    whoPen = ownerName + "'s " + (model ?? "dick") + "-model penis";
+                }
+                else if (owner == _kobold)
+                {
+                    whoPen = "your own " + (model ?? "") + "-model penis";
+                }
+                else
+                {
+                    whoPen = "a " + (model ?? "object") + " TOY (a shaped dildo/prop with no body attached — an OBJECT, never a person)";
+                }
                 if (voreInsert && penGoName != null && penGoName.Length > 5)
                     whoPen = "vore-insert:" + CleanName(penGoName.Substring(5));
 
