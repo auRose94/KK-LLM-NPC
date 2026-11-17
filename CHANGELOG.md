@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-16 — offspring reincarnation: the charged load's grown body wakes as the victim)
+
+The last queue item, and it turned out to be one registration: when a held
+Cum charge releases into a KOBOLD's belly, the belly-gene rebirth link is
+registered (the same mechanism BellyEgg has used all along). The game's
+pregnancy feeds on those belly genes; when the carrier nest-lays,
+`OnOviposition` matches the belly fingerprint exactly and the egg inherits
+the rebirth link — so the body that grows from the load (a fully grown
+adult, gene-mixed with the carrier) hatches and the **victim wakes in it**:
+name, facts, skills, vore picks, and their last waking moments — remembering
+being eaten. Milk charges into a belly register the same link (milk-rebirth:
+if the game lets a body grow from it, the same loop applies). The holder's
+release narration now says so ("if a body grows from this and is planted,
+THEY may wake in it").
+
 ### Added (2026-11-16 — episodic memory transfer: victims pass their last waking hours)
 
 Memory records now carry an EPISODE — the last 8 timestamped short-term

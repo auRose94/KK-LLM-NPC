@@ -1464,10 +1464,32 @@ namespace KKLLMNPC
                 lock (_held) _held.Remove(source.GetInstanceID()); // one-shot release
                 try { receiver.SetGenes(c.Genes); } catch (Exception) { }
                 RegisterSubstrate(c.Fingerprint, c.Name, c.OldKey);
+                // OFFSPRING REINCARNATION (2026-11-16, the last queue item): when the
+                // charge lands in a KOBOLD's belly, register the belly-gene rebirth
+                // link (the same registration BellyEgg uses). The game's pregnancy
+                // feeds on those belly genes; when the carrier nest-lays, OnOviposition
+                // matches the belly fingerprint and the egg inherits the rebirth link —
+                // the grown body (a fully grown adult, gene-mixed with the carrier)
+                // hatches and the VICTIM WAKES IN IT: name, facts, skills, episode.
+                try
+                {
+                    var carrier = receiver.GetComponentInParent<Kobold>();
+                    if (carrier != null && carrier.bellyContainer == receiver && !string.IsNullOrEmpty(c.Fingerprint))
+                    {
+                        lock (_lock)
+                        {
+                            _bellyGeneticOwners[c.Fingerprint] = new RebirthLink { OldKey = c.OldKey, EaterLabel = BodyLabel(source), EaterKey = null };
+                            _bellyNames[c.Fingerprint] = c.Name;
+                        }
+                        try { LLMNPCPlugin.Log.LogInfo("swallow: belly rebirth link set — a body grown from this may wake as '" + c.Name + "'"); } catch (Exception) { }
+                    }
+                }
+                catch (Exception) { }
                 var holderNpc = Plugin.InstanceForBody(source);
                 if (holderNpc != null)
                     holderNpc.PushWorldEvent("[vore] it happens — your " + (c.Kind == "Milk" ? "milk lets down" : "climax crashes out")
-                        + ", and " + c.Name + " GOES WITH IT, into whatever just received you. Their genes, their memories: delivered. Whoever drinks that will know them.");
+                        + ", and " + c.Name + " GOES WITH IT, into whatever just received you. Their genes, their memories: delivered. Whoever drinks that will know them"
+                        + (c.Kind == "Cum" ? " — and if a body grows from this and is planted, THEY may wake in it" : "") + ".");
                 try { LLMNPCPlugin.Log.LogInfo("swallow: held charge released — '" + c.Name + "' rode " + source.name + "'s " + c.Kind.ToLowerInvariant() + " into a container"); } catch (Exception) { }
             }
             catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("held charge release: " + e.Message); } catch (Exception) { } }
