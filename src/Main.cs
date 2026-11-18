@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.6.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.7.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -788,18 +788,27 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
 
-            // Probe the KoboldCpp server for model capabilities (parameter count, context length).
-            // This runs once at startup and populates ModelProbe.Detected* fields.
-            // If the server is unreachable, it degrades gracefully to the old auto-detect behavior.
-            try
+            // Probe the server for model capabilities (parameter count, context length).
+            // ASYNC (v1.6.0, loading speed): Probe's retry ladder (3 attempts × 1s
+            // sleep × four probe endpoints) used to run INLINE in Awake, blocking
+            // the BepInEx chainloader up to ~12s when the endpoint was slow or
+            // absent — the single biggest load-time cost under our control. Every
+            // consumer (tier resolution, family profile, context compaction) is
+            // null/0-tolerant and reads lazily at runtime, so the probe can land
+            // whenever it lands; the mod simply uses defaults for its first turns.
+            var ep = _cfgEndpoint.Value; var key = _cfgApiKey.Value; var logger = Logger;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
-                ModelProbe.Probe(_cfgEndpoint.Value, _cfgApiKey.Value);
-                if (ModelProbe.DetectedTier != null)
-                    Logger.LogInfo("ModelProbe: tier='" + ModelProbe.DetectedTier + "' model='" + (ModelProbe.DetectedModelName ?? "?") + "' ctx=" + ModelProbe.DetectedContextLength + " params=" + ModelProbe.DetectedParameters);
-                else
-                    Logger.LogInfo("ModelProbe: could not classify — will use runtime auto-detect");
-            }
-            catch (Exception e) { Logger.LogWarning("ModelProbe: " + e.Message); }
+                try
+                {
+                    ModelProbe.Probe(ep, key);
+                    if (ModelProbe.DetectedTier != null)
+                        logger.LogInfo("ModelProbe (async): tier='" + ModelProbe.DetectedTier + "' model='" + (ModelProbe.DetectedModelName ?? "?") + "' ctx=" + ModelProbe.DetectedContextLength + " params=" + ModelProbe.DetectedParameters);
+                    else
+                        logger.LogInfo("ModelProbe (async): could not classify — will use runtime auto-detect");
+                }
+                catch (Exception e) { try { logger.LogWarning("ModelProbe: " + e.Message); } catch (Exception) { } }
+            });
 
             _running = true;
             SafeRun(StartWatchers);

@@ -159,14 +159,28 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 
 ## Current state (2026-11-19)
 
-- `main` is the PR target and is current; **v1.6.0 wraps v1.5.0+v1.5.1+v1.6.0**
-  (GitHub release pending — Rose plans to release the evening of 2026-11-19).
+- `main` is the PR target and is current; **v1.7.0 committed locally**
+  (v1.5.0 5079a7c, v1.6.0 54b08a6 before it; GitHub release pending — Rose
+  plans to release the evening of 2026-11-19).
   **Rose's morning verdict on v1.5.1: A+, "best version so far"** — first fully
   autonomous farm chain observed (mailbox → starter egg → planted → watered,
   following the letter's instructions, unprompted). CI runs on every branch push plus a nightly deep-soak schedule
   (`workflow_dispatch` works too). `ws/*` branches are checked out in
   worktrees under `/mnt/Matrix/Work/KK-LLM-NPC-wt/<name>` — don't try to
   check them out here.
+- **NEW PROJECT DIRECTION (2026-11-19, Rose): stability + QoL** — dissect the
+  whole playthrough log (BepInEx + Unity player log) and fix the game itself
+  via monkey-patching, fan-patch workshop-mod pain, speed up loading, and
+  grow sandbox features (Garry's-Mod-style "make your own fun"). Shipped in
+  v1.7.0: JigglePhysics Harmony guards (per-frame UpdateMesh NRE + the
+  OnDisable NRE that aborted the game's EnsureModsAreLoadedThenChangePlayer
+  player-model coroutine — the "player model resets every restart" bug) and
+  an async ModelProbe (was blocking the chainloader up to ~12s). QUEUED from
+  the log: 82 missing-script refs + GameEventSanitizer LogError spam
+  (fan-patch module: per-mod summary instead of per-instance spam), Unity
+  crash-reporter opt-out, mod-aware player-model persistence (re-apply the
+  player's last model after EnsureModsAreLoadedThenChangePlayer), sandbox
+  console command pack (spawn/god/time manipulation for players).
 - 2026-11-19 **v1.6.0: on-demand replicas (deployed)** — instances scale with
   the LIVE agent population (`min(Replicas, agents)`, both hosts): the Nth
   agent spawns its instance at thread creation (cold load lands while it

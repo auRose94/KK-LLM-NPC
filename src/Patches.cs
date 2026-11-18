@@ -60,6 +60,36 @@ namespace KKLLMNPC
                     _harmony.Patch(sortGrabbables,
                         finalizer: new HarmonyMethod(typeof(Patches).GetMethod(nameof(SortGrabbables_Finalizer), BindingFlags.Static | BindingFlags.NonPublic)));
 
+                // JIGGLE-PHYSICS STABILITY GUARDS (2026-11-19, stability direction):
+                // the game's embedded JigglePhysics library throws NullReference-
+                // Exceptions around modded-model churn. Two independent sites,
+                // both seen in the 2026-11-18 playthrough log:
+                //  * JiggleSkin.UpdateMesh (LateUpdate chain) — a mesh/jiggle-zone
+                //    reference is null while a modded player model is mid-swap;
+                //    fires PER FRAME until the model settles, and each throw is
+                //    "Uploading Crash Report"-ed.
+                //  * JiggleSkin.OnDisable -> RemoveJiggleRigAdvancable — the rig
+                //    registry dereferences a stale entry when the player-model
+                //    coroutine (EnsureModsAreLoadedThenChangePlayer) Destroy()s
+                //    the old skin; the NRE aborts the coroutine mid-flight, which
+                //    is why a restart can leave the player model broken until a
+                //    manual re-pick.
+                // Both are library-internal state races we cannot repair — but
+                // swallowing them at the source is exactly what the library's own
+                // callers expect Unity to tolerate. SkinnedMeshRenderer state is
+                // rebuilt by the model swap; a skipped jiggle tick during the
+                // swap window is invisible.
+                var jiggleUpdateMesh = typeof(JigglePhysics.JiggleSkin).GetMethod("UpdateMesh",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (jiggleUpdateMesh != null)
+                    _harmony.Patch(jiggleUpdateMesh,
+                        finalizer: new HarmonyMethod(typeof(Patches).GetMethod(nameof(JiggleSkin_UpdateMesh_Finalizer), BindingFlags.Static | BindingFlags.NonPublic)));
+                var jiggleOnDisable = typeof(JigglePhysics.JiggleSkin).GetMethod("OnDisable",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (jiggleOnDisable != null)
+                    _harmony.Patch(jiggleOnDisable,
+                        finalizer: new HarmonyMethod(typeof(Patches).GetMethod(nameof(JiggleSkin_OnDisable_Finalizer), BindingFlags.Static | BindingFlags.NonPublic)));
+
                 // Swallow-vore trigger: the player's drop while looking up becomes a
                 // swallow (SwallowManager owns the trigger rule + suppresses the drop).
                 SwallowManager.ApplyPatches(_harmony);
@@ -173,6 +203,50 @@ namespace KKLLMNPC
             return null; // swallow — do not rethrow
         }
         private static volatile float _lastStationCrashLog = -99f;
+
+        // Finalizers for the JigglePhysics guards (see registration comment).
+        // Same throttled-log idiom as the station guard: one line per 30s window,
+        // exception swallowed (null return) so LateUpdate/coroutines continue.
+        private static Exception JiggleSkin_UpdateMesh_Finalizer(Exception __exception)
+        {
+            if (__exception == null) return null;
+            try
+            {
+                if (Log == null) return __exception;
+                float now = Time.unscaledTime;
+                if (now - _lastJiggleUpdateLog > 30f)
+                {
+                    _lastJiggleUpdateLog = now;
+                    Log.LogWarning("KKLLMNPC: swallowed JiggleSkin.UpdateMesh NRE (modded-model swap race) — "
+                        + __exception.Message + " — jiggle tick skipped, renderer rebuilt by the swap.");
+                }
+            }
+            catch (Exception) { }
+            return null; // swallow
+        }
+        private static volatile float _lastJiggleUpdateLog = -99f;
+
+        private static Exception JiggleSkin_OnDisable_Finalizer(Exception __exception)
+        {
+            if (__exception == null) return null;
+            try
+            {
+                if (Log == null) return __exception;
+                float now = Time.unscaledTime;
+                if (now - _lastJiggleDisableLog > 30f)
+                {
+                    _lastJiggleDisableLog = now;
+                    // The important one: this NRE aborts the game's
+                    // EnsureModsAreLoadedThenChangePlayer coroutine mid-swap.
+                    Log.LogWarning("KKLLMNPC: swallowed JiggleSkin.OnDisable NRE (stale rig registry entry) — "
+                        + __exception.Message + " — player-model swap continues.");
+                }
+            }
+            catch (Exception) { }
+            return null; // swallow
+        }
+        private static volatile float _lastJiggleDisableLog = -99f;
+
         internal static BepInEx.Logging.ManualLogSource Log;
 
         // Instance-for-body resolver, set by the plugin at startup (same delegate

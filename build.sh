@@ -82,6 +82,7 @@ if [ "$COMPILER" = "mcs" ]; then
       -r:"$MGMT/PhotonRealtime.dll" \
       -r:"$MGMT/Assembly-CSharp.dll" \
       -r:"$MGMT/Naelstrof.PenetrationTech.dll" \
+      -r:"$MGMT/Naelstrof.JigglePhysics.dll" \
       -r:"$MGMT/com.naelstrof.orbitcam.dll" \
       -r:"$MGMT/com.naelstrof.inflatable.dll" \
       -r:"$MGMT/NetStack.dll" \

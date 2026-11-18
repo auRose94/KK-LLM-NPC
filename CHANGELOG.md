@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-11-19
+
+New project direction: **stability + quality of life** — dissecting the whole
+playthrough log (game log + Unity player log) and fixing what it shows, in the
+mod and in the game itself via monkey-patching.
+
+### Added (2026-11-19 — log forensics: engine stability guards + faster loading)
+
+- **JigglePhysics stability guards** (the log's biggest engine offender): the
+  game's embedded jiggle-physics library threw NullReferenceExceptions at two
+  sites around modded-model churn — `JiggleSkin.UpdateMesh` fired PER FRAME
+  while a modded player model was mid-swap (each throw "Uploading Crash
+  Report"-ed), and `JiggleSkin.OnDisable`'s stale-rig deref aborted the game's
+  `EnsureModsAreLoadedThenChangePlayer` coroutine mid-flight (why a restart
+  could leave the player model broken until a manual re-pick). Both are now
+  Harmony-finalized with the same throttled-swallow idiom as the station
+  guard: one log line per 30s, the swap continues, the renderer is rebuilt
+  by the model change anyway.
+- **Faster loading: the startup probe went async.** `ModelProbe.Probe`'s
+  retry ladder (3 attempts × 1s sleep × four probe endpoints) ran INLINE in
+  the plugin Awake — blocking the whole BepInEx chainloader up to ~12 seconds
+  when the endpoint was slow or absent (the largest load-time cost under our
+  control; the chainloader itself is inherently one-at-a-time). It now runs
+  on the thread pool; consumers are lazy and null-tolerant, so the mod uses
+  defaults for its first turns and upgrades itself when the probe lands.
+
+### Known remaining (from the same log, queued)
+
+- 82 `referenced script (Unknown) is missing!` + one `Unknown managed type
+  referenced: Assembly-CSharp SettingPostProcessor` — content-authored prefabs
+  referencing scripts that don't resolve (workshop content vs game version
+  drift; one is the GAME's own scene). Logged by Unity itself, not catchable
+  at the managed layer — roadmap: a fan-patch module that suppresses the
+  per-instance `GameEventSanitizer` LogError spam and surfaces a per-mod
+  summary instead.
+- Unity's crash reporter uploads every swallowed-by-us exception ("Uploading
+  Crash Report") — roadmap: bootstrapper-level opt-out.
+
 ## [1.6.0] — 2026-11-19
 
 ### Added (2026-11-19 — on-demand replicas: instances scale with the agent population)
