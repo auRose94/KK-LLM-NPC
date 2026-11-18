@@ -5,6 +5,223 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-11-18
+
+Volumetric pathfinding: the world map's sampled data now navigates as true 3D.
+
+### Added (2026-11-17 — OctreeNav: sparse-voxel 3D pathfinding, built from the cached map)
+
+- **`OctreeNav` — the 3D nav core** (`src/OctreeNav.cs`, pure C#). Every sampled
+  surface becomes a floor voxel in per-column Y-sorted sparse sets; A* runs over
+  true 3D nodes with (a) horizontal edges that pick the neighbor column's best
+  walkable floor within [−2.6m drop, +0.5m climb] — the edge the old layered
+  grid could never express across columns, (b) same-column fall edges for
+  drop-through shafts/holes, (c) door tolls. This is what routes cave systems,
+  fall shafts, over/under passes, and floor stacks of any depth. (A literal
+  Morton-merge octree was deliberately skipped: we sample surfaces, not solid
+  interiors, so uniform-interior merging had nothing to compress — the column
+  map IS the sparse form of one.)
+- **The `.kkmap` cache IS the 3D map now.** The core builds from the same
+  arrays the cache stores, on a background thread, the moment the grid is
+  ready — a cached scene gets volumetric routing in milliseconds with zero
+  re-sampling (`map: ready (…, 3D N vox)` in the heartbeat).
+- **Deeper sampling for caves** — `[Movement].WorldMapRayDepthM` (default 150,
+  was a fixed 60): each column ray now reads 2.5× deeper under the terrain, so
+  cave floors under tall geometry get sampled at all. Cache loader accepts up
+  to 24 stacked layers (was 8). Needs one re-sample to apply to a cached scene.
+- **3D straight-leg checks** — string-pull fusing uses a volumetric
+  wall-voxel march (chest height, matching the physics rays) instead of the
+  per-layer 2D quadtree, so a leg from a ramp onto an overpass is checked
+  against both levels' walls. The quadtree stays as fallback.
+- **Fallback ladder unchanged** — every query tries the 3D core first and
+  falls back to the legacy layered A* (`[Movement].WorldMap3D=false` restores
+  the old behavior entirely); walk-proof patches mirror into the 3D core.
+- `tests/test_octreenav.cs` — 30 assertions: stacked tunnels + overpass
+  asymmetry (drop off routes, climb back doesn't), fall shafts vs over-drops,
+  30m stepped-cave descent, doors-as-tolls, patch-by-proof, budget, and a
+  200×200 long-trek smoke. 26 C# suites total.
+
+### Fixed (2026-11-17 — live-session salvage: fenced act-JSON with phrase actions + plan queues)
+
+Dissected from the running gemma-nsfw session: the model replies in fenced
+act-JSON whose action is a PHRASE ("look around") — the salvage marker-scan
+died on `Canonical("look around") == null` and passed the blob through
+untouched, so every turn became a silent "console thought". Worse, the
+act schema queues its real intent in `"plan":[...]` (speech included), which
+args-flattening strips as meta — the kobold tried to answer the player's
+hello for six turns and never said a word.
+
+- **Whole-reply fenced JSON now salvages**: fence bookends are stripped before
+  the bare-JSON path, so ` ```json\n{...}\n``` ` (single- or multi-line)
+  flattens to command lines.
+- **Phrase actions resolve**: when the action name isn't canonical but its
+  first word is ("look around" → look, "go to bed" → go/cd), the whole phrase
+  becomes the command line instead of the salvage giving up.
+- **Plan queues become command lines**: each `"plan"` entry is recovered as
+  its own line (one level deep) — `{"action":"say","text":"Hi!"}` finally
+  reaches `echo Hi!`.
+- Four regression cases pinned in `test_console_shell.cs` (94 assertions).
+
+### Added (2026-11-17 — per-agent model replicas: parallel turns on one Ollama)
+
+- **`[Ollama].Replicas` (default 1)** — load N total instances of the adopted
+  model and give each agent its own: true parallel turns, each with a FULL
+  context window (the `OLLAMA_NUM_PARALLEL` alternative splits one window
+  across slots). Ollama loads by tag, so the watcher creates N−1 zero-disk
+  copies via `/api/copy` (`model`, `model.kk2`, … — same blobs, separate
+  loaded runner), prewarms them (cold loads run on the watcher thread, same
+  trade the keep-alive makes), pings EVERY replica in the keep-alive
+  heartbeat, unloads the old set on a model change or a return to 1, and
+  skips (with one log) any copy the server can't provide — those agents fall
+  back to the shared instance instead of failing turns. Agents claim a
+  replica round-robin at their first turn, and only while the Ollama
+  hand-off is actually live (a shard name sent anywhere else is a 404).
+  Each loaded copy takes the model's FULL VRAM — the knob is opt-in and
+  documented accordingly. LM Studio cannot do this (one loaded instance per
+  model key, no duplicate-key API) — `[LMStudio]` deliberately has no
+  Replicas key, noted in its docs.
+- Pure naming/assignment in `OllamaArgs.ShardName/ReplicaSet/ReplicaFor`
+  (+17 assertions in `test_ollama.cs`).
+- **`[LMStudio].Replicas` (default 1)** — the same capability for LM Studio,
+  which DOES support multiple loaded instances of one model (the first fix of
+  this round: an earlier claim that it couldn't was wrong — Rose loaded the
+  same model twice live to prove it). The Nth loaded instance is addressed as
+  `<model>:N`; the watcher loads the extras via `/api/v0/models/load` (TTL from
+  `KeepAlive`) and — verification-driven — only routes an agent to an instance
+  after a `/api/v0/models` poll confirms it `loaded`, pings every instance in
+  the keep-alive heartbeat, strips the `:N` suffix when picking the shared
+  base, and best-effort unloads our instances on model change / return to 1.
+  Pure naming in `LMStudioArgs.InstanceName/InstanceBase/ReplicaSet/ReplicaFor`
+  (+14 assertions in `test_lmstudio.cs`). Same VRAM math as Ollama replicas.
+- **LM Studio replicas are ADOPTION-first** (same evening, from Rose's live
+  dual-instance report): every LOADED `<model>:N` instance joins the pool —
+  manual UI loads included, verified against her live server (base + `:2`,
+  both `state:loaded`, parsed through the real code). `Replicas` now means
+  "ensure at least N": missing indices load one-per-poll and are adopted only
+  after a poll confirms them; only mod-loaded instances auto-unload (hers are
+  never touched); pool formation is always logged (the silent-failure gap that
+  made the first attempt undiagnosable). Pure adoption scan:
+  `LMStudioArgs.LoadedInstancesOf` (+11 assertions).
+- **Replica routing actually routes** (2026-11-18, the "4 loaded, none used"
+  report): a WebUI pick writes the concrete model name into `[LLM].Model`, and
+  a concrete name short-circuited `EffectiveModel` BEFORE the per-agent
+  replica claim — every agent piled onto instance #1 while the adopted
+  `:N` replicas idled. Resolution now claims the agent's replica whenever the
+  configured model is the placeholder OR names the adopted base / one of its
+  instance (`:N`) or shard (`.kkN`) keys; a deliberately different configured
+  model still passes through untouched. The resolution log is now per
+  DISTINCT name (with replicas, each agent may differ — "which instance is
+  this kobold on" is a log query now).
+- **LM Studio server-auth note**: with API auth enabled (0.4+), every probe
+  401s unless the token is in `[LLM].ApiKey` — documented in the section.
+
+### Fixed (2026-11-17 — gemma round 3: the XML tool dialect)
+
+The Scamper session: gemma-nsfw switched formats AGAIN — now XML tool markup
+(`<thought>…</thought>` + `<action>find('water')</action>`, close tags often
+truncated to `</>`). None of it salvaged: every reply became a silent console
+thought, the identical-repeat guard ended turns, and one block-speak leaked
+raw markup into chat.
+
+- **`<action>`/`<command>`/`<tool>` unwrap pass** in `ConsoleSalvage.Clean`:
+  tag bodies become command lines (the lenient parser then handles
+  `find('water')`/`man()` call-style natively), `<thought>` framing drops,
+  malformed closes (`</>`, newline, none) tolerated, and the `<tool` open
+  refuses to eat `<tool_call|>` (the JSON dialect's marker). Speech heads
+  before a mid-line close tag survive as narration.
+- **Markup is never voice**: `IsRpResponseBlock` rejects action/command-tag
+  replies — quoted args in that dialect were being spoken in chat verbatim.
+- **Name flow**: trailing parenthetical annotations ("Name: **Kizzy** (5
+  letters)") no longer discard a completed answer, and the name prompt now
+  says the taken list is NOT a checklist (gemma re-derived the whole list on
+  all four budget re-rolls, then timed out into a flavor fallback — ~4 minutes
+  per fresh body).
+- Regressions in `test_console_shell` (+7), `test_textutil` (+2),
+  `test_modelfamilies` (+2).
+
+## [1.4.0] — 2026-11-18
+
+LM Studio gets the same adoption treatment Ollama has — and one power Ollama
+doesn't: the model picker actually LOADS the model for you.
+
+### Added (2026-11-17 — LM Studio adoption: watcher, hand-off, TTL keep-warm, loader)
+
+- **`[LMStudio]` adoption (ON by default)** — a new watcher adopts an
+  externally-running LM Studio through its native `/api/v0/models`: one
+  payload carrying every model with its **load state**, **real context
+  window** (feeds context compaction), arch, and quantization — no
+  `/api/show` round-trip needed. Idles harmlessly (`healthy=false`) when
+  no LM Studio is running; strict parsing means any other server on that
+  port is never mis-adopted.
+- **Endpoint hand-off (`AutoEndpoint`, ON)** — with an adopted + healthy
+  LM Studio the mod routes LLM traffic to it regardless of
+  `[LLM].Endpoint`, and the `local-model` placeholder resolves to the
+  actually-loaded model. **Precedence: an adopted Ollama still wins** (it
+  shipped first — nobody's working setup flips). Optional LM Studio auth
+  is honored via the existing `[LLM].ApiKey` Bearer.
+- **Keep-alive heartbeat (`KeepAlive`, default `30m`)** — LM Studio
+  auto-evicts JIT-loaded models after their idle TTL (default 60m) and the
+  TTL resets on every request, so the watcher sends a 1-token completion
+  roughly every half-window; `-1` pins for the session (15m cadence),
+  `off` disables. GUI-loaded models have no TTL and stay resident on
+  their own.
+- **The picker loads the model** — the WebUI **AI server** tab now shows
+  LM Studio alongside Ollama; **use this model** writes `[LLM].Model` AND
+  loads the model in LM Studio itself (`/api/v0/models/load`, TTL from
+  `KeepAlive`), only sending the load for not-loaded models so a resident
+  model never pays a reload. With JIT loading enabled LM Studio even
+  loads the model the mod names on the fly.
+- **ModelProbe** now speaks `/api/v0/models` too, so a config pointed at
+  LM Studio (port 1234) gets real context-window discovery at startup
+  even without adoption.
+- New pure module `src/LMStudioArgs.cs` + `tests/test_lmstudio.cs`
+  (36 assertions — parser, the OpenAI-`/v1/models` false-positive guard,
+  loaded-model pick, cadence math). 25 C# suites total.
+
+### Fixed (2026-11-17 — gemma playtest dissection: swap staleness, vision hammer, JSON muttering, replan storms, the burger-bucket)
+
+First `unseen_gemma_4_26b_nsfw` session, dissected from LogOutput — five root
+causes behind "repeats commands, bad navigation, doesn't understand buckets,
+shop confusion, barely talks":
+
+- **Model swaps now re-profile the agent.** Family + tier were resolved ONCE
+  per instance from the startup probe — a mid-session LM Studio swap ran the
+  gemma-26B under a stale `deepseek`/`small` profile with every gemma
+  mitigation absent and wrong token headroom. The profile now re-classifies
+  when the live model name changes (adopted-host watcher → probe → config),
+  tier re-resolves with a `<n>b` name heuristic (26b → medium; bands match
+  ModelProbe's), and the startup probe's stale tier verdict is ignored after
+  a swap.
+- **Vision circuit breaker.** A text finetune behind a vision-shaped endpoint
+  returned empty captions for the WHOLE session — each attempt costing a
+  16–40s serial-LLM slot every ImageEveryNTicks, while the agent "checked
+  screenshots" that never came. 3 consecutive empty captions now pause vision
+  for 10 minutes and tell the agent: eyes offline, plan from sonar/`ls`.
+- **JSON is never voice.** Gemma's legacy act-JSON replies (```json
+  {"action":…}```) counted as "quoted dialogue" and were SPOKEN in chat as
+  fragments. `TextUtil.IsRpResponseBlock` now excludes JSON-shaped blocks
+  (fence-stripped `{`/`[` openers); the command-salvage path is unchanged.
+- **Stuck-breaker storms end.** An unmapped target (TableStation) ground 30+
+  same-route replans into the agent's terminal, each inviting a `go_to`
+  re-issue. Replans now cap at 5 per goal (then drop the route and say ONCE:
+  pick a different target or walk by hand), and only the FIRST reroute per
+  goal reaches the agent.
+- **Buckets tell the truth.** Every `BucketWeapon` was "water bucket —
+  contents never run out"; but buckets are the game's FOOD vessels
+  (`BucketWeapon/FoodCreateAction`). Krumble threw away a Burger on that
+  line. Held buckets now read their real mix (`container` →
+  `NoTouchGenericReagentContainer.GetContents()`): food buckets describe
+  their contents in perception and the grab event, and keep the endless-water
+  story only when they actually hold water (or can't be read).
+- **`find <unknown>` lists the real places** (up to 6, nearest-first) instead
+  of a dead-end "not found" — the shop spiral ended in "try: cat stations".
+- Lifecycle OnDisable/OnDestroy at t=0 are Info now (normal host-GO churn),
+  mid-session disables stay Warnings.
+
+Watch item (not fixed): gemma twice returned SSE completions with empty
+`delta` and `finish_reason=stop` — likely reasoning-channel emission under a
+stale profile; re-check after a clean gemma-family session.
+
 ## [1.3.1] — 2026-11-16
 
 The vore-drama mega-release: the churn system, reincarnation in three

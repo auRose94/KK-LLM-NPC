@@ -22,12 +22,29 @@ namespace KKLLMNPC
 {
     internal partial class NPCInstance
     {
+        // Vision circuit breaker: N consecutive empty captions means the "vision"
+        // model can't see (a text finetune behind a vision-shaped endpoint — the
+        // 2026-11-17 gemma playtest burned a ~30s serial-LLM slot every
+        // ImageEveryNTicks for a whole session on exactly this). The worker hands
+        // the trip to the main thread via a flag (Unity time is main-thread-only);
+        // the cooldown gate below reads it.
+        private const int VisionBreakerStreak = 3;
+        private const float VisionBreakerCooldownSec = 600f;
+        private int _visionEmptyStreak;
+        private volatile bool _visionBreakerTrip;
+        private float _visionCooldownUntil;
 
         // Launch the caption pass when due (every N ticks) and not currently running;
         // wedge-reset if a hung HTTP call left visionBusy stuck past 2 minutes.
         private void MaybeStartVisionPass()
         {
             if (!_cfgVision.Value || !MainReady) return;
+            if (_visionBreakerTrip)
+            {
+                _visionBreakerTrip = false;
+                _visionCooldownUntil = Time.unscaledTime + VisionBreakerCooldownSec;
+            }
+            if (Time.unscaledTime < _visionCooldownUntil) return;
             if (_visionBusy)
             {
                 // Reset a wedged vision flag (hung HTTP, etc.) after 2 minutes.
@@ -68,6 +85,7 @@ namespace KKLLMNPC
 
                 if (!string.IsNullOrEmpty(cap))
                 {
+                    _visionEmptyStreak = 0;
                     if (!_visionModelLoggedOnce)
                     {
                         _visionModelLoggedOnce = true;
@@ -114,7 +132,22 @@ namespace KKLLMNPC
                     _sceneDesc = string.IsNullOrEmpty(desc) ? cap : desc;
                     Logger.LogInfo($"vision ({sw.ElapsedMilliseconds}ms): " + cap);
                 }
-                else Logger.LogWarning($"vision: empty caption after {sw.ElapsedMilliseconds}ms (model may not be vision-capable)");
+                else
+                {
+                    _visionEmptyStreak++;
+                    if (_visionEmptyStreak >= VisionBreakerStreak)
+                    {
+                        _visionEmptyStreak = 0;
+                        _visionBreakerTrip = true; // main thread starts the cooldown
+                        // Tell the AGENT too — otherwise it keeps "checking the
+                        // screenshot" it never gets and plans around phantom vision.
+                        _lastVisionB64 = null;
+                        _sceneDesc = "(your eyes are offline — the vision model returns nothing; plan from sonar, radar and ls, not screenshots)";
+                        Logger.LogWarning($"vision: {VisionBreakerStreak} empty captions in a row — pausing vision for "
+                            + (int)(VisionBreakerCooldownSec / 60) + " minutes (vision model not answering?)");
+                    }
+                    else Logger.LogWarning($"vision: empty caption after {sw.ElapsedMilliseconds}ms (model may not be vision-capable)");
+                }
             }
             catch (Exception e) { Logger.LogWarning("vision: " + e.Message); }
             finally { _visionBusy = false; }

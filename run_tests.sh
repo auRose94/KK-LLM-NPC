@@ -115,6 +115,8 @@ run_headless_suites() {
   run_suite memory_compaction tests/test_memory_compaction.cs -- src/MemoryCompaction.cs src/TextUtil.cs
   run_suite truncatedargs tests/test_truncated_args.cs -- src/TruncatedArgs.cs src/Json.cs
   run_suite ollama tests/test_ollama.cs -- src/OllamaArgs.cs src/Json.cs
+  run_suite lmstudio tests/test_lmstudio.cs -- src/LMStudioArgs.cs src/OllamaArgs.cs src/Json.cs
+  run_suite octreenav tests/test_octreenav.cs -- src/OctreeNav.cs src/Constants.cs
   run_suite consent    tests/test_consent.cs -- src/ConsentDetector.cs
 }
 

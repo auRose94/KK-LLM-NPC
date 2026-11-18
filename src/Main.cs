@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.3.1")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.5.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -127,6 +127,8 @@ namespace KKLLMNPC
         internal ConfigEntry<bool> _cfgMapAutoLayers;
         internal ConfigEntry<int> _cfgMapCpf;
         internal ConfigEntry<int> _cfgMapLayers;
+        internal ConfigEntry<bool> _cfgMap3D;
+        internal ConfigEntry<float> _cfgMapRayDepth;
         internal ConfigEntry<int> _cfgMaxNPCs;
         internal ConfigEntry<bool> _cfgSpawnMissing;
         internal ConfigEntry<bool> _cfgRadarEnabled;
@@ -568,6 +570,10 @@ namespace KKLLMNPC
                 "World-map cells sampled per frame while building (higher = faster build, more per-frame physics cost)");
             _cfgMapLayers = Config.Bind("Movement", "WorldMapLayers", 4,
                 "Max distinct floor layers sampled per world-map cell (stacked floors/stairs)");
+            _cfgMap3D = Config.Bind("Movement", "WorldMap3D", true,
+                "Route go_to through the volumetric 3D nav core (sparse voxel columns + true-3D A*, built from the same sampled/cached world map in milliseconds). Handles caves, fall shafts, over/under floors and any floor-stack depth — the old layered A* could only switch floors inside one column. On = 3D core with the layered grid as safety fallback; Off = layered A* only.");
+            _cfgMapRayDepth = Config.Bind("Movement", "WorldMapRayDepthM", 150f,
+                "How deep (m) each world-map sampling ray reads below its origin. The old fixed 60m missed anything under tall terrain — deep cave systems need rays that reach them. Takes effect on the NEXT map build: delete the scene's .kkmap in BepInEx/config/kkllmnpc_maps (or nudge WorldMapCellSize) to force a re-sample.");
             _cfgVisionEvery = Config.Bind("Vision", "EveryNTicks", 3, "Run the vision pass every N action ticks (lower = more aware, slower)");
             _cfgVisionPrompt = Config.Bind("Vision", "Prompt",
                 "You are the SPATIAL reasoner for an NPC. Produce a compact SCENE REPORT: (a) landmarks/stations/people in view with a rough bearing, (b) which directions are OPEN to walk (-90 left .. +90 right), (c) any hazard or drop. " +
@@ -740,6 +746,8 @@ namespace KKLLMNPC
             WorldMap.MaxSpan = _cfgMapSpan.Value;
             WorldMap.MaxCells = _cfgMapMaxCells.Value;
             if (!_cfgMapAutoLayers.Value) WorldMap.MaxLayers = _cfgMapLayers.Value;
+            WorldMap.Octree3DEnabled = _cfgMap3D.Value;
+            WorldMap.RayDepth = Mathf.Clamp(_cfgMapRayDepth.Value, 20f, 400f);
             _cfgRadarSize.Value = Mathf.Clamp(_cfgRadarSize.Value, 3, 30);
             _cfgRadarScale.Value = Mathf.Clamp(_cfgRadarScale.Value, 0.1f, 10f);
             _cfgVisMaxTokens.Value = Mathf.Clamp(_cfgVisMaxTokens.Value, 10, 500);
@@ -764,12 +772,15 @@ namespace KKLLMNPC
             _cfgMapSpan.Value = Mathf.Clamp(_cfgMapSpan.Value, 50f, 4000f);
             _cfgMapCpf.Value = Mathf.Clamp(_cfgMapCpf.Value, 4, 512);
             _cfgMapLayers.Value = Mathf.Clamp(_cfgMapLayers.Value, 2, 6);
+            _cfgMapRayDepth.Value = Mathf.Clamp(_cfgMapRayDepth.Value, 20f, 400f);
             try
             {
                 WorldMap.CellSize = _cfgMapCell.Value;
                 WorldMap.MaxSpan = _cfgMapSpan.Value;
                 WorldMap.MaxLayers = _cfgMapLayers.Value;
                 WorldMap.CellsPerFrame = _cfgMapCpf.Value;
+                WorldMap.Octree3DEnabled = _cfgMap3D.Value;
+                WorldMap.RayDepth = _cfgMapRayDepth.Value;
             }
             catch (Exception) { }
 
@@ -923,6 +934,10 @@ namespace KKLLMNPC
                 // pick lands in the running LLM. Idempotent, own thread.
                 try { Ollama.Ensure(this, _cfgModel); }
                 catch (Exception e) { try { Logger.LogWarning("ollama ensure: " + e.Message); } catch (Exception) { } }
+                // LM Studio adoption (external host): same deal, plus [LLM].ApiKey
+                // because LM Studio auth is optional-but-expected when enabled.
+                try { LMStudio.Ensure(this, _cfgModel, _cfgApiKey); }
+                catch (Exception e) { try { Logger.LogWarning("lmstudio ensure: " + e.Message); } catch (Exception) { } }
             }
 
             // Reconcile the instance pool with available targets: start an instance
@@ -1459,10 +1474,18 @@ namespace KKLLMNPC
             // scene name discriminates the two killers: a normal scene name = the GO
             // died with a scene unload (was never persistent); "DontDestroyOnLoad" =
             // something called Destroy() on it explicitly (see Patches destroy-guard).
+            // t≈0 disables are the normal host-GO churn (see OnDestroy) — Info; a
+            // mid-session disable stays a Warning.
             string scene = "(unknown)";
             try { scene = gameObject.scene.name; if (string.IsNullOrEmpty(scene)) scene = "(none)"; } catch (Exception) { scene = "(destroyed?)"; }
-            try { Logger.LogWarning("lifecycle: OnDisable @t=" + Time.unscaledTime.ToString("0.0", CultureInfo.InvariantCulture)
-                + " scene='" + scene + "' — something disabled the plugin component"); } catch (Exception) { }
+            bool early = Time.unscaledTime < 5f;
+            try
+            {
+                if (early) Logger.LogInfo("lifecycle: OnDisable @t=0.0 (normal host-GO churn — mod continues)");
+                else Logger.LogWarning("lifecycle: OnDisable @t=" + Time.unscaledTime.ToString("0.0", CultureInfo.InvariantCulture)
+                    + " scene='" + scene + "' — something disabled the plugin component");
+            }
+            catch (Exception) { }
         }
 
         // The game destroys BepInEx_Manager at t=0, so this fires immediately after
@@ -1471,7 +1494,7 @@ namespace KKLLMNPC
         // runner's OnApplicationQuit.
         private void OnDestroy()
         {
-            try { Logger.LogWarning("lifecycle: OnDestroy @t=" + Time.unscaledTime.ToString("0.0", CultureInfo.InvariantCulture) + " (host GO killed — mod continues on KKLLMNPC_UIGameObject)"); } catch (Exception) { }
+            try { Logger.LogInfo("lifecycle: OnDestroy @t=" + Time.unscaledTime.ToString("0.0", CultureInfo.InvariantCulture) + " (host GO killed — mod continues on KKLLMNPC_UIGameObject)"); } catch (Exception) { }
         }
 
         // REAL teardown — only on application quit (see LLMNPCRunner.OnApplicationQuit).
@@ -1481,6 +1504,7 @@ namespace KKLLMNPC
             _mainReady = false;
             try { WebUI.Shutdown(); } catch (Exception) { }
             try { Ollama.Shutdown(); } catch (Exception) { }  // stop the watcher thread
+            try { LMStudio.Shutdown(); } catch (Exception) { }  // stop the watcher thread
             try { if (_chatCallbackRegistered) { PhotonNetwork.RemoveCallbackTarget(this); _chatCallbackRegistered = false; } } catch (Exception) { }
             StopWatchers();
             lock (_instancesLock)

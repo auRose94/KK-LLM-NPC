@@ -258,6 +258,7 @@ namespace KKLLMNPC
         // the registered name "u003cthe".
         internal static readonly string NamePromptTemplateBuiltin =
             "Name one kobold character. Gender: {gender}. Species: {species}. Personality: {traits}. {taken}" +
+            "The taken list is NOT a checklist: never restate it, never check names against it one by one — just invent one name that is not on it. " +
             "Think as much as you need — reasoning is welcome. However your reply MUST end with one final line of the exact form: Name: Nyxa " +
             "(\"Nyxa\" is an example, not a suggestion — invent your own name). The name is ONE name only: 2-12 letters or digits, no spaces, no punctuation, nothing after that line. " +
             "Never the species name with a number attached (like Kobold2) — invent an actual name.";

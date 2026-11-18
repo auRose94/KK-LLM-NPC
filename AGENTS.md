@@ -24,7 +24,7 @@ weaken those gates casually; see `docs/VORE.md` before touching that area.
 ## Commands
 
 ```bash
-./run_tests.sh                  # all 23 pure-C# suites + python linter selftest — THE gate (CI runs this)
+./run_tests.sh                  # all 26 pure-C# suites + python linter selftest — THE gate (CI runs this)
 ./run_tests.sh json swallow     # subset by suite name (exact or prefix)
 tools/lint_config.py            # lint the game's live cfg vs docs/CONFIG.md (--selftest, --strict)
 ./check_syntax.sh               # parse-only check, no game install needed
@@ -157,13 +157,51 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 - `CONTRIBUTING.md` — style, PR checklist, game-API integration notes
 - `wip/BASE-GAME-AI.md` — reverse-engineered game internals
 
-## Current state (2026-11-16)
+## Current state (2026-11-17)
 
-- `main` is the PR target and is current; **v1.3.0 is RELEASED** (GitHub
-  Latest). CI runs on every branch push plus a nightly deep-soak schedule
+- `main` is the PR target and is current; **v1.5.0 is COMMITTED** (GitHub release pending)
+  and v1.3.1 was the last GitHub release. CI runs on every branch push plus a nightly deep-soak schedule
   (`workflow_dispatch` works too). `ws/*` branches are checked out in
   worktrees under `/mnt/Matrix/Work/KK-LLM-NPC-wt/<name>` — don't try to
   check them out here.
+- 2026-11-17 **OctreeNav — volumetric 3D pathfinding (v1.5.0, committed)** — `src/OctreeNav.cs` (pure): every sampled surface becomes a
+  floor voxel in per-column Y-sorted sparse sets; true-3D A* with
+  cross-column climb/drop edges + same-column fall shafts + door tolls.
+  BUILT FROM THE .kkmap CACHE ARRAYS (background thread, ms) — a cached
+  scene gets 3D routing with zero re-sampling. `[Movement].WorldMapRayDepthM`
+  (default 150, was fixed 60) samples 2.5× deeper for caves; loader takes 24
+  layers (was 8); straight-leg fusing is a 3D wall-voxel march (quadtree =
+  fallback); layered A* stays the safety net (`WorldMap3D=false` for legacy).
+  `test_octreenav.cs`: stacked tunnels/overpass asymmetry, shafts, 30m
+  stepped caves, long-trek smoke. 26 C# suites.
+- 2026-11-17 **LM Studio adoption (v1.4.0, committed in v1.5.0)** — the
+  `[LMStudio]` section mirrors `[Ollama]`: watcher adopts an externally-running
+  LM Studio via `/api/v0/models` (load state + REAL context window + quant in
+  one payload), `AutoEndpoint` hand-off (an adopted Ollama OUTRANKS it),
+  TTL keep-warm heartbeat (1-token completion; LM Studio's idle TTL resets on
+  every request), and a WebUI picker that LOADS the model through
+  `/api/v0/models/load` — something Ollama can't do. Pure `LMStudioArgs.cs` +
+  `test_lmstudio.cs`; ModelProbe also probes `/api/v0/models` now. Added same day:
+  `[Ollama].Replicas` (default 1) — N loaded instances via /api/copy shards
+  (`model.kk2`…), one per agent round-robin, keep-alive pings all replicas,
+  prewarm/unload lifecycle in the watcher, agents shard-route only while the
+  Ollama hand-off is live. CORRECTION same day: LM Studio DOES support multiple
+  loaded instances of one model (Nth = '<model>:N', Rose-verified live) —
+  [LMStudio].Replicas mirrors it, verification-driven (instance routes agents
+  only after a poll confirms it loaded); LM Studio server-auth (0.4+) needs the
+  token in [LLM].ApiKey or probes 401.
+- 2026-11-17 **gemma playtest dissection (committed in v1.5.0)** — five root
+  causes fixed from the first `unseen_gemma_4_26b_nsfw` session: model swaps
+  re-resolve family+tier (a stale `deepseek`/`small` profile had zero gemma
+  mitigations; `<n>b` name heuristic sizes tier), vision circuit breaker
+  (3 empty captions → 10-min pause + "eyes offline" perception note — the
+  dead vision path burned 16–40s serial slots all session), JSON act-blobs
+  are never spoken (IsRpResponseBlock excludes JSON shapes — gemma's ```json
+  replies were voiced in chat), stuck-breaker replans cap at 5/goal with
+  first-only NavOutcome (30+ replan storms at unmapped stations), and held
+  buckets read their real mix (buckets are the game's FOOD vessels — a Burger
+  got thrown away as an "endless water bucket"). `find <unknown>` now lists
+  real places. Watch item: gemma empty-delta SSE replies ×2. Same evening (live session): fenced act-JSON with PHRASE actions ("look around") + plan queues salvaged to nothing — fence-tolerant bare path + phrase-action fallback + plan[] recursion now recover them (echo/speech included); regression r5/r6 in test_console_shell. Round 3 (Scamper): gemma switched to XML tool markup (<action>…</action>, truncated </> closes) — UnwrapActionTags salvage pass + IsRpResponseBlock rejects markup + name-prompt anti-restate + parenthetical-annotation salvage. Three dialects now handled: act-JSON, fenced act-JSON, XML tags.
 - 2026-11-16 vore batches (all deployed, unreleased): size mechanics
   (capacity gates + scaled timing + throw-up + belly bulge, `SwallowSizeGates`),
   stretch band + kick training (bellySize gene growth) + the player SPACE-mash
@@ -202,7 +240,7 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
   `tests/test_turncore.cs` drives whole agent turns with a scripted fake LLM +
   fake world; `tests/test_soak.cs` is the long-horizon soak (3 agents ×
   `SOAK_ROUNDS` turns over pathological replies — CI's nightly schedule scales
-  it to 2000). 23 suites total.
+  it to 2000). 26 C# suites total.
 - v1.2.3 (2026-11-05): new default profile — rapid/immersive/Ollama-first.
   Shipped defaults now reflect a well-played setup (no existing config file is
   touched — BepInEx only writes a key on first launch). Ollama adoption

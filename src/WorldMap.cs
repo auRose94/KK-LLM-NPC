@@ -166,6 +166,12 @@ namespace KKLLMNPC
         public float HeightAt(int ci, int l) { return _h[ci * MaxLayers + l]; }
         public byte StateAt(int ci, int l) { return _ok[ci * MaxLayers + l]; }
 
+        // Whole-array views for the 3D nav build (read-only once Ready; the only
+        // later mutations are main-thread wall patches, which the octree mirrors).
+        internal byte[] NlayArray { get { return _nlay; } }
+        internal float[] HeightArray { get { return _h; } }
+        internal byte[] StateArray { get { return _ok; } }
+
         // Sample one cell's floor layers + clearance. Mirrors PathGridState.SampleCell
         // (same door/normal/kobold rules) but with a GLOBAL reference height so layers
         // are stable across the whole scene and between agents. Main thread only.
@@ -177,7 +183,7 @@ namespace KKLLMNPC
             float cz = MinZ + (z + 0.5f) * Cell;
 
             int nh = Physics.RaycastNonAlloc(new Vector3(cx, sampleFromY, cz), Vector3.down,
-                _rayBuf, 60f, ~0, QueryTriggerInteraction.Ignore);
+                _rayBuf, WorldMap.RayDepth, ~0, QueryTriggerInteraction.Ignore);
             _ys.Clear();
             for (int i = 0; i < nh; i++)
             {
@@ -263,8 +269,16 @@ namespace KKLLMNPC
         private static float _sampleFromY = 100f;
         private static readonly object _gate = new object();
 
+        // 3D nav core — built (background thread) from the SAME arrays the grid
+        // (and the .kkmap cache) holds, the moment the grid becomes Ready. All
+        // queries prefer it and fall back to the layered grid A*.
+        private static volatile OctreeNav _octree;
+        private static volatile bool _octreeAttempted;
+
         // Config (read by the plugin when starting a build; defaults here keep the
         // class self-sufficient).
+        internal static bool Octree3DEnabled = true;
+        internal static float RayDepth = 150f;
         internal static float CellSize = 1.0f;
         // Default 2000m span (was 800) — covers whole maps. Adaptive cell sizing
         // (span / 1200, clamped to [0.5, 4.0]) ensures the grid stays within the
@@ -287,8 +301,13 @@ namespace KKLLMNPC
             {
                 if (_build == null) return "map: idle";
                 if (_build.Ready)
+                {
+                    string src = _build.Source == "file" ? "cached" : "built this session";
+                    OctreeNav oct = _octree;
+                    if (oct != null) src += ", 3D " + oct.NodeCount.ToString("0.0\\k") + " vox";
                     return "map: ready (" + Fm(_build.Cols * _build.Cell) + "x" + Fm(_build.Rows * _build.Cell) + "m, "
-                        + _build.Cells.ToString("0.0\\k") + " cells, " + (_build.Source == "file" ? "cached" : "built this session") + ")";
+                        + _build.Cells.ToString("0.0\\k") + " cells, " + src + ")";
+                }
                 if (_build.Failed) return "map: unavailable (" + _build.FailReason + ")";
                 return "map: building " + (int)(_build.Progress * 100f) + "% (" + _build.Cells.ToString("0.0\\k") + " cells total)";
             }
@@ -372,12 +391,14 @@ namespace KKLLMNPC
                     _build.FailReason = "scene changed";
                     _build = null;
                     _grid = null;
+                    _octree = null; _octreeAttempted = false;
                 }
                 else
                 {
                     // Different scene (or ready map for an old scene) — replace.
                     _build = null;
                     _grid = null;
+                    _octree = null; _octreeAttempted = false;
                 }
 
                 var anchors = new List<Vector3>();
@@ -453,6 +474,7 @@ namespace KKLLMNPC
         {
             WorldMapBuild b;
             lock (_gate) b = _build;
+            MaybeBuildOctree(b);
             if (b == null || b.Ready || b.Failed)
             {
                 if (b != null && b.Ready && _grid == null)
@@ -479,6 +501,40 @@ namespace KKLLMNPC
                     LLMNPCPlugin.Log?.LogWarning("KKLLMNPC: world map save failed: " + e.Message);
                 }
             }
+        }
+
+        // Build the 3D nav core once the grid is Ready — works identically for a
+        // freshly sampled map AND one loaded from the .kkmap cache (the octree is
+        // built FROM those arrays, so a cached scene gets volumetric routing with
+        // zero re-sampling). One attempt per scene (success or failure); the build
+        // runs on the thread pool so a 1M-voxel scene never hitches a frame.
+        private static void MaybeBuildOctree(WorldMapBuild b)
+        {
+            if (!Octree3DEnabled) return;
+            if (b == null || !b.Ready || _octree != null || _octreeAttempted) return;
+            _octreeAttempted = true;
+            var snap = b;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    var oct = OctreeNav.FromLayeredGrid(snap.Cols, snap.Rows, snap.Cell, snap.MinX, snap.MinZ,
+                        snap.NlayArray, snap.HeightArray, snap.StateArray, snap.MaxLayers,
+                        Consts.PathClimbStep, Consts.LedgeDropHardStop);
+                    if (oct != null)
+                    {
+                        _octree = oct;
+                        LLMNPCPlugin.Log?.LogInfo("KKLLMNPC: 3D nav ready — " + oct.NodeCount + " floor voxels across "
+                            + oct.ColumnCount + " columns (from " + snap.Source + " map; caves/shafts/over-under route volumetrically)");
+                    }
+                    else
+                        LLMNPCPlugin.Log?.LogInfo("KKLLMNPC: 3D nav not built (no sampled floors) — layered grid remains the planner");
+                }
+                catch (Exception e)
+                {
+                    try { LLMNPCPlugin.Log?.LogWarning("KKLLMNPC: 3D nav build failed: " + e.Message + " — layered grid remains the planner"); } catch (Exception) { }
+                }
+            });
         }
 
         // Serialize the whole map into a byte[] (main thread; both this thread and the
@@ -558,6 +614,7 @@ namespace KKLLMNPC
                     if (_build != null) { _build.Failed = true; _build.FailReason = "scene changed"; }
                     _build = null;
                     _grid = null;
+                    _octree = null; _octreeAttempted = false;
                 }
             }
         }
@@ -606,6 +663,13 @@ namespace KKLLMNPC
                     patched = true;
                 }
             });
+            // The 3D core keeps its own node/wall state — mirror the proof so its
+            // A* and straight-leg checks unblock the same spot.
+            if (patched)
+            {
+                OctreeNav oct = _octree;
+                if (oct != null) try { oct.PatchWalkable(p.x, p.y, p.z); } catch (Exception) { }
+            }
             return patched;
         }
 
@@ -628,6 +692,15 @@ namespace KKLLMNPC
         // isn't ready, the points are outside it, or no route exists.
         private static List<Vector3> AstarQuery(Vector3 start, Vector3 goal, WorldMapGrid grid, WorldMapBuild b)
         {
+            // 3D core first: caves, shafts, over/under floors, any stack depth.
+            // Falls through to the layered grid when it can't anchor or route.
+            OctreeNav oct = _octree;
+            if (oct != null)
+            {
+                List<Vector3> way3 = OctreeAstar(oct, start, goal);
+                if (way3 != null) return way3;
+            }
+
             int sx = Mathf.Clamp(Mathf.FloorToInt((start.x - b.MinX) / b.Cell), 0, b.Cols - 1);
             int sz = Mathf.Clamp(Mathf.FloorToInt((start.z - b.MinZ) / b.Cell), 0, b.Rows - 1);
             int gx = Mathf.Clamp(Mathf.FloorToInt((goal.x - b.MinX) / b.Cell), 0, b.Cols - 1);
@@ -699,6 +772,46 @@ namespace KKLLMNPC
             finally { a.Release(); } // the big-grid scratch pool MUST come back
         }
 
+        // 3D A* over the octree core. Anchors start (2-column ring) and goal
+        // (8-column ring — the same near-miss reach as the layered query), then
+        // converts node ids to waypoints. Returns null on anchor/route failure so
+        // the layered grid can still answer.
+        private static List<Vector3> OctreeAstar(OctreeNav oct, Vector3 start, Vector3 goal)
+        {
+            try
+            {
+                int s = oct.NearestNode(start.x, start.y, start.z, 2);
+                if (s < 0) return null;
+                int g = oct.NearestNode(goal.x, goal.y, goal.z, 8);
+                if (g < 0) return null;
+                var nodes = oct.FindPath(s, g, 600000);
+                if (nodes == null || nodes.Count < 1) return null;
+                var way = new List<Vector3>(nodes.Count + 1) { start };
+                float lastY = 0f;
+                for (int i = 1; i < nodes.Count; i++)
+                {
+                    float nx, ny, nz;
+                    oct.NodePos(nodes[i], out nx, out ny, out nz);
+                    way.Add(new Vector3(nx, ny, nz));
+                    lastY = ny;
+                }
+                if (way.Count == 1) way.Add(goal);
+                else if (Mathf.Abs(way[way.Count - 1].x - goal.x) <= oct.Cell
+                      && Mathf.Abs(way[way.Count - 1].z - goal.z) <= oct.Cell)
+                    // anchored on the goal's own column — pin the final waypoint to
+                    // the exact X/Z at the routed floor height (same as layered)
+                    way[way.Count - 1] = new Vector3(goal.x, lastY, goal.z);
+                // else near-miss: keep the landing cell — pinning back onto a solid
+                // goal X/Z drove the last leg through the wall we just walked around
+                return way.Count >= 2 ? way : null;
+            }
+            catch (Exception e)
+            {
+                try { LLMNPCPlugin.Log?.LogWarning("KKLLMNPC: 3D nav query: " + e.Message); } catch (Exception) { }
+                return null;
+            }
+        }
+
         // --------------------------------------------------------------
         // Quadtree over the walkability bitmap — per layer, lazily built once the
         // grid is ready. Pure array work (no Unity), under the tree lock. Turns
@@ -738,12 +851,17 @@ namespace KKLLMNPC
 
         // Quadtree fine-truth for fusing string-pulled legs: the whole straight run
         // i→j must be open at the path's own layer (world→cell coordinates vs the
-        // build bounds). Unavailable tree / unknown layer → no constraint (the rays
-        // decide); tree math hiccups → conservative refusal.
+        // build bounds). With the 3D core available the check is VOLUMETRIC (a leg
+        // from a ramp onto an overpass is checked against both levels' walls);
+        // otherwise per-layer 2D as before. Unavailable tree / unknown layer → no
+        // constraint (the rays decide); tree math hiccups → conservative refusal.
         private static bool TreeLegOpen(WorldMapBuild b, WorldMapGrid g, List<Vector3> way, int i, int j)
         {
             try
             {
+                OctreeNav oct = _octree;
+                if (oct != null)
+                    return oct.SegmentOpen(way[i].x, way[i].y, way[i].z, way[j].x, way[j].y, way[j].z);
                 int ci = CellIndexOf(b, way[i].x, way[i].z);
                 if (ci < 0) return true;
                 int layer = g.LayerNear(ci, way[i].y);
@@ -903,7 +1021,7 @@ namespace KKLLMNPC
                     int maxLayers = (int)r.ReadUInt32();
                     double builtUtc = r.ReadDouble();
                     uint cells = r.ReadUInt32();
-                    if (cols < 2 || rows < 2 || cells == 0 || cells != (uint)(cols * rows) || maxLayers < 1 || maxLayers > 8)
+                    if (cols < 2 || rows < 2 || cells == 0 || cells != (uint)(cols * rows) || maxLayers < 1 || maxLayers > 24)
                         return false;
                     var nlay = new byte[cells];
                     var h = new float[cells * maxLayers];

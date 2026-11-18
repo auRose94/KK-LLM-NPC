@@ -207,7 +207,15 @@ Configuration is documented in full — every section, key, default and range �
 - **`[Console]`** — the bash-like REPL the agents drive (default ON; `Enabled=false`
   restores the legacy push-perception loop)
 - **`[Ollama]`** — external-host adoption + the keep-alive heartbeat (default `30m`)
+  + optional **replicas** (`Replicas`, default 1): N loaded instances of the model,
+  one per agent — parallel turns with a full context window each
+- **`[LMStudio]`** — the same adoption for LM Studio: live model list with load state
+  and real context windows, a TTL keep-warm heartbeat, a picker that *loads*
+  the model for you, and the same **replicas** support (`model:2`, `model:3`… —
+  one loaded instance per agent; Ollama wins when both are running)
 - **`[Senses]` / `[Vision]` / `[Movement]`** — perception and navigation knobs
+  (incl. the **3D nav core**: volumetric sparse-voxel pathfinding built from the
+  cached world map — caves, shafts and over/under floors route properly)
 - **`[Memory]` / `[Farming]` / `[Autonomy]`** — long-run behavior
 - **`[LittleTreats]`** — opt-in oddities (nothing on by default), plus
   `[Multiplayer]`, `[Web]`, `[Debug]`, `[DataRecord]`

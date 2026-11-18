@@ -314,6 +314,14 @@ namespace KKLLMNPC.Tests
                 "'pick' label, trailing period");
             Assert(ModelFamilies.SalvageNameFromCoT("choice=Puddle", taken, species) == "Puddle",
                 "equals-separator label");
+            // gemma annotates its picks ("Name: **Kizzy** (5 letters)") — the bold
+            // markers already skipped, but the parenthetical's digit used to fail
+            // the tail check and discard a COMPLETED answer (2026-11-17 session:
+            // four budget re-rolls then a timeout, all with valid picks buried inside).
+            Assert(ModelFamilies.SalvageNameFromCoT("checking…\nName: **Kizzy** (5 letters)", taken, species) == "Kizzy",
+                "bold + parenthetical annotation");
+            Assert(ModelFamilies.SalvageNameFromCoT("Name: Kloq (not in list!)", taken, species) == "Kloq",
+                "parenthetical exclamation annotation");
 
             // Verbal conclusions.
             Assert(ModelFamilies.SalvageNameFromCoT("Constraints checked. I'll call her Zephyr.", taken, species) == "Zephyr",

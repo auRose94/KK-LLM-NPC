@@ -123,6 +123,33 @@ internal static class TestOllama
         Eq(0, OllamaArgs.KeepAlivePingSecs(0), "ka-ping: disabled never pings");
     }
 
+    // Replicas: shard tags (/api/copy targets), set building, agent round-robin.
+    private static void TestReplicas()
+    {
+        Eq("ornith-1.5:35b.kk2", OllamaArgs.ShardName("ornith-1.5:35b", 2), "replica: tagged base suffixes the tag");
+        Eq("llama3:35b.kk3", OllamaArgs.ShardName("llama3:35b", 3), "replica: third copy");
+        Eq("llama3:kk2", OllamaArgs.ShardName("llama3", 2), "replica: untagged base gets an explicit tag");
+        Eq("m", OllamaArgs.ShardName("m", 0), "replica: copyIndex<2 is the base itself");
+        Eq("", OllamaArgs.ShardName("", 2), "replica: empty base stays empty");
+
+        var set = OllamaArgs.ReplicaSet("ornith-1.5:35b", 3);
+        Eq(3, set.Count, "replica set: base + 2 copies");
+        Eq("ornith-1.5:35b", set[0], "replica set: [0] is the base");
+        Eq("ornith-1.5:35b.kk3", set[2], "replica set: last copy");
+        Eq(1, OllamaArgs.ReplicaSet("m", 1).Count, "replica set: 1 = base only");
+        Eq(0, OllamaArgs.ReplicaSet(null, 4).Count, "replica set: null base = empty");
+
+        var r = OllamaArgs.ReplicaSet("m", 3);
+        Eq("m", OllamaArgs.ReplicaFor(r, 0), "assign: agent 0 → base");
+        Eq("m:kk2", OllamaArgs.ReplicaFor(r, 1), "assign: agent 1 → copy 2");
+        Eq("m:kk3", OllamaArgs.ReplicaFor(r, 2), "assign: agent 2 → copy 3");
+        Eq("m", OllamaArgs.ReplicaFor(r, 3), "assign: wraps around");
+        Eq("m", OllamaArgs.ReplicaFor(r, -1), "assign: negative ordinal = first agent (base)");
+        Eq(null, OllamaArgs.ReplicaFor(null, 0), "assign: no set → null");
+        var emptySet = new System.Collections.Generic.List<string>();
+        Eq(null, OllamaArgs.ReplicaFor(emptySet, 4), "assign: empty set → null");
+    }
+
     internal static int Run()
     {
         TestBaseUrl();
@@ -134,6 +161,7 @@ internal static class TestOllama
         TestFitContext();
         TestHumanSize();
         TestKeepAlive();
+        TestReplicas();
 
         if (_failed > 0)
         {

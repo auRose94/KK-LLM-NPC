@@ -205,6 +205,16 @@ internal static class TestTextUtil
         Assert(!TextUtil.IsRpResponseBlock(""), "empty");
         Assert(!TextUtil.IsRpResponseBlock(null), "null");
         Assert(!TextUtil.IsRpResponseBlock("lone asterisk* no pair"), "lone asterisk not a marker");
+        // JSON act blobs are never voice — their quoted keys are not dialogue
+        // (2026-11-17 gemma playtest: kobolds spoke ```json fragments in chat).
+        Assert(!TextUtil.IsRpResponseBlock("{\"progress\":\"none\", \"why\":\"say hi\", \"action\":\"echo\", \"params\":{\"text\":\"hello\"}}"), "json act blob is not a block");
+        Assert(!TextUtil.IsRpResponseBlock("```json\n{\"action\":\"find\", \"params\":{\"target\":\"shop\"}}\n```"), "fenced json act blob is not a block");
+        Assert(!TextUtil.IsRpResponseBlock("[{\"action\":\"walk\"}]"), "json array blob is not a block");
+        // XML tool dialect is never voice — its quotes are args, and the tag line
+        // itself was once spoken in chat verbatim (2026-11-17 live session)
+        Assert(!TextUtil.IsRpResponseBlock("*waves* \"It's alive!\".</thought> <action>find('water')</action>"), "action-tag dialect is not a block");
+        Assert(!TextUtil.IsRpResponseBlock("\"hi\" <command>echo hi</command>"), "command-tag dialect is not a block");
+        Assert(TextUtil.IsRpResponseBlock("*waves* {hi}"), "prose with a later brace is still a block");
         Console.WriteLine("textutil: RpResponseBlockDetector passed");
     }
 

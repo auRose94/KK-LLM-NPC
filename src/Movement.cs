@@ -128,6 +128,13 @@ namespace KKLLMNPC
         private Vector3 _lastNoRouteGoal;
         private bool _noRouteReportedForGoal;
         private float _lastFinalLegReplan = -99f;
+        // Consecutive stuck-breaker replans toward the SAME goal. The 2026-11-17
+        // playtest ground 30+ replans at TableStation with the LLM re-issuing go_to
+        // between them — cap the storm, tell the agent once, and make it pick a
+        // different target instead of re-funding the same dead route.
+        private const int MaxReplansPerGoal = 5;
+        private int _replanStreak;
+        private Vector3 _replanStreakGoal;
 
         private void NavOutcome(string line)
         {
@@ -196,6 +203,32 @@ namespace KKLLMNPC
                     }
                     return;
                 }
+                // Streak bookkeeping: a different goal resets it; the same goal
+                // grinding on counts up toward the give-up cap.
+                if (Vector3.Distance(SetYFlat(goal), _replanStreakGoal) > 2f)
+                {
+                    _replanStreakGoal = SetYFlat(goal);
+                    _replanStreak = 0;
+                }
+                _replanStreak++;
+                if (_replanStreak > MaxReplansPerGoal)
+                {
+                    // Same goal, Nth reroute: the world is not letting this happen.
+                    // Stop grinding (drop the route so FixedUpdate stops feeding the
+                    // breaker) and say so ONCE — re-issuing go_to to the same target
+                    // would just re-enter the storm.
+                    lock (_stateLock)
+                    {
+                        _path = null; _pathIdx = 0; _pathGoalSet = false; _trailJumps = null;
+                    }
+                    try { StopMove(); } catch (Exception) { }
+                    if (NoRouteNotYetReported(goal))
+                        NavOutcome("the way to "
+                            + (_navTargetName != null ? _navTargetName : "your goal")
+                            + " keeps failing after " + (_replanStreak - 1) + " reroutes — giving up on that route; pick a DIFFERENT target, or cover the last stretch by hand (walk <dir> <m>)");
+                    _replanStreak = 0;  // a fresh goal (or a re-issue) starts a new count
+                    return;
+                }
                 lock (_stateLock)
                 {
                     _path = np;
@@ -204,9 +237,13 @@ namespace KKLLMNPC
                     _trailJumps = null;
                     _noRouteReportedForGoal = false;  // fresh route — outcomes reportable again
                 }
-                Logger.LogInfo("movement: stuck-breaker re-planned the route (" + (np.Count - 1) + " legs)");
-                NavOutcome("the route kept hitting the same obstacle — replanned a different way ("
-                    + (np.Count - 1) + " legs)");
+                Logger.LogInfo("movement: stuck-breaker re-planned the route (" + (np.Count - 1) + " legs"
+                    + (_replanStreak > 1 ? ", #" + _replanStreak + " for this goal" : "") + ")");
+                // First reroute per goal reaches the agent; the rest are physics-side
+                // noise between turns — the terminal never needs five of the same line.
+                if (_replanStreak == 1)
+                    NavOutcome("the route kept hitting the same obstacle — replanned a different way ("
+                        + (np.Count - 1) + " legs)");
             }
             catch (Exception e) { try { Logger.LogWarning("repath: " + e.Message); } catch (Exception) { } }
         }

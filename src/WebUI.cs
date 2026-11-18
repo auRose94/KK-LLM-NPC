@@ -215,6 +215,10 @@ namespace KKLLMNPC
                             body = Encoding.UTF8.GetBytes(Ollama.HandlePost(payload));
                             mime = "application/json; charset=utf-8";
                             break;
+                        case "/api/lmstudio":
+                            body = Encoding.UTF8.GetBytes(LMStudio.HandlePost(payload));
+                            mime = "application/json; charset=utf-8";
+                            break;
                         default:
                             body = Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"unknown POST path\"}");
                             mime = "application/json; charset=utf-8";
@@ -250,6 +254,11 @@ namespace KKLLMNPC
                 else if (path == "/api/ollama")
                 {
                     body = Encoding.UTF8.GetBytes(Ollama.SnapshotJson());
+                    mime = "application/json; charset=utf-8";
+                }
+                else if (path == "/api/lmstudio")
+                {
+                    body = Encoding.UTF8.GetBytes(LMStudio.SnapshotJson());
                     mime = "application/json; charset=utf-8";
                 }
                 else if (path == "/api/reports")
@@ -1174,18 +1183,38 @@ function poll(){
     try{render(JSON.parse(x.responseText))}catch(e){setMeta('<span class=err>bad state json</span>')}};
   x.onerror=function(){setMeta('<span class=err>server unreachable</span>')};x.send();
   if(mode==='kobolds' && pollSeq%2===1) rich(insts[sel]?insts[sel].name:''); // stats every 2nd poll (~6s)
-  if(mode==='serve'){ ollamaFetch(); }
+  if(mode==='serve'){ ollamaFetch(); lmFetch(); }
 }
-// ---- AI server (external host, adopted via Ollama) ----------------------
-// Status + controls + model picker, refreshed only while the tab is open
-// (the Ollama manager caches scans server-side; this fetch is one cheap JSON
-// that already carries everything). Ollama is the only external host now — the
-// old kk-serve python companion was removed.
+// ---- AI server (external hosts, adopted via Ollama / LM Studio) ---------
+// Status + controls + model picker per host, refreshed only while the tab is
+// open (the watchers cache scans server-side; each fetch is one cheap JSON
+// that already carries everything). The old kk-serve python companion was
+// removed; Ollama and LM Studio are the two adoptable hosts.
 var ollamaData=null;
 function ollamaFetch(){
   var x=new XMLHttpRequest();x.open('GET','/api/ollama');
   x.onload=function(){try{ollamaData=JSON.parse(x.responseText)}catch(e){ollamaData=null};renderOllama()};x.send();
 }
+function lmFetch(){
+  var x=new XMLHttpRequest();x.open('GET','/api/lmstudio');
+  x.onload=function(){try{lmData=JSON.parse(x.responseText)}catch(e){lmData=null};renderOllama()};x.send();
+}
+function lmAct(action,model){
+  var pl={action:action};if(model!==undefined)pl.model=model;
+  post('/api/lmstudio',pl,function(r){ if(r.ok)setTimeout(lmFetch,300); });
+}
+function lmToggle(id,newval){
+  post('/api/config',{id:id,value:newval},function(r){ if(r.ok)setTimeout(lmFetch,300); });
+}
+// use this model: select writes [LLM].Model immediately; load is only sent
+// for not-loaded models so an already-resident model never pays a reload.
+function lmUse(){
+  var s=document.getElementById('lmsel');if(!s||!s.value)return;
+  var id=s.value;
+  lmAct('select',id);
+  if(window._lmStates&&window._lmStates[id]!=='loaded') lmAct('load',id);
+}
+var lmData=null;
 function ollamaAct(action,model){
   var pl={action:action};if(model!==undefined)pl.model=model;
   post('/api/ollama',pl,function(r){ if(r.ok)setTimeout(ollamaFetch,300); });
@@ -1203,6 +1232,7 @@ function renderOllama(){
   if(o.endpoint)line+=' · endpoint '+esc(o.endpoint);
   line+=' · ctx '+(o.contextLength?esc(o.contextLength):'?');
   if(o.currentModel)line+=' · current '+esc(o.currentModel);
+  if(o.replicas>1)line+=' · '+o.replicas+'× replicas (one per agent)';
   if(o.family)line+=' · fam '+esc(o.family);
   h+='<div class=box>'+line;
   if(o.note)h+='<br><span class=dim>'+esc(o.note)+'</span>';
@@ -1230,6 +1260,43 @@ function renderOllama(){
   }
   h+='</select> <button onclick=ollamaAct(&quot;select&quot;,document.getElementById(&quot;ollsel&quot;).value)>use this model</button>';
   h+='<div class=dim style=font-size:11px>writes [LLM].Model too — takes effect on the next chat turn; model must be running in Ollama to serve</div></div>';
+  // ---- LM Studio (second adoptable host) ----
+  var l=lmData||{};
+  var lst=l.status||'off';
+  var lcls=lst==='adopted'?'ok':(lst==='off'||lst==='waiting-lmstudio')?'dim':'warn';
+  var ll='<b class='+lcls+'>'+esc(lst)+'</b>'+(l.healthy?' <span class=ok>healthy</span>':'');
+  if(l.endpoint)ll+=' · endpoint '+esc(l.endpoint);
+  ll+=' · ctx '+(l.contextLength?esc(l.contextLength):'?');
+  if(l.currentModel)ll+=' · current '+esc(l.currentModel)+(l.currentLoaded?'':' (not loaded)');
+  if(l.replicas>1)ll+=' · '+l.replicas+'× replicas (one per agent)';
+  if(l.family)ll+=' · fam '+esc(l.family);
+  if(l.quantization)ll+=' · '+esc(l.quantization);
+  h+='<h2>LM Studio (external host) <button onclick=lmFetch()>↻ refresh</button></h2>';
+  h+='<div class=box>'+ll;
+  if(l.note)h+='<br><span class=dim>'+esc(l.note)+'</span>';
+  if(l.lastError)h+='<br><span class=err>'+esc(l.lastError)+'</span>';
+  h+='</div>';
+  h+='<div class=box>'
+    +'<button onclick=lmToggle(&quot;LMStudio.Enabled&quot;,'+(l.enabled?'false':true)+')>'+((l.enabled?'disable':'enable')+' adoption')+'</button> '
+    +'<button onclick=lmAct(&quot;refresh&quot;)>refresh models</button> '
+    +'<button onclick=lmToggle(&quot;LMStudio.AutoEndpoint&quot;,'+(l.autoEndpoint?'false':true)+')>'+((l.autoEndpoint?'stop':'take')+' LLM traffic')+'</button>'
+    +' <span class=dim>(traffic: Ollama when adopted, else '+(l.autoEndpoint?'LM Studio (adopted)':'[LLM].Endpoint as configured')+')</span></div>';
+  var lmodels=(l.models&&l.models.data)?l.models.data:[];
+  h+='<h2>LM Studio models</h2><div class=box>';
+  if(!lmodels.length) h+='<div class=dim>No models listed. Start the server in the Developer tab (or <code>lms server start</code>); enable JIT loading there to also list not-loaded models.</div>';
+  window._lmStates={};
+  h+='<select id=lmsel style=width:420px>';
+  var lsel=l.selected||l.currentModel||'';
+  h+='<option value=\'\''+(lsel===''?' selected':'')+'>— not selected —</option>';
+  for(var j=0;j<lmodels.length;j++){var lm=lmodels[j];if(!lm.id)continue;
+    window._lmStates[lm.id]=lm.state;
+    var st=lm.state==='loaded'?' · loaded':' · '+esc(lm.state||'?');
+    var lctx=lm.max_context_length?' · '+lm.max_context_length:'';
+    var lq=lm.quantization?' · '+esc(lm.quantization):'';
+    h+='<option value=\''+esc(lm.id)+'\''+(lsel===lm.id?' selected':'')+'>'+esc(lm.id+st+lctx+lq)+'</option>';
+  }
+  h+='</select> <button onclick=lmUse()>use this model</button>';
+  h+='<div class=dim style=font-size:11px>writes [LLM].Model and loads the model in LM Studio when needed (TTL from [LMStudio].KeepAlive) — takes effect on the next chat turn</div></div>';
   renderBox('serve',h,false);
 }
 window.onload=function(){setNav();};

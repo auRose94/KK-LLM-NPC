@@ -65,8 +65,8 @@ namespace KKLLMNPC
                 // 0. Ollama discovery — tries /api/tags then /api/show. This is the
                 //    richest local source (installed-model list + live context window),
                 //    so we probe it first and skip the Kobold/LMStudio flows when it
-                //    succeeds. If Ollama doesn't answer, we fall through to /model and
-                //    /v1/models below.
+                //    succeeds. If Ollama doesn't answer, we fall through to /model,
+                //    /api/v0/models and /v1/models below.
                 for (int attempt = 0; attempt < probeRetries; attempt++)
                 {
                     TryOllama(baseUrl, apiKey);
@@ -86,7 +86,20 @@ namespace KKLLMNPC
                     Thread.Sleep(probeDelayMs);
                 }
 
-                // 2. Try OpenAI /v1/models (at least gives us the model name)
+                // 2. LM Studio discovery — GET /api/v0/models carries loaded state +
+                //    real max_context_length + quantization in one payload, so it beats
+                //    the plain OpenAI /v1/models below for LM Studio hosts. Strict
+                //    parse: anything that isn't an LM Studio payload is a no-op.
+                for (int attempt = 0; attempt < probeRetries; attempt++)
+                {
+                    TryLMStudio(baseUrl, apiKey);
+                    if (DetectedContextLength > 0 || DetectedModelName != null) break;
+                    if (attempt < probeRetries - 1)
+                        LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/v0/models attempt " + (attempt + 1) + "/" + probeRetries + ", retrying...");
+                    Thread.Sleep(probeDelayMs);
+                }
+
+                // 3. Try OpenAI /v1/models (at least gives us the model name)
                 for (int attempt = 0; attempt < probeRetries; attempt++)
                 {
                     TryOpenAIModels(baseUrl, apiKey);
@@ -96,18 +109,18 @@ namespace KKLLMNPC
                     Thread.Sleep(probeDelayMs);
                 }
 
-                // 3. If no models found at all, warn clearly
+                // 4. If no models found at all, warn clearly
                 if (DetectedModelName == null && AvailableModels.Count == 0)
                 {
                     DetectedError = "NO_MODELS_LOADED";
                     LLMNPCPlugin.Log?.LogError("ModelProbe: NO MODELS LOADED on the server! Load a model in the server UI first.");
-                    LLMNPCPlugin.Log?.LogError("ModelProbe: LM Studio → Developer tab → Load Model.  KoboldCpp → load via GUI or --model flag.");
+                    LLMNPCPlugin.Log?.LogError("ModelProbe: LM Studio → Developer tab → Load Model (or enable JIT loading).  KoboldCpp → load via GUI or --model flag.");
                 }
 
-                // 4. Classify from whatever we gathered
+                // 5. Classify from whatever we gathered
                 ClassifyFromDetected();
 
-                // 5. Discover server capabilities (also retry)
+                // 6. Discover server capabilities (also retry)
                 for (int attempt = 0; attempt < probeRetries; attempt++)
                 {
                     DiscoverServerCapabilities(baseUrl, apiKey);
@@ -248,6 +261,52 @@ namespace KKLLMNPC
             catch (Exception e)
             {
                 LLMNPCPlugin.Log?.LogInfo("ModelProbe /model: " + e.Message);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // LM Studio — GET /api/v0/models. One payload carries every model with
+        // its load state, real max_context_length (what ContextCore compaction
+        // needs), arch, and quantization. Strict parse (LMStudioArgs), so any
+        // other server answering this path is a no-op. Only fills empty fields —
+        // an earlier Ollama/Kobold discovery keeps priority.
+        // ------------------------------------------------------------------
+        private static void TryLMStudio(string baseUrl, string apiKey)
+        {
+            try
+            {
+                string json = HttpGet(baseUrl + "/api/v0/models", apiKey);
+                var models = LMStudioArgs.ParseModels(json);
+                if (models == null) return;
+
+                foreach (var m in models)
+                {
+                    if (string.IsNullOrEmpty(m.Id)) continue;
+                    var info = new ModelInfo { Id = m.Id, ContextLength = m.MaxContextLength };
+                    AvailableModels.Add(info);
+                }
+
+                var loaded = LMStudioArgs.LoadedModel(models);
+                if (loaded != null)
+                {
+                    if (string.IsNullOrEmpty(DetectedModelName))
+                        DetectedModelName = loaded.Id;
+                    int real = LMStudioArgs.EffectiveContext(loaded, DetectedContextLength);
+                    if (real > 0) DetectedContextLength = real;
+                    if (string.IsNullOrEmpty(DetectedQuantization) && !string.IsNullOrEmpty(loaded.Quantization))
+                        DetectedQuantization = loaded.Quantization;
+                    LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/v0/models: " + models.Count + " model(s), loaded="
+                        + loaded.Id + " ctx=" + DetectedContextLength
+                        + (string.IsNullOrEmpty(loaded.Quantization) ? "" : " quant=" + loaded.Quantization));
+                }
+                else
+                {
+                    LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/v0/models: " + models.Count + " model(s), none loaded");
+                }
+            }
+            catch (Exception e)
+            {
+                LLMNPCPlugin.Log?.LogInfo("ModelProbe /api/v0/models: " + e.Message);
             }
         }
 

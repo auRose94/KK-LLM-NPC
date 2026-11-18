@@ -1667,7 +1667,28 @@ namespace KKLLMNPC
             if (a0.ToLowerInvariant() == "the" || a0.ToLowerInvariant() == "a" || a0.ToLowerInvariant() == "an")
                 return "find what? e.g. find bed";
             Vector3? hit = FindPlaceByName(a0);
-            if (!hit.HasValue) return "not found: " + a0 + " — try: cat stations";
+            if (!hit.HasValue)
+            {
+                // Name the real places instead of a dead end — the 2026-11-17
+                // playtest spiralled on "find shop": not-found listed nothing, so
+                // the model re-issued inventions instead of switching targets.
+                var names = new List<string>();
+                try
+                {
+                    foreach (var o in KeyPlacesList())
+                    {
+                        var pl = o as Dictionary<string, object>;
+                        if (pl == null) continue;
+                        object nobj; string n;
+                        if (pl.TryGetValue("n", out nobj) && (n = nobj as string) != null && n.Length > 0) names.Add(n);
+                        if (names.Count >= 6) break;
+                    }
+                }
+                catch (Exception) { }
+                return "not found: " + a0 + (names.Count > 0
+                    ? " — this world has: " + string.Join(", ", names.ToArray()) + " (see cat places)"
+                    : " — try: cat stations");
+            }
             Vector3 d = hit.Value - _kobold.transform.position;
             d.y = 0;
             string id = null;

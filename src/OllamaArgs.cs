@@ -183,6 +183,42 @@ namespace KKLLMNPC
             return (int)Math.Max(5, Math.Min(60, keepAliveSecs / 2));
         }
 
+        // ------------------------------------------------------------------
+        // replicas — N loaded instances of the same model, one per agent
+        // ------------------------------------------------------------------
+        // Ollama loads by TAG: /api/copy of the base model to a second tag shares
+        // the blobs on disk (zero copy cost) but loads as a SEPARATE runner
+        // instance with its OWN full context window — unlike OLLAMA_NUM_PARALLEL
+        // slots, which split one window. Shard tags carry a kk-suffix that keeps
+        // them valid regardless of whether the base is "name" (implicit :latest)
+        // or "name:tag" (suffix joins the tag part; '.', ':' are tag-legal chars).
+        public static string ShardName(string baseModel, int copyIndex)
+        {
+            if (string.IsNullOrEmpty(baseModel) || copyIndex < 2) return baseModel ?? "";
+            return baseModel.IndexOf(':') >= 0
+                ? baseModel + ".kk" + copyIndex
+                : baseModel + ":kk" + copyIndex;
+        }
+
+        // The full replica set for `replicas` TOTAL instances: [base, copy2..copyN].
+        public static List<string> ReplicaSet(string baseModel, int replicas)
+        {
+            var l = new List<string>();
+            if (string.IsNullOrEmpty(baseModel)) return l;
+            l.Add(baseModel);
+            for (int i = 2; i <= replicas; i++) l.Add(ShardName(baseModel, i));
+            return l;
+        }
+
+        // Round-robin an agent onto a replica. Null/empty set → null (caller uses
+        // the shared base model); negative ordinals count as the first agent.
+        public static string ReplicaFor(List<string> replicas, int agentOrdinal)
+        {
+            if (replicas == null || replicas.Count == 0) return null;
+            if (agentOrdinal < 0) agentOrdinal = 0;
+            return replicas[agentOrdinal % replicas.Count];
+        }
+
         // Navigate a dotted key (e.g. "general.architecture") through nested dictionaries and
         // return the final value as a string. Returns "" if any segment is missing or not a dict.
         private static string Str(Dictionary<string, object> o, string key)

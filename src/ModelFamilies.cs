@@ -675,6 +675,23 @@ namespace KKLLMNPC
         private static string TrailingTokenCandidate(string tail)
         {
             tail = tail.Trim();
+            // Trailing parenthetical commentary ("Name: **Kizzy** (5 letters)") is
+            // decoration, not a second candidate — without this strip the digit
+            // inside the parens fails the tail check below and a COMPLETED answer
+            // is discarded wholesale (gemma loves annotating its picks).
+            int pc = tail.LastIndexOf(')');
+            if (pc >= 0)
+            {
+                int po = tail.LastIndexOf('(', pc);
+                if (po > 0)
+                {
+                    string after = tail.Substring(pc + 1).Trim();
+                    bool afterJunk = after.Length == 0;
+                    for (int i = 0; afterJunk && i < after.Length; i++)
+                        if (char.IsLetterOrDigit(after[i])) afterJunk = false;
+                    if (afterJunk) tail = tail.Substring(0, po).Trim();
+                }
+            }
             int start = 0;
             while (start < tail.Length && !char.IsLetterOrDigit(tail[start])) start++;
             int end = start;

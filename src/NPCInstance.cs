@@ -563,21 +563,61 @@ namespace KKLLMNPC
             return 120;
         }
         private bool _familyResolved;
+        private string _familyName = "";   // model id the current profile was classified from
         internal ModelFamilyProfile FamilyProfile
         {
             get
             {
-                if (!_familyResolved)
+                // Resolve the LIVE model name (adopted host first — a WebUI picker pick
+                // or an LM Studio JIT swap changes it mid-session), then classify.
+                // Re-classify on change: the profile carries per-family mitigations
+                // (gemma markup emission, deepseek CoT suppression, template quirks)
+                // and the 2026-11-17 playtest ran a gemma-26B under a stale deepseek
+                // profile — every gemma mitigation silently absent. Probe fallbacks
+                // mirror EffectiveModel's order without its placeholder dance
+                // ("local-model" classifies to generic either way).
+                string name = Ollama.CurrentModel();
+                if (string.IsNullOrWhiteSpace(name)) name = LMStudio.CurrentModel();
+                if (string.IsNullOrWhiteSpace(name)) name = ModelProbe.DetectedModelName;
+                if (string.IsNullOrWhiteSpace(name)) name = Val(_cfgModel);
+                if (name == null) name = "";
+                if (!_familyResolved || (name.Length > 0 && name != _familyName))
                 {
+                    bool changed = _familyResolved && name != _familyName;
                     _familyResolved = true;
-                    string name = ModelProbe.DetectedModelName;
-                    if (string.IsNullOrEmpty(name)) name = Val(_cfgModel);
+                    _familyName = name;
                     _familyProfile = ModelFamilies.Classify(name);
+                    if (changed)
+                    {
+                        // Tier heuristics read the model name too (the "26b" in it) —
+                        // redo them, ignoring the startup probe's now-stale verdict.
+                        _resolvedTier = null;
+                        _tierIgnoreProbe = true;
+                    }
                     Logger.LogInfo("[" + MyName() + "] model family '" + (string.IsNullOrEmpty(_familyProfile.Family) ? "generic" : _familyProfile.Family)
-                        + "' from '" + (string.IsNullOrEmpty(name) ? "?" : name) + "' — " + _familyProfile.Note);
+                        + "' from '" + (name.Length == 0 ? "?" : name) + "' — " + _familyProfile.Note
+                        + (changed ? " (model changed — re-profiled)" : ""));
                 }
                 return _familyProfile;
             }
+        }
+
+        private volatile bool _tierIgnoreProbe;
+
+        // "<n>b" sizing from the live model id ("...26b..." → medium). Bands match
+        // ModelProbe's name heuristics (≤8b small, 13–34b medium, ≥40b large) so
+        // name and probe verdicts never disagree on the same model.
+        private static string TierFromNameSize(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            var m = System.Text.RegularExpressions.Regex.Match(name.ToLowerInvariant(), @"(\d+(?:\.\d+)?)b\b");
+            if (!m.Success) return null;
+            double b;
+            if (!double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out b)) return null;
+            if (b < 10) return "small";
+            if (b < 40) return "medium";
+            return "large";
         }
 
         private void EnsureTierResolved()
@@ -594,8 +634,19 @@ namespace KKLLMNPC
                     return;
                 }
 
-                // auto: use probe results if available, else default to small
-                if (ModelProbe.DetectedTier != null)
+                // The live model name carries its size ("...26b...") — the most
+                // current signal, and the only one that survives a mid-session swap.
+                string nameTier = TierFromNameSize(_familyName);
+                if (nameTier != null)
+                {
+                    _resolvedTier = nameTier;
+                    Logger.LogInfo("[" + MyName() + "] model tier '" + _resolvedTier + "' from model name '" + _familyName + "'");
+                    return;
+                }
+
+                // auto: use probe results if available, else default to small. After a
+                // mid-session model swap the probe describes the OLD model — skip it.
+                if (!_tierIgnoreProbe && ModelProbe.DetectedTier != null)
                 {
                     _resolvedTier = ModelProbe.DetectedTier;
                     Logger.LogInfo("[" + MyName() + "] model tier resolved to '" + _resolvedTier + "' from probe ("
@@ -1321,52 +1372,88 @@ namespace KKLLMNPC
         }
 
         // One resolution point for every LLM POST: when an external host is
-        // adopted (Ollama with [Ollama].AutoEndpoint on), traffic flows to it
+        // adopted (Ollama or LM Studio with AutoEndpoint on), traffic flows to it
         // without rewriting [LLM].Endpoint under the user. When nothing is
         // adopted, fall through to the configured endpoint exactly as before.
         private string Endpoint()
         {
             // Adopted hand-off servers win over the configured endpoint.
-            // Ollama is checked first (newer host); an unadopted host returns
-            // null and we fall through to the configured endpoint.
+            // Ollama is checked first (it shipped first, so a user running both
+            // keeps today's behavior); an unadopted host returns null and we
+            // fall through to the configured endpoint.
             string s = Ollama.EndpointOverride();
+            if (s == null) s = LMStudio.EndpointOverride();
             return s ?? Val(_cfgEndpoint);
         }
 
         // One resolution point for the payload's model field. [LLM].Model's
         // "local-model" default is an LM Studio-ism (LM Studio ignores the field);
         // Ollama's /v1/chat/completions instead 404s on unknown names ("model
-        // 'local-model' not found"). So when the configured model is the placeholder
-        // (or empty) AND an Ollama is actually answering — the watcher adopted one,
-        // or the startup probe saw /api/tags — send the server's real current model.
-        // A specifically-chosen model always passes through untouched.
+        // 'local-model' not found"). Resolution order:
+        //   1. An adopted host's PER-AGENT replica, when the configured model is the
+        //      placeholder OR names the adopted base itself (or one of its
+        //      instance/shard keys) — a WebUI pick writes the base name into
+        //      [LLM].Model, and that used to short-circuit home untouched, so every
+        //      agent piled onto instance #1 while the adopted :N replicas idled
+        //      (the 2026-11-18 "4 loaded, none used" report).
+        //   2. A specifically-chosen DIFFERENT model always passes through untouched.
+        //   3. Placeholder + no adopted host → the startup probe's model.
+        // Per-agent replica ordinal (assigned lazily on the decision thread; stable
+        // for the instance's life). -1 = not yet claimed.
+        private int _agentOrdinal = -1;
+
         private string EffectiveModel()
         {
             string configured = _cfgModel != null ? _cfgModel.Value : null;
-            if (!string.IsNullOrWhiteSpace(configured)
-                && !string.Equals(configured.Trim(), "local-model", StringComparison.OrdinalIgnoreCase))
-                return configured;
+            string cfgTrim = configured != null ? configured.Trim() : "";
+            bool placeholder = cfgTrim.Length == 0
+                || string.Equals(cfgTrim, "local-model", StringComparison.OrdinalIgnoreCase);
 
-            string watcher = Ollama.CurrentModel();
-            if (!string.IsNullOrWhiteSpace(watcher)) return ResolveModelLog(watcher);
+            // The adopted host may run N replicas of the model (one per agent,
+            // full context window each) — claim this agent's once, round-robin.
+            // One ordinal serves both hosts (only the live endpoint's claim matters).
+            if (_agentOrdinal < 0) _agentOrdinal = Ollama.NextAgentOrdinal();
+            string ollamaReplica = Ollama.AgentModel(_agentOrdinal);
+            string lmReplica = LMStudio.AgentModel(_agentOrdinal);
+            bool ollamaLive = !string.IsNullOrWhiteSpace(ollamaReplica);
+            string watcher = ollamaLive ? ollamaReplica : lmReplica;
+            if (!string.IsNullOrWhiteSpace(watcher))
+            {
+                if (placeholder) return ResolveModelLog(watcher);
+                // Does the configured name point AT the adopted base (or one of its
+                // replica keys)? Then it means "use this model" — and the agent's
+                // own replica of it is the honest interpretation.
+                string hostBase = ollamaLive ? Ollama.CurrentModel() : LMStudio.CurrentModel();
+                if (!string.IsNullOrWhiteSpace(hostBase)
+                    && (string.Equals(cfgTrim, hostBase, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(LMStudioArgs.InstanceBase(cfgTrim), hostBase, StringComparison.OrdinalIgnoreCase) // LM ":N"
+                        || cfgTrim.StartsWith(hostBase + ".", StringComparison.OrdinalIgnoreCase))) // Ollama ".kkN" shard
+                    return ResolveModelLog(watcher);
+                return configured; // a deliberately different model — untouched
+            }
+
+            if (!placeholder) return configured;
             string probed = ModelProbe.DetectedModelName;
             if (!string.IsNullOrWhiteSpace(probed)) return ResolveModelLog(probed);
             return configured; // nothing known — send as-is; the 404 body names the model
         }
 
-        private static bool _modelResolutionLogged;
+        private static readonly HashSet<string> _modelResolutionLoggedNames = new HashSet<string>();
         private static string ResolveModelLog(string resolved)
         {
-            if (!_modelResolutionLogged)
+            // Once per DISTINCT name: with replicas, every agent may resolve
+            // differently, and "which instance is this kobold using" is exactly
+            // the question a playtest asks of the log.
+            lock (_modelResolutionLoggedNames)
             {
-                _modelResolutionLogged = true;
-                try
-                {
-                    LLMNPCPlugin.Log?.LogInfo("model: sending '" + resolved
-                        + "' — placeholder 'local-model' resolved against the Ollama endpoint");
-                }
-                catch (Exception) { }
+                if (!_modelResolutionLoggedNames.Add(resolved)) return resolved;
             }
+            try
+            {
+                LLMNPCPlugin.Log?.LogInfo("model: sending '" + resolved
+                    + "' — resolved against the adopted host (per-agent when replicas are live)");
+            }
+            catch (Exception) { }
             return resolved;
         }
 

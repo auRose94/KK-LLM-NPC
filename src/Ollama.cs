@@ -35,6 +35,7 @@ namespace KKLLMNPC
         private static ConfigEntry<int> _cfgPollInterval;
         private static ConfigEntry<string> _cfgSelectedModel;
         private static ConfigEntry<string> _cfgKeepAlive;
+        private static ConfigEntry<int> _cfgReplicas;
         // The mod's own [LLM].Model entry, referenced (not re-bound) so a picker
         // pick is reflected into the running LLM immediately.
         private static ConfigEntry<string> _cfgLlmModel;
@@ -54,6 +55,10 @@ namespace KKLLMNPC
         // Keep-alive heartbeat state (watcher thread only).
         private static DateTime _lastKeepAliveUtc = DateTime.MinValue; // last ping ATTEMPT — success or failure, never hammer a slow server
         private static bool _keepAliveLogged;                          // one "heartbeat active" log per session
+        // Replicas (watcher thread maintains; agents read the volatile array).
+        private static volatile List<string> _replicas;  // null/1 = shared base; [0]=base, [1..]=copies
+        private static string _replicaBase = "";         // base model the set was built for
+        private static int _agentSeq;                    // round-robin source for per-agent ordinals
 
         // ------------------------------------------------------------------
         // lifecycle
@@ -75,6 +80,8 @@ namespace KKLLMNPC
                 "The Ollama model the WebUI 'Use this model' picked. Writing this also writes [LLM].Model so it takes effect on the next chat POST. Empty = let /api/tags' current model be used.");
             _cfgKeepAlive = plugin.Config.Bind("Ollama", "KeepAlive", "30m",
                 "Keep the adopted model resident so NPC turns never wait behind a model reload. The watcher pings /api/generate with an empty prompt (Ollama's documented keep-warm call) roughly every half of this window. Accepts Ollama durations ('45s', '30m', '2h'), a bare number (seconds), or '-1' to pin the model in RAM for the whole session. 'off' (or empty) disables the heartbeat — Ollama then unloads after its own ~5m idle and the next turn pays the reload. Pings stop with the game, so '30m' also unloads shortly after you quit.");
+            _cfgReplicas = plugin.Config.Bind("Ollama", "Replicas", 1,
+                "Load this many TOTAL instances of the adopted model and give each agent its own — true parallel turns, each with a FULL context window (the OLLAMA_NUM_PARALLEL alternative SPLITS one window across its slots). Extra instances are created as zero-disk copies via /api/copy (same files, separate loaded runner); each loaded copy takes the model's FULL VRAM, so only set what the card fits — a copy that cannot exist/load is skipped and those agents fall back to the shared instance. Agents are assigned round-robin while the Ollama hand-off is live. 1 = the single shared instance (default). [LMStudio] has the same knob for LM Studio instances.");
             _running = true;
             _watch = new Thread(WatchLoop) { IsBackground = true, Name = "KKLLMNPC-OllamaWatch" };
             _watch.Start();
@@ -186,8 +193,9 @@ namespace KKLLMNPC
                                 try { LLMNPCPlugin.Log?.LogInfo("Ollama /api/show: " + cur + " ctx=" + show.ContextLength); } catch (Exception) { }
                         }
                     }
-                    // Keep-warm heartbeat: empty /api/generate + keep_alive, so a
-                    // quiet stretch never lets Ollama evict the model mid-session.
+                    // Replicas: maintain N loaded copies (copy/prewarm/unload),
+                    // then keep every one of them warm.
+                    MaybeMaintainReplicas(base_, cur);
                     MaybeKeepAlive(base_);
                     PollSleep();
                 }
@@ -222,19 +230,132 @@ namespace KKLLMNPC
             // Stamp the ATTEMPT, not the success: a timed-out ping usually means
             // the server is mid-(re)load — the one situation where retrying fast hurts.
             _lastKeepAliveUtc = DateTime.UtcNow;
-            var payload = new Dictionary<string, object>
+            // Every loaded replica has its OWN idle timer — warm them all, or the
+            // shard nobody's talking to this minute gets evicted mid-session.
+            var names = _replicas;
+            if (names == null || names.Count == 0) names = new List<string> { _currentModel };
+            foreach (var name in names)
             {
-                ["model"] = _currentModel,
-                ["prompt"] = "",
-                ["keep_alive"] = secs, // -1 (pin) or the window in seconds — both native forms
-            };
-            string resp = HttpPost(base_ + "/api/generate", Json.Write(payload), 20000);
-            if (!_keepAliveLogged && resp != null)
+                var payload = new Dictionary<string, object>
+                {
+                    ["model"] = name,
+                    ["prompt"] = "",
+                    ["keep_alive"] = secs, // -1 (pin) or the window in seconds — both native forms
+                };
+                HttpPost(base_ + "/api/generate", Json.Write(payload), 20000);
+            }
+            if (!_keepAliveLogged)
             {
                 _keepAliveLogged = true;
-                try { LLMNPCPlugin.Log?.LogInfo("Ollama keep-alive: " + _currentModel + " stays resident (keep_alive="
+                try { LLMNPCPlugin.Log?.LogInfo("Ollama keep-alive: " + names.Count + " model(s) stay resident (keep_alive="
                     + (secs == -1 ? "-1 (pinned)" : secs + "s") + ", ping every " + every + "s)"); } catch (Exception) { }
             }
+        }
+
+        // ------------------------------------------------------------------
+        // replicas — N loaded instances of the adopted model, one per agent
+        // ------------------------------------------------------------------
+        // Ollama loads by TAG: /api/copy makes a second tag over the same blobs
+        // (zero disk cost) that loads as a SEPARATE runner with its own FULL
+        // context window. The watcher keeps [base, copy2..copyN] existing,
+        // prewarmed (cold loads can take a minute each — doing them here, on the
+        // watcher thread, is the same trade the keep-alive already makes) and,
+        // on a model change or shutdown-to-1, unloaded. A copy that can't be
+        // created (old Ollama, read-only registry) is skipped: those agents fall
+        // back to the shared base rather than failing their turns.
+        private static void MaybeMaintainReplicas(string base_, string cur)
+        {
+            if (string.IsNullOrEmpty(base_) || string.IsNullOrEmpty(cur)) return;
+            int want = _cfgReplicas != null ? _cfgReplicas.Value : 1;
+            if (want < 1) want = 1;
+            if (want > 8) want = 8;
+
+            List<string> have = _replicas;
+            bool sameBase = string.Equals(_replicaBase, cur, StringComparison.Ordinal);
+            if (want == 1)
+            {
+                if (have != null && have.Count > 1) UnloadShards(base_, have);
+                _replicas = null;
+                _replicaBase = "";
+                return;
+            }
+            if (sameBase && have != null && have.Count == want) return; // maintained
+
+            // Model changed (or first run): retire the old copies before building
+            // the new set — otherwise they squat VRAM next to the new model's.
+            if (have != null && have.Count > 1 && !sameBase) UnloadShards(base_, have);
+
+            var set = OllamaArgs.ReplicaSet(cur, want);
+            var live = new List<string> { cur };
+            for (int i = 1; i < set.Count; i++)
+            {
+                string shard = set[i];
+                if (!EnsureShardExists(base_, cur, shard)) continue; // logged inside
+                PrewarmShard(base_, shard);
+                live.Add(shard);
+            }
+            _replicaBase = cur;
+            _replicas = live.Count > 1 ? live : null;
+            if (live.Count > 1)
+                try { LLMNPCPlugin.Log?.LogInfo("Ollama replicas: " + live.Count + " instances of " + cur
+                    + " live — each agent gets its own (full context window each)"); } catch (Exception) { }
+        }
+
+        // Copy the base to the shard tag; a copy that fails because the tag
+        // already exists (previous session) still counts — /api/show confirms it.
+        private static bool EnsureShardExists(string base_, string baseModel, string shard)
+        {
+            var payload = new Dictionary<string, object> { ["source"] = baseModel, ["destination"] = shard };
+            if (HttpPost(base_ + "/api/copy", Json.Write(payload), 20000) != null) return true;
+            var probe = new Dictionary<string, object> { ["model"] = shard };
+            if (HttpPost(base_ + "/api/show", Json.Write(probe), 10000) != null) return true;
+            try { LLMNPCPlugin.Log?.LogWarning("Ollama replicas: shard '" + shard + "' unavailable (copy + show both failed) — agents fall back to the shared instance"); } catch (Exception) { }
+            return false;
+        }
+
+        private static void PrewarmShard(string base_, string shard)
+        {
+            long secs = OllamaArgs.KeepAliveSeconds(_cfgKeepAlive != null ? _cfgKeepAlive.Value : null);
+            var payload = new Dictionary<string, object>
+            {
+                ["model"] = shard,
+                ["prompt"] = "",
+                ["keep_alive"] = secs <= 0 ? 1800L : secs,
+            };
+            // 120s: a cold load of a big model takes tens of seconds — a shorter
+            // timeout would report failure while the load is still succeeding.
+            HttpPost(base_ + "/api/generate", Json.Write(payload), 120000);
+        }
+
+        private static void UnloadShards(string base_, List<string> shards)
+        {
+            for (int i = 1; i < shards.Count; i++) // [0] is the live base — stays
+            {
+                var payload = new Dictionary<string, object>
+                {
+                    ["model"] = shards[i],
+                    ["prompt"] = "",
+                    ["keep_alive"] = 0,
+                };
+                HttpPost(base_ + "/api/generate", Json.Write(payload), 20000);
+            }
+        }
+
+        // The model an AGENT should send: its own replica while the hand-off is
+        // live (a shard name sent anywhere else is a 404), the shared base
+        // otherwise. Round-robin over the live set.
+        internal static string AgentModel(int agentOrdinal)
+        {
+            if (EndpointOverride() == null) return CurrentModel();
+            var r = _replicas;
+            if (r == null || r.Count < 2) return CurrentModel();
+            string pick = OllamaArgs.ReplicaFor(r, agentOrdinal);
+            return string.IsNullOrEmpty(pick) ? CurrentModel() : pick;
+        }
+
+        internal static int NextAgentOrdinal()
+        {
+            return System.Threading.Interlocked.Increment(ref _agentSeq);
         }
 
         private static void PollSleep()
@@ -349,6 +470,8 @@ namespace KKLLMNPC
                 ["endpoint"] = _cfgEndpoint != null ? _cfgEndpoint.Value : "",
                 ["pollIntervalSec"] = _cfgPollInterval != null ? _cfgPollInterval.Value : 10,
                 ["keepAlive"] = _cfgKeepAlive != null ? _cfgKeepAlive.Value : "30m",
+                ["replicas"] = _replicas != null ? _replicas.Count : 1,
+                ["replicaModels"] = _replicas,
                 ["selected"] = selected,
                 ["currentModel"] = _currentModel,
                 ["contextLength"] = ctx,

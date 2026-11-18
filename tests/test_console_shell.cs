@@ -667,6 +667,24 @@ static class ConsoleShellTests
         var r4 = ConsoleTools.ToolCallMarkupLines("```json\n{\"action\":\"say\",\"say\":\"checking\"}\n```");
         Assert(r4.Count == 1 && r4[0] == "echo checking", "fenced act-shape call");
 
+        // gemma-style fenced act blob with a PHRASE action + plan queue (the
+        // 2026-11-17 live session: this exact shape salvaged to NOTHING for minutes —
+        // "look around" fails Canonical and the plan queue was stripped as meta, so
+        // the model's queued speech never happened while it tried to answer the
+        // player's hello six turns in a row).
+        var r5 = ConsoleTools.ToolCallMarkupLines(
+            "```json\n{\"progress\":\"done\",\"why\":\"greet\",\"thought\":\"say hi\",\"action\":\"look around\",\"plan\":[{\"action\":\"look around\"},{\"action\":\"say\",\"text\":\"Hi! I'm Kryza\"}]}\n```");
+        bool hasLook = false, hasSay = false;
+        foreach (var l in r5) { if (l == "look around") hasLook = true; if (l == "echo Hi! I'm Kryza") hasSay = true; }
+        Assert(hasLook, "fenced phrase action recovers (look around)");
+        Assert(hasSay, "fenced plan queue recovers the speech");
+        // single-line fenced variant with a plan (the other observed shape)
+        var r6 = ConsoleTools.ToolCallMarkupLines(
+            "```json {\"action\":\"status\",\"wait\":0.0,\"plan\":[{\"action\":\"say\",\"text\":\"Hi!\"}]} ```");
+        bool hasStatus = false, hasEcho = false;
+        foreach (var l in r6) { if (l == "status") hasStatus = true; if (l == "echo Hi!") hasEcho = true; }
+        Assert(hasStatus && hasEcho, "single-line fenced: action + plan both recovered");
+
         // no markup at all → empty (falls back to regular parsing)
         Assert(ConsoleTools.ToolCallMarkupLines("echo hi\ncd bed").Count == 0, "plain reply → no markup lines");
         Assert(ConsoleTools.ToolCallMarkupLines("{\"reasoning\": \"just thinking\"}").Count == 0, "nameless json → no markup lines");
@@ -685,6 +703,23 @@ static class ConsoleShellTests
         Assert(clean == "cd farm", "Clean converts markup call, got: " + clean);
         var lines = ConsoleShell.ParseReply(clean);
         Assert(lines.Count == 1 && lines[0].Cmd == "cd" && lines[0].Args[0] == "farm", "end-to-end cd farm");
+
+        // gemma's XML tool dialect (2026-11-17 Scamper session): <action>…</action>
+        // with <thought> framing, truncated closes (</>), and bare man()/find() calls.
+        // Every one of these passed through Clean untouched before the unwrap pass.
+        Assert(ConsoleSalvage.Clean("<action>find('water')</action>") == "find('water')", "action tag unwraps");
+        string dialect = "<thought>I will use the find tool.</thought>\n<action>find(target='egg')</action>";
+        Assert(ConsoleSalvage.Clean(dialect) == "find(target='egg')", "thought framing dropped, action kept");
+        string trunc = "<action>find(target='water')</> own command $} own command $]";
+        string truncClean = ConsoleSalvage.Clean(trunc);
+        Assert(truncClean != null && truncClean.Contains("find(target='water')"), "truncated </> close still unwraps");
+        Assert(ConsoleSalvage.Clean("<action>man()</action>") == "man()", "man() unwraps");
+        // a reply with no action/command/tool tags is not touched by the pass
+        Assert(ConsoleSalvage.Clean("<thought>just considering, no command</thought>") != null,
+            "pure thought reply unaffected");
+        // end-to-end: the unwrapped line parses as a real console command
+        var parsedDialect = ConsoleShell.ParseReply(ConsoleSalvage.Clean("<action>man()</action>"));
+        Assert(parsedDialect.Count >= 1 && parsedDialect[0].Cmd == "man", "unwrapped man() parses to the man command");
     }
 
     // ---- plan command parsing ----

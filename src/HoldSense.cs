@@ -31,7 +31,8 @@ namespace KKLLMNPC
             public Kobold Victim;   // non-null when the held thing is a PERSON
             public bool IsPlayerVictim;
             public string Name;
-            public string Kind;     // person/player/fruit/seed/water bucket/watering can/tool/egg/thing
+            public string Kind;     // person/player/fruit/seed/food bucket/water bucket/watering can/tool/egg/thing
+            public ReagentContents Mix;  // buckets: the actual contents (null = unreadable)
             public Vector3 Pos;
             public float Dist;
         }
@@ -111,7 +112,16 @@ namespace KKLLMNPC
             {
                 if (t.GetComponentInParent<Fruit>() != null) { hi.Kind = "fruit"; return; }
                 if (t.GetComponentInParent<Seed>() != null) { hi.Kind = "seed"; return; }
-                if (t.GetComponentInParent<BucketWeapon>() != null) { hi.Kind = "water bucket"; return; }
+                if (t.GetComponentInParent<BucketWeapon>() != null)
+                {
+                    // Buckets are the game's FOOD vessels (BucketWeapon even carries a
+                    // FoodCreateAction) — the 2026-11-17 playtest threw a Burger away
+                    // because every bucket read as "water bucket, contents never run
+                    // out". Read the mix and let it decide the story.
+                    hi.Mix = BucketMix(t);
+                    hi.Kind = MixIsWaterOnly(hi.Mix) ? "water bucket" : "food bucket";
+                    return;
+                }
                 if (t.GetComponentInParent<WateringCanWeapon>() != null) { hi.Kind = "watering can"; return; }
                 if (t.GetComponentInParent<GenericWeapon>() != null) { hi.Kind = "tool"; return; }
                 string nm = (hi.Name ?? "").ToLowerInvariant();
@@ -120,6 +130,40 @@ namespace KKLLMNPC
                 hi.Kind = fw ?? "thing";
             }
             catch (Exception) { hi.Kind = "thing"; }
+        }
+
+        // A bucket's mix, read through BucketWeapon's private 'container' field.
+        // GetContents() is declared on the NoTouchGenericReagentContainer subclass
+        // the game actually puts on buckets; anything else reads as null and the
+        // caller keeps the classic endless-water story.
+        private static ReagentContents BucketMix(Transform t)
+        {
+            try
+            {
+                var bw = t.GetComponentInParent<BucketWeapon>();
+                if (bw == null) return null;
+                var cont = GetField<GenericReagentContainer>(bw, "container");
+                var nt = cont as NoTouchGenericReagentContainer;
+                return nt != null ? nt.GetContents() : null;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // Water-only (or unreadable/empty) → true: the endless-water utility bucket.
+        private static bool MixIsWaterOnly(ReagentContents mix)
+        {
+            try
+            {
+                if (mix == null || mix.Count == 0) return true;
+                foreach (Reagent r in mix)
+                {
+                    ScriptableReagent sr;
+                    string n = (Database<ScriptableReagent>.TryGetAsset((short)r.id, out sr) && sr != null) ? sr.name : null;
+                    if (string.IsNullOrEmpty(n) || !n.Equals("Water", StringComparison.OrdinalIgnoreCase)) return false;
+                }
+                return true;
+            }
+            catch (Exception) { return true; }
         }
 
         // One line explaining the held thing + its physics, so the model learns the
@@ -135,6 +179,8 @@ namespace KKLLMNPC
                     return basePart + " — that is ANOTHER PERSON, not an item; let them go with drop when they ask, never throw them unless they ask to be thrown";
                 case "fruit": return basePart + " — blends when it enters a blender's intake; can be eaten";
                 case "seed": return basePart + " — plantable: hold/drop it within ~1m of bare soil, then use it";
+                case "food bucket": return basePart + " — holding " + (DescribeContents(h.Mix) ?? "a mix")
+                    + ": FOOD/DRINK, and what is in it is ALL there is (not the endless water bucket). Pour/splash it where it counts, drop it into a blender intake, or share it";
                 case "water bucket": return basePart + " — throw/activate SPRAYS ~10ml water blobs; contents never run out; dropping just sets the bucket down";
                 case "watering can": return basePart + " — throw/activate squirts water at what you aim at";
                 case "tool": return basePart + " — throw/activate fires/uses it";

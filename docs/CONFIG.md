@@ -60,6 +60,7 @@ AutoEndpoint = true            ; route LLM + vision-fallback POSTs to the adopte
 SelectedModel=                ; what 'Use this model' picked; also writes [LLM].Model
 PollIntervalSec = 10
 KeepAlive    = 30m             ; keep the model resident — empty-ping /api/generate every half-window
+Replicas     = 1               ; N loaded instances of the model, one per agent (VRAM permitting)
 ```
 
 | Key | Default | Range | Purpose |
@@ -70,10 +71,46 @@ KeepAlive    = 30m             ; keep the model resident — empty-ping /api/gen
 | `PollIntervalSec` | `10` | — | How often the watcher probes the Ollama `/api/tags` + `/api/show`. |
 | `SelectedModel` | *(empty)* | — | The Ollama model the WebUI 'Use this model' picked. Writing this also writes `[LLM].Model` so it takes effect on the next chat POST. Empty = use the model Ollama is currently serving. |
 | `KeepAlive` | `30m` | `Ns`/`Nm`/`Nh`, bare seconds, `-1`, `off` | Keep the adopted model resident so NPC turns never wait behind a reload: the watcher pings `/api/generate` with an empty prompt + this `keep_alive` (Ollama's documented keep-warm call) roughly every half of the window. `-1` pins the model in RAM for the whole session; `off` restores Ollama's own ~5m idle unload. Pings stop when the game exits, so the default unloads shortly after you quit. |
+| `Replicas` | `1` | 1–8 | Load this many TOTAL instances of the adopted model and give each agent its own — true parallel turns, each with a FULL context window (the `OLLAMA_NUM_PARALLEL` alternative SPLITS one window across its slots). Extra instances are created as zero-disk copies via `/api/copy` (same files, separate loaded runner — each loaded copy takes the model's FULL VRAM, so only set what the card fits); a copy that can't exist/load is skipped and those agents fall back to the shared instance. Agents are assigned round-robin while the Ollama hand-off is live; every replica gets keep-alive pings; a model change unloads the old copies first. |
 
 The **installed models** picker lists every local model (`ollama pull` to add one); **use this model**
 hot-swaps the served model. Adoption is opt-in and reversible — `[LLM].Endpoint` is left untouched,
 so pointing back at any other endpoint is a one-line config change.
+
+### External host (LM Studio)
+
+**LM Studio** gets the same adoption treatment (v1.4.0): the mod watches an already-running LM
+Studio server through its native `/api/v0/models` — one payload that carries every model with its
+load state, REAL context window (feeds context compaction), arch, and quantization — and with
+`AutoEndpoint` on (default) routes the action model through it. **When both an Ollama and an LM
+Studio are adopted, Ollama takes the traffic** (it shipped first, so nobody's working setup flips).
+Two things go beyond Ollama: **use this model** actually loads the picked model in LM Studio
+(via its load API, with a TTL from `KeepAlive`), and with JIT loading enabled LM Studio will
+even load the model the mod names on the fly. LM Studio ALSO supports multiple loaded
+instances of one model — the Nth carries `:N` in its name (`model`, `model:2`, …) — so
+`Replicas` works here too (see below). Server auth (0.4+) requires the token in
+`[LLM].ApiKey` or every probe 401s. Toggle it in the WebUI's **AI server** tab:
+
+```ini
+[LMStudio]
+Enabled      = true            ; adopt an externally-running LM Studio (default ON)
+Endpoint     = http://127.0.0.1:1234
+AutoEndpoint = true            ; route LLM POSTs to the adopted LM Studio when no Ollama is (default ON)
+SelectedModel=                ; what 'Use this model' picked; also writes [LLM].Model
+PollIntervalSec = 10
+KeepAlive    = 30m             ; keep the model resident — 1-token completion resets the idle TTL
+Replicas     = 1               ; N loaded instances (model, model:2, …), one per agent
+```
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `Enabled` | `true` | bool | Adopt an externally-running LM Studio (the game can't launch one under Proton). ON by default: the mod watches your LM Studio for models and can route the action model through it. With no LM Studio running it just idles (`healthy=false`). |
+| `Endpoint` | `http://127.0.0.1:1234` | — | LM Studio base URL (host:port). A full `/v1/chat/completions` suffix is accepted and stripped. Serve from LM Studio's Developer tab (or `lms server start`). |
+| `AutoEndpoint` | `true` | bool | When an LM Studio is adopted + healthy (and no Ollama is), route LLM POSTs to it regardless of `[LLM].Endpoint` (hand-off with no config editing after a restart). Off = the configured endpoint stays the truth. |
+| `PollIntervalSec` | `10` | — | How often the watcher probes the LM Studio `/api/v0/models`. |
+| `SelectedModel` | *(empty)* | — | The LM Studio model the WebUI 'Use this model' picked. Writing this also writes `[LLM].Model` so it takes effect on the next chat POST. Empty = use whatever LM Studio has loaded. |
+| `KeepAlive` | `30m` | `Ns`/`Nm`/`Nh`, bare seconds, `-1`, `off` | Keep the adopted model resident so NPC turns never wait behind a load. LM Studio auto-evicts JIT-loaded models after their idle TTL (default 60m) and the TTL resets on every request — so the watcher sends a 1-token completion roughly every half of this window. `-1` keeps it resident for the whole session (15m cadence); `off` disables the heartbeat. GUI-loaded models have no TTL and stay resident on their own. |
+| `Replicas` | `1` | 1–8 | Parallel turns: every LOADED instance of the adopted model (its `<model>:N` keys — **manual UI loads are adopted automatically**) joins the agent pool, one instance per agent with a full context window each. This value only says "ensure at least N": when fewer are loaded, the watcher loads the next missing index (one cold load per poll, TTL from `KeepAlive`) and adopts it once a poll confirms it `loaded`. Only mod-loaded instances are ever auto-unloaded (model change / return to 1) — yours stay. Each loaded instance takes the model's FULL VRAM. |
 
 ## [Intoxication] — Drunk roleplay (2026-11-16)
 
@@ -155,6 +192,8 @@ Potency   = 1.0
 | `WorldMapAutoLayers` | `true` | bool | Auto-detect floor layers from scene Y samples (gap > 1.5m = new layer, cap 16). If false, uses fixed layer count |
 | `WorldMapLayers` | `4` | 1–16 | Fixed layer count (only used when WorldMapAutoLayers = false) |
 | `WorldMapCellsPerFrame` | `48` | ≥1 | World-map cells sampled per frame while building (higher = faster build, more per-frame physics cost) |
+| `WorldMap3D` | `true` | bool | Route `go_to` through the volumetric 3D nav core (sparse voxel columns + true-3D A*, built from the same sampled/cached world map in milliseconds). Handles caves, fall shafts, over/under floors and any floor-stack depth — the legacy layered A* could only switch floors inside one column. On = 3D core with the layered grid as safety fallback; Off = layered A* only |
+| `WorldMapRayDepthM` | `150` | 20–400m | How deep each world-map sampling ray reads below its origin (the old fixed 60m missed anything under tall terrain — deep cave systems need rays that reach them). Takes effect on the NEXT map build: delete the scene's `.kkmap` in `BepInEx/config/kkllmnpc_maps` to force a re-sample |
 
 ## [Needs] — Body State
 

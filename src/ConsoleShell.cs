@@ -171,12 +171,31 @@ namespace KKLLMNPC
             // {"progress":..., "action":"status", "plan":[{...}]} decision form).
             // ToolCallMarkupLines only catches JSON wrapped in opens/controllers;
             // when the whole reply is one JSON act, flatten it to command lines now.
+            // Fence-tolerant: gemma-class models fence the act blob
+            // ("```json\n{...}\n```") — strip the bookends so the whole-reply parse
+            // still catches it. The marker-scan path below can't rescue that shape
+            // (phrase actions like "look around" fail Canonical and the scan gives
+            // up), which is how a model could reply in JSON for minutes with every
+            // intent — speech included — silently discarded.
+            string whole = text.Trim();
+            string unfenced = whole;
+            if (unfenced.StartsWith("```", StringComparison.Ordinal))
+            {
+                int nl = unfenced.IndexOf('\n');
+                if (nl >= 0)
+                {
+                    unfenced = unfenced.Substring(nl + 1);
+                    int close = unfenced.LastIndexOf("```", StringComparison.Ordinal);
+                    if (close >= 0) unfenced = unfenced.Substring(0, close);
+                    unfenced = unfenced.Trim();
+                }
+            }
             try
             {
-                var parsed = Json.Parse(text.Trim());
+                var parsed = Json.Parse(unfenced);
                 if (parsed is Dictionary<string, object> || parsed is List<object>)
                 {
-                    if (AddParsed(text.Trim(), outp)) return outp;
+                    if (AddParsed(unfenced, outp)) return outp;
                 }
             }
             catch (Exception) { }
@@ -244,6 +263,13 @@ namespace KKLLMNPC
 
         private static bool AddOne(Dictionary<string, object> d, List<string> outp)
         {
+            return AddOne(d, outp, 0);
+        }
+
+        // depth 1 = an entry of the act schema's "plan" queue (no further nesting —
+        // a runaway "plan" inside a plan is model noise, not a queue).
+        private static bool AddOne(Dictionary<string, object> d, List<string> outp, int depth)
+        {
             if (d == null) return false;
             // Tool-call shape: {"name":"cd","arguments":{...}} (or function-nested).
             // Act-schema shape: {"action":"say","say":"hi",...} — command in "action".
@@ -254,6 +280,7 @@ namespace KKLLMNPC
             bool actShape = act is string && ((string)act).Length > 0;
             var fn = d.GetValueOrDefault("function") as Dictionary<string, object> ?? d;
             string name = actShape ? (string)act : (fn.GetValueOrDefault("name") ?? d.GetValueOrDefault("name")) as string;
+            bool any = false;
             if (string.IsNullOrEmpty(name))
             {
                 // Not a call after all (prose-like object without a tool name):
@@ -264,30 +291,58 @@ namespace KKLLMNPC
                     var s = kv.Value as string;
                     if (s != null && (best == null || s.Length > best.Length)) best = s;
                 }
-                if (!string.IsNullOrWhiteSpace(best)) { outp.Add(best.Trim()); return false; }
-                return false;
+                if (!string.IsNullOrWhiteSpace(best)) { outp.Add(best.Trim()); }
             }
-            object argsObj = fn.GetValueOrDefault("arguments") ?? fn.GetValueOrDefault("parameters")
-                ?? d.GetValueOrDefault("arguments") ?? d.GetValueOrDefault("args");
-            if (argsObj == null)
+            else
             {
-                // No explicit arguments container: act-schema replies hold the args in
-                // the dict itself; bare tool-shape calls hold them there minus "name".
-                if (actShape) argsObj = d;
-                else
+                object argsObj = fn.GetValueOrDefault("arguments") ?? fn.GetValueOrDefault("parameters")
+                    ?? d.GetValueOrDefault("arguments") ?? d.GetValueOrDefault("args");
+                if (argsObj == null)
                 {
-                    var stripped = new Dictionary<string, object>();
-                    foreach (var kv in d)
-                        if (kv.Key != "name" && kv.Key != "function") stripped[kv.Key] = kv.Value;
-                    argsObj = stripped;
+                    // No explicit arguments container: act-schema replies hold the args in
+                    // the dict itself; bare tool-shape calls hold them there minus "name".
+                    if (actShape) argsObj = d;
+                    else
+                    {
+                        var stripped = new Dictionary<string, object>();
+                        foreach (var kv in d)
+                            if (kv.Key != "name" && kv.Key != "function") stripped[kv.Key] = kv.Value;
+                        argsObj = stripped;
+                    }
+                }
+                string argsStr = argsObj as string;
+                if (argsStr == null && argsObj != null) argsStr = Json.Write(argsObj);
+                string line = ConsoleShell.ToolCallToLine(name, argsStr);
+                if (line == null && depth == 0)
+                {
+                    // PHRASE action ("look around", "go to bed"): the act schema packs
+                    // command + arguments into one string. When the head word resolves
+                    // canonically, the whole phrase IS the command line — without this
+                    // the salvage returns nothing and the reply (speech included) dies.
+                    string head = name.Trim();
+                    int sp = head.IndexOf(' ');
+                    if (sp > 0 && ConsoleShell.Canonical(head.Substring(0, sp)) != null)
+                        line = head;
+                }
+                if (line != null) { outp.Add(line); any = true; }
+            }
+            // PLAN QUEUE: act-schema replies put their real intent in
+            // "plan":[{"action":...},...]. Args flattening must skip "plan" as meta,
+            // but the queue itself deserves its own lines — it is where the model
+            // put its say/sleep/look sequence (the 2026-11-17 gemma session tried to
+            // answer the player's hello for six turns; every plan queue was dropped).
+            if (depth == 0)
+            {
+                object planObj;
+                if (d.TryGetValue("plan", out planObj))
+                {
+                    var plan = planObj as List<object>;
+                    if (plan != null)
+                        foreach (var item in plan)
+                            any |= AddOne(item as Dictionary<string, object>, outp, 1);
                 }
             }
-            string argsStr = argsObj as string;
-            if (argsStr == null && argsObj != null) argsStr = Json.Write(argsObj);
-            string line = ConsoleShell.ToolCallToLine(name, argsStr);
-            if (line == null) return false;
-            outp.Add(line);
-            return true;
+            return any;
         }
 
         // Quote-aware brace matcher. Returns the index of the matching '}' or -1.
@@ -358,6 +413,16 @@ namespace KKLLMNPC
                 DataRecord.MarkSalvage(); // markup the server didn't parse — carried on the next record
                 return string.Join("\n", fromCalls.ToArray());
             }
+            // XML tool dialect (gemma-nsfw's second format after act-JSON):
+            // <action>find('water')</action> with <thought>…</thought> framing and
+            // often TRUNCATED closes (</>). Unwrap tag bodies to command lines —
+            // the 2026-11-17 Scamper session's every reply passed through untouched.
+            var fromTags = UnwrapActionTags(reply);
+            if (fromTags != null)
+            {
+                DataRecord.MarkSalvage();
+                return string.Join("\n", fromTags.ToArray());
+            }
             var outLines = new System.Collections.Generic.List<string>();
             foreach (var rawLine in reply.Split('\n'))
             {
@@ -372,6 +437,95 @@ namespace KKLLMNPC
             }
             if (outLines.Count == 0) return "";
             return string.Join("\n", outLines.ToArray());
+        }
+
+        // XML tool-dialect unwrap: <action>cmd</action> / <command>cmd</command> /
+        // <tool>cmd</tool> bodies become their own lines; anything between tags
+        // survives as narration (dropping markup leftovers). Tolerates gemma's
+        // malformed closes — "</>", "</" + newline, or no close at all — by ending
+        // the body at the first close-tag-ish token or newline. Returns null when
+        // the reply carries no action/command/tool tags (normal replies skip this).
+        private static readonly string[] ActionTagOpens = { "<action", "<command", "<tool" };
+
+        internal static List<string> UnwrapActionTags(string reply)
+        {
+            if (string.IsNullOrEmpty(reply)) return null;
+            // quick reject: any tag open at all?
+            bool any = false;
+            foreach (var open in ActionTagOpens)
+                if (reply.IndexOf(open, System.StringComparison.OrdinalIgnoreCase) >= 0) { any = true; break; }
+            if (!any) return null;
+
+            var outp = new List<string>();
+            bool found = false; // only a VALID tag hit owns the reply; narration-only falls through
+            int i = 0, n = reply.Length;
+            var narration = new System.Text.StringBuilder();
+            while (i < n)
+            {
+                int hit = -1, hitLen = 0;
+                foreach (var open in ActionTagOpens)
+                {
+                    int j = reply.IndexOf(open, i, System.StringComparison.OrdinalIgnoreCase);
+                    if (j < 0 || (hit >= 0 && j >= hit)) continue;
+                    // Boundary: "<tool" must not eat "<tool_call|>" — that's the
+                    // OTHER dialect (JSON marker scan / junk scavenger territory).
+                    int after = j + open.Length;
+                    if (after < n)
+                    {
+                        char c = reply[after];
+                        if (char.IsLetterOrDigit(c) || c == '_' || c == '-') continue;
+                    }
+                    hit = j; hitLen = open.Length;
+                }
+                if (hit < 0) { narration.Append(reply.Substring(i)); break; }
+                narration.Append(reply.Substring(i, hit - i));
+                FlushNarration(narration, outp);
+                found = true;
+                // skip attributes to the tag body
+                int gt = reply.IndexOf('>', hit + hitLen);
+                if (gt < 0) { i = hit + hitLen; continue; }
+                // body ends at the first of </a…, </c…, </t…, </>, newline, or EOS
+                int bodyStart = gt + 1;
+                int end = -1;
+                int close = reply.IndexOf("</", bodyStart, System.StringComparison.OrdinalIgnoreCase);
+                if (close >= 0) end = close;
+                int nl = reply.IndexOf('\n', bodyStart);
+                if (nl >= 0 && (end < 0 || nl < end)) end = nl;
+                string body = (end < 0 ? reply.Substring(bodyStart) : reply.Substring(bodyStart, end - bodyStart)).Trim();
+                if (body.Length > 0) outp.Add(body);
+                i = end < 0 ? n : (reply[end] == '\n' ? end + 1 : SkipCloseTag(reply, end));
+            }
+            FlushNarration(narration, outp);
+            return found ? outp : null;
+        }
+
+        // Advance past a close tag ("</action>", the truncated "</>", or a bare
+        // "</" run) so the next scan starts after it.
+        private static int SkipCloseTag(string s, int close)
+        {
+            int j = close + 2; // past "</"
+            while (j < s.Length && s[j] != '>' && s[j] != '\n') j++;
+            return j < s.Length && s[j] == '>' ? j + 1 : j;
+        }
+
+        // Narration between tags: line-split, markup leftovers dropped (they are
+        // tag framing, not speech — the same rule AddNarration applies to JSON).
+        // A mid-line close tag cuts the line: the head before it is speech and
+        // survives, everything from the markup on is framing.
+        private static void FlushNarration(System.Text.StringBuilder sb, List<string> outp)
+        {
+            if (sb.Length == 0) return;
+            foreach (var raw in sb.ToString().Split('\n'))
+            {
+                string t = raw.Trim();
+                if (t.Length == 0) continue;
+                if (t.StartsWith("<", System.StringComparison.Ordinal)
+                    || t.StartsWith("```", System.StringComparison.Ordinal)) continue;
+                int cut = t.IndexOf("</", System.StringComparison.Ordinal);
+                if (cut >= 0) t = t.Substring(0, cut).Trim();
+                if (t.Length > 0) outp.Add(t);
+            }
+            sb.Length = 0;
         }
 
         // Models that learned the terminal convention still glue the entire turn onto

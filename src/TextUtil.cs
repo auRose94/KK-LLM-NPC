@@ -326,12 +326,39 @@ namespace KKLLMNPC
         // sways*), quoted dialogue ("..."), or an RP placeholder ({{user}}).
         // Plain short thoughts ("check the farm, then bed") have none of those and
         // stay working memory; a block has at least one marker and says it out loud.
-        // Pure + unit-tested (tests/test_textutil.cs).
+        // JSON act blobs are NEVER voice: their own quoted keys ("progress":...)
+        // would otherwise count as dialogue and get SPOKEN — the 2026-11-17 gemma
+        // playtest had kobolds muttering ```json fragments in chat all session.
+        // The console salvages commands from them separately; this keeps them out
+        // of the voice channel. Pure + unit-tested (tests/test_textutil.cs).
         public static bool IsRpResponseBlock(string text)
         {
             if (string.IsNullOrEmpty(text)) return false;
+            if (IsJsonShaped(text)) return false;
+            // XML tool dialect (<action>…</action>, gemma's second format) is never
+            // voice either: its quoted strings are args, and unfiltered the whole
+            // tag line got SPOKEN in chat (2026-11-17 live: 'It's alive!".</thought>
+            // <action>find(...)</action>' reached the player verbatim).
+            if (text.IndexOf("<action", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("<command", StringComparison.OrdinalIgnoreCase) >= 0) return false;
             if (text.IndexOf("{{", StringComparison.Ordinal) >= 0) return true;
             return HasAsteriskAction(text) || HasQuotedDialogue(text);
+        }
+
+        // Fence-stripped, does this text OPEN like a JSON document? Deliberately
+        // conservative: only a '{'/'[' first token counts, so prose that merely
+        // mentions braces later still gets normal RP treatment.
+        internal static bool IsJsonShaped(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            string t = text.TrimStart();
+            if (t.StartsWith("```", StringComparison.Ordinal))
+            {
+                int nl = t.IndexOf('\n');
+                if (nl < 0) return false;
+                t = t.Substring(nl + 1).TrimStart();
+            }
+            return t.Length > 0 && (t[0] == '{' || t[0] == '[');
         }
 
         // Do the starred actions in a block narrate things the game could DO

@@ -230,8 +230,17 @@ namespace KKLLMNPC
             {
                 var heldList = new List<object>();
                 foreach (var h in held)
-                    heldList.Add(new { n = h.Name, kind = h.Kind, d = F(h.Dist), x = F(h.Pos.x), y = F(h.Pos.y), z = F(h.Pos.z),
-                        what = h.Victim != null ? (h.IsPlayerVictim ? "THE PLAYER's body — limp while held; let go when they ask" : "a PERSON (" + h.Name + ") — drop when they ask; never throw unasked") : null });
+                {
+                    string what = null;
+                    if (h.Victim != null)
+                        what = h.IsPlayerVictim ? "THE PLAYER's body — limp while held; let go when they ask" : "a PERSON (" + h.Name + ") — drop when they ask; never throw unasked";
+                    else if (h.Kind == "food bucket")
+                    {
+                        string mix = DescribeContents(h.Mix);
+                        if (!string.IsNullOrEmpty(mix)) what = "contains " + mix + " — food/drink, and that is ALL of it (not the endless water bucket)";
+                    }
+                    heldList.Add(new { n = h.Name, kind = h.Kind, d = F(h.Dist), x = F(h.Pos.x), y = F(h.Pos.y), z = F(h.Pos.z), what = what });
+                }
                 result["holding"] = heldList;
             }
             // Watched, not memorized: what your player is visibly doing right now.
