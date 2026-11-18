@@ -222,6 +222,10 @@ Configuration is documented in full — every section, key, default and range �
 - **`[Memory]` / `[Farming]` / `[Autonomy]`** — long-run behavior
 - **`[LittleTreats]`** — opt-in oddities (nothing on by default), plus
   `[Multiplayer]`, `[Web]`, `[Debug]`, `[DataRecord]`
+- **`[SceneKnowledge]`** — feed the agents a static scene dump (from the
+  KodotKare port tooling) as a world gazetteer: `find`/`go_to` then work
+  map-wide (long-distance search, real paths to far objects) instead of
+  live-senses-only ~30m
 
 Sanity-check a live config file against the documented ranges (it also flags
 keys the docs no longer mention, in either direction):

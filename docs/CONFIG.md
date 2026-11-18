@@ -195,6 +195,26 @@ Potency   = 1.0
 | `WorldMap3D` | `true` | bool | Route `go_to` through the volumetric 3D nav core (sparse voxel columns + true-3D A*, built from the same sampled/cached world map in milliseconds). Handles caves, fall shafts, over/under floors and any floor-stack depth — the legacy layered A* could only switch floors inside one column. On = 3D core with the layered grid as safety fallback; Off = layered A* only |
 | `WorldMapRayDepthM` | `150` | 20–400m | How deep each world-map sampling ray reads below its origin (the old fixed 60m missed anything under tall terrain — deep cave systems need rays that reach them). Takes effect on the NEXT map build: delete the scene's `.kkmap` in `BepInEx/config/kkllmnpc_maps` to force a re-sample |
 
+## [SceneKnowledge] — World gazetteer (scene dumps)
+
+Ingests a static scene-dump (`*.full.json` from the KodotKare port tooling) so
+`find` and `go_to` work map-wide: live senses only reach ~30m, but the dump
+knows every station, nest, egg, soil tile and structure with its world
+position. The file whose `scene` field (or filename) matches the running scene
+loads once per scene on a background thread (a 24MB dump → ~2700 entries in
+~170ms, searches ~6ms). Off or no dump = live-only behavior, unchanged.
+
+```ini
+[SceneKnowledge]
+Enabled = true
+DumpDir =                ; folder holding the *.full.json dumps (empty = off)
+```
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `Enabled` | `true` | bool | Load a scene dump as a static world gazetteer: `find <thing>` resolves map-wide (distance, bearing, ready `go_to x:… z:…`) when live lookup misses; `go_to <name>` falls back to dump coords before "unknown_place"; agents get a one-shot "world intel" grounding event listing the world's contents. |
+| `DumpDir` | *(empty)* | path | Folder holding the dumps. Empty = off. Example: the KodotKare port's `scene_dumps/scene` folder. |
+
 ## [Needs] — Body State
 
 | Key | Default | Range | Purpose |

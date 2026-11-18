@@ -221,3 +221,17 @@ level IS the digestion. Game-side feasibility verified against the decompile:
 4. Substrate transfer: pouring/feeding a prey reagent moves the claim.
 
 Pairs naturally with **reincarnation** (same consume/mind-transfer plumbing).
+
+## Queued design: player regrowth by egg (Rose, 2026-11-18)
+
+An agent can take the player, unbirth them, convert them to an egg, plant
+the egg, and the PLAYER regrows from the grown body. Composes systems that
+all ship today: the agent-takes-player flow (spectate's grab), egg fates
+(egg/belly-egg), the belly-gene rebirth link (offspring reincarnation), and
+egg planting + growth. New pieces needed: an unbirth absorb trigger for the
+PLAYER body (consent-gated like spectate — explicit opt-in act, never a
+brush-by), a player→egg conversion step that carries the player's identity
+(name, memories) onto the egg's rebirth link, and the wake-up path routing
+the player into the grown body with their session restored. Every stage
+should narrate, and the player must be able to abort until the conversion
+completes. Do not weaken the existing double gates while building this.

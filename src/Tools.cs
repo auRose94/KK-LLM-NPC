@@ -261,8 +261,30 @@ namespace KKLLMNPC
             // walk_ray leftovers: ray_deg is a camera-relative heading delta.
             float rd = p.F("ray_deg", float.NaN);
             if (!float.IsNaN(rd)) turn += Mathf.Clamp(rd, -180f, 180f);
+            // Relative direction QoL (v1.8.0): dir=left|right|back|forward — the
+            // human way to say a nudge ("walk left 3"). Left/right become strafes
+            // (sidestep without turning); back turns first. distance (meters)
+            // converts to a duration at the body's nominal pace so the model
+            // never has to guess time-from-distance again.
+            string dir = (p.S("dir", "") ?? "").Trim().ToLowerInvariant();
+            if (dir.Length > 0)
+            {
+                if (dir == "left") { strafe = -Mathf.Abs(speed); speed = 0f; }
+                else if (dir == "right") { strafe = Mathf.Abs(speed); speed = 0f; }
+                else if (dir == "back") { turn += 180f; }
+                else if (dir != "forward") return new { ok = false, reason = "bad_dir", tried = dir, note = "dir: forward | back | left | right" };
+            }
             // Default a 2s burst so a forgotten duration can't make it walk forever.
             float dur = Mathf.Clamp(p.F("duration", 2f), 0.1f, 8f);
+            float dist = p.F("distance", float.NaN);
+            if (!float.IsNaN(dist))
+            {
+                // Distance → duration at the body's nominal pace (~1.6 m/s walk,
+                // ~3 m/s run, measured empirically); clamp 30m so a long trek
+                // still routes through go_to (real pathing, real arrival).
+                float pace = p.B("run", false) ? 3f : 1.6f;
+                dur = Mathf.Clamp(Mathf.Abs(dist) / pace, 0.1f, 20f);
+            }
             bool run = p.B("run", false); // default: walk
             // Jump out of a station first — jumping is how players get out.
             if (jump && IsInAnimationStation())
@@ -282,7 +304,7 @@ namespace KKLLMNPC
             SetMove(speed, strafe, jump, 0f, dur, run);
             if (Mathf.Abs(turn) > 0.001f)
                 lock (_stateLock) { _yawOffsetDeg += turn; }
-            return new { ok = true, speed, jump, turn_deg = turn, duration = dur, run };
+            return new { ok = true, speed, strafe, jump, turn_deg = turn, duration = dur, run, dir = (dir.Length > 0 ? dir : null) };
         }
 
         // FOLLOW MODE: the body stays within a band of the host player (steering is
@@ -452,7 +474,28 @@ namespace KKLLMNPC
                     try { agentPos = (Vector3?)RunOnMainThread(() => (object)AgentBodyPosition(name), 5000); }
                     catch (Exception) { return new { ok = false, reason = "main_thread_busy", tried = name, note = "the main thread did not answer in 5s — try again next turn" }; }
                     if (!agentPos.HasValue)
+                    {
+                        // SCENE DUMP (v1.8.0): last fallback before "unknown" — the
+                        // static gazetteer knows the WHOLE map, so a go_to to a far
+                        // egg/station/structure resolves to real coords + a real
+                        // path (live place lookup only covers ~30m).
+                        try
+                        {
+                            var dumpHit = SceneKnowledge.Nearest(name, _kobold.transform.position.x, _kobold.transform.position.z);
+                            if (dumpHit != null)
+                            {
+                                target = new Vector3(dumpHit.X, _kobold.transform.position.y, dumpHit.Z);
+                                _navTargetName = name;
+                                var arrived2 = false;
+                                try { arrived2 = ToolGoToAwaitArrival(target); } catch (Exception) { }
+                                return new { ok = true, to = name, from_dump = true, x = F(dumpHit.X), z = F(dumpHit.Z),
+                                    note = arrived2 ? "you reached " + name + " (scene-survey location)"
+                                    : "walking to " + name + " (scene-survey location, static)" };
+                            }
+                        }
+                        catch (Exception) { }
                         return new { ok = false, reason = "unknown_place", tried = name, note = "try `cat places` — nests/beds/farm plots and watering cans are listed map-wide — `ps` lists people (players + agents) — or ls for nearby things" };
+                    }
                     target = agentPos.Value;
                     _navTargetName = name;
                     var arrived = false;

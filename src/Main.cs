@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.7.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.8.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -133,6 +133,8 @@ namespace KKLLMNPC
         internal ConfigEntry<int> _cfgMapLayers;
         internal ConfigEntry<bool> _cfgMap3D;
         internal ConfigEntry<float> _cfgMapRayDepth;
+        internal ConfigEntry<bool> _cfgSceneKnowledge;
+        internal ConfigEntry<string> _cfgSceneDumpDir;
         internal ConfigEntry<int> _cfgMaxNPCs;
         internal ConfigEntry<bool> _cfgSpawnMissing;
         internal ConfigEntry<bool> _cfgRadarEnabled;
@@ -195,7 +197,7 @@ namespace KKLLMNPC
         // Relay a shared observation to every live instance's world-event queue (the
         // LLM drains them as [event] lines). Used by PlayerTrail's route narration —
         // one observation, per-instance delivery.
-            internal HarmonyLib.Harmony PatchesHarmony() { return Patches.HarmonyInstance; }
+        internal HarmonyLib.Harmony PatchesHarmony() { return Patches.HarmonyInstance; }
 
         internal void FanoutWorldEvent(string ev)
         {
@@ -578,6 +580,10 @@ namespace KKLLMNPC
                 "Route go_to through the volumetric 3D nav core (sparse voxel columns + true-3D A*, built from the same sampled/cached world map in milliseconds). Handles caves, fall shafts, over/under floors and any floor-stack depth — the old layered A* could only switch floors inside one column. On = 3D core with the layered grid as safety fallback; Off = layered A* only.");
             _cfgMapRayDepth = Config.Bind("Movement", "WorldMapRayDepthM", 150f,
                 "How deep (m) each world-map sampling ray reads below its origin. The old fixed 60m missed anything under tall terrain — deep cave systems need rays that reach them. Takes effect on the NEXT map build: delete the scene's .kkmap in BepInEx/config/kkllmnpc_maps (or nudge WorldMapCellSize) to force a re-sample.");
+            _cfgSceneKnowledge = Config.Bind("SceneKnowledge", "Enabled", true,
+                "Ingest a static scene-dump (world gazetteer) so find/go_to work MAP-WIDE: live senses only reach ~30m, but the dump knows where every station, nest, egg, soil tile and structure sits — 'find my egg' resolves across the whole map and go_to creates a real path to it. Dumps are the *.full.json snapshots from the KodotKare port tooling; the file whose 'scene' field (or filename) matches the running scene is loaded once per scene on a background thread. Off or no dump = live-only behavior, unchanged.");
+            _cfgSceneDumpDir = Config.Bind("SceneKnowledge", "DumpDir", "",
+                "Directory holding the scene-dump *.full.json files. Empty = the gazetteer is off (live senses only). Example: the KodotKare port's scene_dumps/scene folder.");
             _cfgVisionEvery = Config.Bind("Vision", "EveryNTicks", 3, "Run the vision pass every N action ticks (lower = more aware, slower)");
             _cfgVisionPrompt = Config.Bind("Vision", "Prompt",
                 "You are the SPATIAL reasoner for an NPC. Produce a compact SCENE REPORT: (a) landmarks/stations/people in view with a rough bearing, (b) which directions are OPEN to walk (-90 left .. +90 right), (c) any hazard or drop. " +
@@ -785,6 +791,17 @@ namespace KKLLMNPC
                 WorldMap.CellsPerFrame = _cfgMapCpf.Value;
                 WorldMap.Octree3DEnabled = _cfgMap3D.Value;
                 WorldMap.RayDepth = _cfgMapRayDepth.Value;
+            }
+            catch (Exception) { }
+
+            // Scene-dump gazetteer knobs.
+            try
+            {
+                SceneKnowledge.Enabled = _cfgSceneKnowledge.Value;
+                SceneKnowledge.DumpDir = string.IsNullOrWhiteSpace(_cfgSceneDumpDir.Value)
+                    ? "" : _cfgSceneDumpDir.Value.Trim();
+                if (!string.IsNullOrEmpty(SceneKnowledge.DumpDir) && !Directory.Exists(SceneKnowledge.DumpDir))
+                    Logger.LogWarning("SceneKnowledge: DumpDir does not exist: " + SceneKnowledge.DumpDir);
             }
             catch (Exception) { }
 
@@ -1761,6 +1778,18 @@ namespace KKLLMNPC
                 }
             }
             catch (Exception e) { Logger.LogWarning("world map: " + e.Message); }
+
+            // Scene-dump gazetteer (v1.8.0): static world registry from Rose's port
+            // dumps — powers map-wide find/go_to for far objects (live senses only
+            // reach ~30m). Same lifecycle shape as the walk map.
+            try
+            {
+                if (inWorld)
+                    SceneKnowledge.EnsureStarted(_lastSceneName, FanoutWorldEvent);
+                else
+                    SceneKnowledge.Invalidate(null);
+            }
+            catch (Exception e) { Logger.LogWarning("scene knowledge: " + e.Message); }
 
             // Optional top-up (SpawnMissingKobolds): a vanilla world only ever holds the
             // starting pair of AI kobolds — more come from paid deliveries or breeding —

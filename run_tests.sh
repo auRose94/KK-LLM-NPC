@@ -117,6 +117,7 @@ run_headless_suites() {
   run_suite ollama tests/test_ollama.cs -- src/OllamaArgs.cs src/Json.cs
   run_suite lmstudio tests/test_lmstudio.cs -- src/LMStudioArgs.cs src/OllamaArgs.cs src/Json.cs
   run_suite octreenav tests/test_octreenav.cs -- src/OctreeNav.cs src/Constants.cs
+  run_suite sceneknowledge tests/test_sceneknowledge.cs -- src/SceneKnowledgeCore.cs src/Json.cs
   run_suite consent    tests/test_consent.cs -- src/ConsentDetector.cs
 }
 

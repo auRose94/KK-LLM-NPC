@@ -1074,16 +1074,26 @@ namespace KKLLMNPC
                 case "run":
                 case "walk":
                     {
-                        float dur = 2f;
-                        bool side = false; string sideDir = null;
+                        // "walk 3" = 3 seconds (legacy); "walk left 3" = 3 METERS
+                        // left (a direction + bare number is naturally a distance);
+                        // explicit suffixes always win: "5m" meters, "5s" seconds.
+                        float dur = -1f; float dist = -1f;
+                        string dir = null;
                         foreach (var t in a)
                         {
+                            var s = t.Trim().ToLowerInvariant();
                             float f;
-                            if (float.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) dur = f;
-                            else if (t == "left" || t == "right") { side = true; sideDir = t; }
+                            if (s.EndsWith("m") && float.TryParse(s.Substring(0, s.Length - 1), NumberStyles.Float, CultureInfo.InvariantCulture, out f)) dist = f;
+                            else if (s.EndsWith("s") && float.TryParse(s.Substring(0, s.Length - 1), NumberStyles.Float, CultureInfo.InvariantCulture, out f)) dur = f;
+                            else if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f))
+                            {
+                                if (dir != null) dist = f; else dur = f;
+                            }
+                            else if (s == "left" || s == "right" || s == "back" || s == "forward") dir = s;
                         }
-                        d["duration"] = dur;
-                        if (side) d["strafe"] = sideDir == "left" ? -1f : 1f;
+                        if (dir != null) d["dir"] = dir;
+                        if (dist >= 0f) d["distance"] = dist;
+                        if (dur >= 0f) d["duration"] = dur;
                     }
                     break;
                 case "turn":
@@ -1669,6 +1679,33 @@ namespace KKLLMNPC
             Vector3? hit = FindPlaceByName(a0);
             if (!hit.HasValue)
             {
+                // SCENE DUMP (v1.8.0): the static world gazetteer knows the WHOLE
+                // map — live place lookup only covers ~30m. A dump hit answers
+                // long-distance search ("find my egg" across the map) with a
+                // ready go_to.
+                try
+                {
+                    if (SceneKnowledge.Ready && IsAlive(_kobold))
+                    {
+                        var px = _kobold.transform.position;
+                        var hits = SceneKnowledge.Search(a0, px.x, px.z, 3);
+                        if (hits != null && hits.Count > 0)
+                        {
+                            var sb2 = new StringBuilder();
+                            foreach (var h in hits)
+                            {
+                                Vector3 dv = new Vector3(h.X, 0, h.Z) - new Vector3(px.x, 0, px.z);
+                                sb2.Append(h.Name)
+                                    .Append(" — ").Append(F(dv.magnitude)).Append("m ").Append(RelBearing(dv))
+                                    .Append(" at (").Append(F(h.X)).Append(", ").Append(F(h.Z))
+                                    .Append(") — go_to x:").Append(F(h.X)).Append(" z:").Append(F(h.Z)).Append('\n');
+                            }
+                            sb2.Append("(from the scene survey — static positions)");
+                            return sb2.ToString().TrimEnd();
+                        }
+                    }
+                }
+                catch (Exception) { }
                 // Name the real places instead of a dead end — the 2026-11-17
                 // playtest spiralled on "find shop": not-found listed nothing, so
                 // the model re-issued inventions instead of switching targets.

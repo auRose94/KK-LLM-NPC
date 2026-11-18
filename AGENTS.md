@@ -182,6 +182,15 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
   crash-reporter opt-out, mod-aware player-model persistence (re-apply the
   player's last model after EnsureModsAreLoadedThenChangePlayer), sandbox
   console command pack (spawn/god/time manipulation for players).
+- 2026-11-18 night **v1.8.0: SceneKnowledge world gazetteer (deployed)** —
+  ingests Rose's KodotKare port scene dumps (`[SceneKnowledge] DumpDir`,
+  `*.full.json`, scene-matched, background parse: 24MB→~2700 entries in
+  ~170ms) as a STATIC WORLD GAZETTEER: `find` falls back to map-wide dump
+  search (distance/bearing/ready go_to coords), `go_to` falls back to dump
+  coords before "unknown_place", boot "world intel" grounding event.
+  Plus `walk <dir> <m>` (direction+distance QoL: left/right strafe, back
+  turns, meters not seconds). Queued design in docs/VORE.md: player
+  regrowth by egg (unbirth → egg → plant → grow, consent-gated chain).
 - 2026-11-18 **v1.6.0: on-demand replicas (deployed)** — instances scale with
   the LIVE agent population (`min(Replicas, agents)`, both hosts): the Nth
   agent spawns its instance at thread creation (cold load lands while it

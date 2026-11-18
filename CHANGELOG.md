@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-11-18
+
+The scene dump becomes the agents' map. Plus directional walk.
+
+### Added (2026-11-18 evening — SceneKnowledge: the world gazetteer)
+
+Rose's port tooling produces per-scene `*.full.json` dumps (every object,
+its worldPosition, 3k+ nodes per scene). The mod now ingests them as a
+**static world gazetteer**:
+
+- **Map-wide `find`** — "find my egg" resolves against the dump registry
+  when (and only when) live lookup misses, returning the nearest matches
+  with distance, bearing, and a ready `go_to x:… z:…`. Long-distance search
+  works; no more blind treks.
+- **`go_to` to static locations** — name resolution falls back to the dump
+  before answering "unknown_place", so `go_to egg`/`go_to blender`/`go_to
+  <any structure>` creates a REAL path across the map.
+- **Grounding** — once the dump lands, the agents get a one-shot "world
+  intel" event ("this area holds 42 eggs, 6 nests, 155 stations…"), so the
+  world's shape is known, not guessed.
+- Files: `[SceneKnowledge] DumpDir` points at the dumps folder; the file
+  whose `scene` field (or filename) matches the running scene loads once
+  per scene on a background thread (24MB → 2682 entries in ~170ms, search
+  ~6ms, verified live). Off or no dump = live-only behavior, unchanged.
+- **Directional walk** — `walk left 3` now means 3 METERS left (direction +
+  bare number = distance; `5m`/`5s` suffixes explicit; left/right strafe
+  without turning, back turns first). `walk <dir> <m>` ends the
+  turn-guessing hassle from tonight's session.
+
+### Queued design (from the same session)
+
+- **Player regrowth by egg** (Rose's idea): agent can unbirth the player →
+  convert them to an egg → plant it → the player regrows from it. Composes
+  the shipped systems (agent-takes-player, egg fates, belly-gene rebirth
+  links, planting) into a new consent-gated chain — design in docs/VORE.md.
+
 ## [1.7.0] — 2026-11-18
 
 New project direction: **stability + quality of life** — dissecting the whole
