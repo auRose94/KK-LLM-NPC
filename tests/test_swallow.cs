@@ -289,7 +289,8 @@ internal static class TestSwallow
         Eq("Cum", SwallowLogic.NextEffect(SwallowEffect.Milk).ToString(), "milk → cum cycles");
         Eq("MilkHeld", SwallowLogic.NextEffect(SwallowEffect.Cum).ToString(), "cum → heldmilk cycles (ghost milk)");
         Eq("CumHeld", SwallowLogic.NextEffect(SwallowEffect.MilkHeld).ToString(), "heldmilk → heldcum cycles");
-        Eq("Egg", SwallowLogic.NextEffect(SwallowEffect.CumHeld).ToString(), "heldcum → egg cycles");
+        Eq("Endo", SwallowLogic.NextEffect(SwallowEffect.CumHeld).ToString(), "heldcum → endo cycles");
+        Eq("Egg", SwallowLogic.NextEffect(SwallowEffect.Endo).ToString(), "endo → egg cycles");
         Eq("EGG", SwallowLogic.EffectLabel(SwallowEffect.Egg), "egg label");
         Eq("BELLY-EGG", SwallowLogic.EffectLabel(SwallowEffect.BellyEgg), "bellyegg label");
         Eq("GROW", SwallowLogic.EffectLabel(SwallowEffect.Grow), "grow label");
@@ -373,15 +374,26 @@ internal static class TestSwallow
         True(SwallowLogic.BellyBulge(1f, 0.5f) < SwallowLogic.BellyBulge(1f, 0f),
             "bulge shrinks monotonically with progress");
 
-        // RegrowGate: the player-regrowth-by-egg consent checks (v1.8.0 design
-        // shipped 2026-11-18 night) — vore armed, agent act enabled, and the
-        // player's OWN destination must be pussy (unbirth; the destination is
-        // theirs to choose, never the agent's).
-        Eq(null, SwallowLogic.RegrowGate(true, true, true, SwallowDestination.Pussy), "regrow: full consent passes");
-        True(SwallowLogic.RegrowGate(false, true, true, SwallowDestination.Pussy) != null, "regrow: vore off gates");
-        True(SwallowLogic.RegrowGate(true, false, true, SwallowDestination.Pussy) != null, "regrow: agent-eat off gates");
-        True(SwallowLogic.RegrowGate(true, true, false, SwallowDestination.Mouth) != null, "regrow: mouth destination gates");
-        True(SwallowLogic.RegrowGate(true, true, false, SwallowDestination.Off) != null, "regrow: off destination gates");
+        // RegrowGate: the player-regrowth-by-egg consent checks (v1.8.0; loosened
+        // v1.9.1 — the game's own mechanics supersede ours: male pregnancy routes
+        // eggs anally, so ANY player-picked hole except mouth/off passes).
+        Eq(null, SwallowLogic.RegrowGate(true, true, SwallowDestination.Pussy), "regrow: pussy passes");
+        Eq(null, SwallowLogic.RegrowGate(true, true, SwallowDestination.Anal), "regrow: anal passes (male egg routing)");
+        Eq(null, SwallowLogic.RegrowGate(true, true, SwallowDestination.Nipple), "regrow: nipple passes");
+        Eq(null, SwallowLogic.RegrowGate(true, true, SwallowDestination.Dick), "regrow: dick passes");
+        True(SwallowLogic.RegrowGate(false, true, SwallowDestination.Pussy) != null, "regrow: vore off gates");
+        True(SwallowLogic.RegrowGate(true, false, SwallowDestination.Pussy) != null, "regrow: agent-eat off gates");
+        True(SwallowLogic.RegrowGate(true, true, SwallowDestination.Mouth) != null, "regrow: mouth excluded");
+        True(SwallowLogic.RegrowGate(true, true, SwallowDestination.Off) != null, "regrow: off excluded");
+
+        // Endo labels + parse words (RimVore-2 Hold parity).
+        Eq("ENDO", SwallowLogic.EffectLabel(SwallowEffect.Endo), "endo: label");
+        Eq(SwallowEffect.Endo, SwallowLogic.NextEffect(SwallowEffect.CumHeld), "endo: cycle reaches endo after heldcum");
+        Eq(SwallowEffect.Egg, SwallowLogic.NextEffect(SwallowEffect.Endo), "endo: cycle wraps to egg");
+        SwallowEffect mEndo; bool cEndo, badEndo;
+        True(SwallowLogic.TryParseEffect("endo", out mEndo, out cEndo, out badEndo) && mEndo == SwallowEffect.Endo, "endo: parse 'endo'");
+        True(SwallowLogic.TryParseEffect("hold", out mEndo, out cEndo, out badEndo) && mEndo == SwallowEffect.Endo, "endo: parse 'hold'");
+        True(SwallowLogic.TryParseEffect("non-fatal", out mEndo, out cEndo, out badEndo) && mEndo == SwallowEffect.Endo, "endo: parse 'non-fatal'");
 
         if (_failed == 0) Console.WriteLine("test_swallow: all OK");
         else Console.WriteLine("test_swallow: " + _failed + " failure(s)");

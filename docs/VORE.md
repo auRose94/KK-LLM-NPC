@@ -222,6 +222,17 @@ level IS the digestion. Game-side feasibility verified against the decompile:
 
 Pairs naturally with **reincarnation** (same consume/mind-transfer plumbing).
 
+## Non-fatal vore — Endo mode (2026-11-18 night, RimVore-2 Hold parity)
+
+RimVore-2's Hold goal ("temporarily store… the pawn inside is intact, not
+contributing anything to the pred other than a bulge") as a fate: **Endo**.
+Nothing converts, nothing harms — the prey stays whole in the pred's belly
+(bulge only, full LivePrey narration), digest marks read as "held safe"
+instead of converting, and at the end of the hold they walk out gently
+(`HoldRelease`): whole, warm, exactly the person they were. Kicks and the
+player's SPACE-mash still work as early exits, as always. Cycle it with F8
+or pick it per-agent with `vore_mode: endo|hold|safe|non-fatal`.
+
 ## Player regrowth by egg — SHIPPED (`regrow_player`, 2026-11-18 night)
 
 `regrow_player` (agent act, alongside `eat_player`) runs the whole ritual:
@@ -230,9 +241,11 @@ wakes grown from it — gene-mixed with the carrier, identity and memories
 riding the egg's rebirth link.
 
 Consent shape (unchanged gates, composed): [LittleTreats] SwallowEnabled +
-SwallowAgentEat arm it, and the unbirth framing additionally requires the
-PLAYER's own SwallowDestination = pussy — the destination is theirs to
-choose, so the agent can never steer around it (`SwallowLogic.RegrowGate`).
+SwallowAgentEat arm it, and the destination gate follows the GAME (v1.9.1,
+Rose: "the game's original feature supersedes the mod" — male pregnancy
+routes eggs anally): any player-chosen SwallowDestination except mouth/off
+passes, and the destination is still theirs to choose — the agent can never
+steer around it (`SwallowLogic.RegrowGate`).
 The acting agent's vore fate is pinned to egg through the same validated
 setter the `vore_mode` tool uses (it persists — the conversion reads it at
 completion; change it back afterwards). The success path pushes the full

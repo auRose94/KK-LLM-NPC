@@ -47,6 +47,11 @@ namespace KKLLMNPC
                       // the spray carries them (genes + memories) into whatever receives it
         CumHeld = 7,  // the held load: released only when the holder CUMS — the load
                       // carries them into whatever (or whoever) receives it
+        Endo = 8,    // NON-FATAL HOLD (2026-11-18, RimVore-2 parity — the Hold goal):
+                     // temporary storage, nothing more. The prey stays INTACT and
+                     // unharmed the whole session — no conversion, no reagent, no
+                     // damage — and walks out gently at the end (or the pred lets
+                     // them out early). The bulge is the only souvenir.
     }
 
     internal static class SwallowLogic
@@ -351,16 +356,21 @@ namespace KKLLMNPC
         // REGROW GATE (player-regrowth-by-egg, v1.8.0): the consent + framing
         // checks specific to `regrow_player` — vore armed by the operator, the
         // agent-eats-player act enabled, and the player's own SwallowDestination
-        // set to pussy (unbirth is THE act here; the destination is the player's
-        // consent setting, so the agent can never override it to force this).
-        // Null = pass; otherwise a model-facing reason. Pure + unit-tested.
-        public static string RegrowGate(bool masterOn, bool agentEat, bool holeIsPussy, SwallowDestination dest)
+        // set to anything usable (v1.9.1 loosening, Rose: "the game's original
+        // feature supersedes the mod" — male pregnancy routes eggs anally, so
+        // anal etc. are all valid; only OFF does nothing and MOUTH is excluded
+        // from the egg ritual by design). The destination is the player's
+        // consent setting — the agent can never override it. Null = pass.
+        // Pure + unit-tested.
+        public static string RegrowGate(bool masterOn, bool agentEat, SwallowDestination dest)
         {
             if (!masterOn) return "vore is disabled by the operator ([LittleTreats] SwallowEnabled) — regrow_player needs it armed";
             if (!agentEat) return "regrow_player needs the agent-eats-player act enabled ([LittleTreats] SwallowAgentEat)";
-            if (!holeIsPussy)
-                return "unbirth needs the player's SwallowDestination set to pussy (it is theirs to choose — yours is "
-                    + DestinationLabel(dest) + " right now); ask them to set it, or use eat_player with their current destination";
+            if (dest == SwallowDestination.Mouth)
+                return "the regrow ritual skips the mouth (conversion eggs don't route that way) — the player's SwallowDestination is "
+                    + DestinationLabel(dest) + "; theirs to choose";
+            if (dest == SwallowDestination.Off)
+                return "the player's SwallowDestination is off — nothing goes in anywhere; it is THEIR setting to change";
             return null;
         }
 
@@ -401,6 +411,8 @@ namespace KKLLMNPC
                 case SwallowEffect.Milk: return SwallowEffect.Cum;
                 case SwallowEffect.Cum: return SwallowEffect.MilkHeld;
                 case SwallowEffect.MilkHeld: return SwallowEffect.CumHeld;
+                case SwallowEffect.CumHeld: return SwallowEffect.Endo;
+                case SwallowEffect.Endo: return SwallowEffect.Egg;
                 default: return SwallowEffect.Egg;
             }
         }
@@ -416,6 +428,7 @@ namespace KKLLMNPC
                 case SwallowEffect.Cum: return "CUM";
                 case SwallowEffect.MilkHeld: return "HELD-MILK";
                 case SwallowEffect.CumHeld: return "HELD-CUM";
+                case SwallowEffect.Endo: return "ENDO";
                 default: return "EGG";
             }
         }
@@ -500,6 +513,8 @@ namespace KKLLMNPC
                     m = SwallowEffect.MilkHeld; return true;
                 case "heldcum": case "holdcum": case "load": case "charged":
                     m = SwallowEffect.CumHeld; return true;
+                case "endo": case "hold": case "safe": case "nonfatal": case "non-fatal":
+                    m = SwallowEffect.Endo; return true;
                 default:
                     bad = true; return false;
             }

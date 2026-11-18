@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] — 2026-11-18
+
+### Added (2026-11-18 night — Endo: non-fatal vore, RimVore-2 Hold parity)
+
+Studied Rose's local RimVore-2 install (its Hold goal: "temporarily store…
+the pawn inside is intact, not contributing anything to the pred other than
+a bulge") and built the parity mode:
+
+- **`SwallowEffect.Endo`** — the non-fatal hold. Nothing converts, nothing
+  harms: the prey stays intact in the pred's belly (bulge only, full
+  LivePrey narration), digest marks read "held safe" instead of converting,
+  and at the end of the hold they walk out gently (`HoldRelease` — same
+  cleanup as the vomit release, none of the violence: whole, warm, exactly
+  the person they were). Kicks and the player's SPACE-mash remain early
+  exits. In the F8 cycle after held-cum; per-agent picks accept
+  `vore_mode: endo|hold|safe|non-fatal`.
+
+### Fixed (2026-11-18 night — regrow gate follows the game, not our assumptions)
+
+- **`regrow_player`'s destination gate loosened** (Rose: "the game's
+  original feature supersedes the mod — male pregnancy routes eggs
+  anally"): any player-chosen SwallowDestination now passes except mouth
+  (excluded from the egg ritual by design) and off (nothing goes in
+  anywhere). The destination stays the PLAYER's consent setting either way.
+- Gate signature simplified to take the destination (`RegrowGate(masterOn,
+  agentEat, dest)`); tests updated to the permissive matrix.
+
 ## [1.9.0] — 2026-11-18
 
 ### Added (2026-11-18 night — `regrow_player`: the player-regrowth ritual)

@@ -212,6 +212,7 @@ namespace KKLLMNPC
                         case SwallowEffect.Cum: fate = "they slowly CHURN into cum — your body will spend them"; break;
                         case SwallowEffect.MilkHeld: fate = "they settle as a CHARGE — released only when you are MILKED, riding every drop"; break;
                         case SwallowEffect.CumHeld: fate = "they settle as a CHARGED LOAD — released only when you CUM, riding it into the receiver"; break;
+                        case SwallowEffect.Endo: fate = "they stay SAFE inside you — held, warm, intact; nothing converts, nothing harms — let them out whenever (or they walk free when the hold ends)"; break;
                         default: fate = "an egg carrying their mixed genes pops out of you"; break;
                     }
                     string noun = SwallowLogic.InsideNoun(st.Entry);
@@ -1383,6 +1384,7 @@ namespace KKLLMNPC
             switch (EffectFor(eater))
             {
                 case SwallowEffect.BellyEgg: return "the egg reagent around them waits in your belly — nest-lay them and plant the egg";
+                case SwallowEffect.Endo: return "they stay SAFE inside you — hold them as long as you like, then they walk out unharmed when the hold ends";
                 case SwallowEffect.Grow:
                 case SwallowEffect.Destroy:
                 case SwallowEffect.Milk:
@@ -1405,6 +1407,7 @@ namespace KKLLMNPC
                 case SwallowEffect.Cum: return "the conversion slowly CHURNS them into cum in your belly — spendable fluid carrying their genes (their escape is fighting: they MASH SPACE)";
                 case SwallowEffect.MilkHeld: return "the conversion settles them into you as a HELD charge — no fluid until you are MILKED: then they ride your milk into whatever receives it, genes and memories delivered (a bucket, a pump, a waiting mouth)";
                 case SwallowEffect.CumHeld: return "the conversion settles them into you as a CHARGED LOAD — released only when you CUM: they ride it into whatever (or whoever) receives you — cum into a kobold and their genes may express in whatever grows from it (a fully grown adult, as always in this world)";
+                case SwallowEffect.Endo: return "NON-FATAL HOLD: nothing converts, nothing harms — they stay intact in you, safe, watching your life through your eyes, and when the hold ends they walk out exactly as they came. Your fate is pinned to this; change it with the vore controls if you want a conversion instead";
                 default: return "after conversion an egg pops out at your feet — plant it in soil and they hatch out of it";
             }
         }
@@ -2543,6 +2546,34 @@ namespace KKLLMNPC
             try { ReleaseSwallowed(st); } catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow vomit release: " + e.Message); } catch (Exception) { } }
         }
 
+        // END-OF-HOLD WALK-OUT (Endo fate, RimVore-2 Hold parity): the hold is
+        // up — the pred lets their guest out GENTLY. Same cleanup as the vomit
+        // release, none of the violence: the prey is intact, warm, and walking.
+        private static void HoldRelease(SwallowState st)
+        {
+            try { LLMNPCPlugin.Log.LogInfo("swallow: " + st.Name + "'s hold ended — " + BodyLabel(st.Eater) + " let them out safe"); } catch (Exception) { }
+            try
+            {
+                if (st.EaterNpc != null)
+                    st.EaterNpc.PushWorldEvent("[vore] your hold on " + st.Name + " comes to its gentle end — you let them out the way they came: slow, careful, WHOLE. They emerge warm, slick, and completely fine. A held guest is a guest well kept.");
+                if (st.Npc != null)
+                    st.Npc.PushWorldEvent("[vore] the hold ends — the walls relax and guide you back out the way you came, unhurried. You step into the light UNHARMED: warm, slick, and exactly the person you were. They kept you safe.");
+                if (st.VictimIsPlayer)
+                {
+                    try { Bubble(st.Eater, "The hold ends — you let " + st.Name + " out gently, whole and unharmed."); } catch (Exception) { }
+                    try { SpectateManager.ReleaseFor(null, SpectateLogic.CauseAbort); } catch (Exception) { }
+                }
+                try { Plugin.FanoutWorldEventExcept("[vore] " + BodyLabel(st.Eater) + " lets " + st.Name + " out of their "
+                    + SwallowLogic.InsideNoun(st.Entry) + " gently — whole, warm, and fine.", st.EaterNpc, st.Npc); } catch (Exception) { }
+            }
+            catch (Exception) { }
+            lock (_lock) _active.Remove(st);
+            try { DestroyVirtualPen(st); } catch (Exception) { }
+            try { ClearPreyReagent(st.Eater); } catch (Exception) { }
+            try { ClearBellyBulge(st.Eater); } catch (Exception) { }
+            try { ReleaseSwallowed(st); } catch (Exception e) { try { LLMNPCPlugin.Log.LogWarning("swallow hold release: " + e.Message); } catch (Exception) { } }
+        }
+
         // ------------------------------------------------------------------
         // PLAYER ESCAPE MINI-GAME (2026-11-16, Rose's design): the chat-abort
         // command is GONE — a swallowed PLAYER earns freedom the honest way,
@@ -2997,6 +3028,8 @@ namespace KKLLMNPC
                                 SwallowEffect mode = EffectAt(st);
                                 if (mode == SwallowEffect.Grow)
                                     st.Npc.PushWorldEvent("you are fading — " + BodyLabel(st.Eater) + " body is absorbing you completely. Almost over.");
+                                else if (mode == SwallowEffect.Endo)
+                                    st.Npc.PushWorldEvent("you are HELD — safe, warm, whole; the hold has a timer and nothing here harms you");
                                 else if (mode == SwallowEffect.Destroy)
                                     st.Npc.PushWorldEvent("you are fading fast — almost gone. There is nothing being made from you.");
                                 else
@@ -3352,6 +3385,7 @@ namespace KKLLMNPC
                 case SwallowEffect.Cum: return ChurnToReagent(st, "Cum");
                 case SwallowEffect.MilkHeld: return ChurnToReagent(st, "Milk", true);
                 case SwallowEffect.CumHeld: return ChurnToReagent(st, "Cum", true);
+                case SwallowEffect.Endo: HoldRelease(st); return true;
                 default: return LayEggAtFeet(st);
             }
         }

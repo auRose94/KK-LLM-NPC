@@ -666,7 +666,10 @@ namespace KKLLMNPC
             bool masterOn = plugin._cfgSwallowEnabled != null && plugin._cfgSwallowEnabled.Value;
             bool agentEat = plugin._cfgSwallowAgentEat != null && plugin._cfgSwallowAgentEat.Value;
             var dest = SwallowManager.Destination();
-            string gate = SwallowLogic.RegrowGate(masterOn, agentEat, dest == SwallowDestination.Pussy, dest);
+            // The destination is the PLAYER's consent setting, and the game's own
+            // mechanics supersede any assumption of ours (male pregnancy routes
+            // eggs anally — v1.9.1 loosening): any non-mouth, non-off hole passes.
+            string gate = SwallowLogic.RegrowGate(masterOn, agentEat, dest);
             if (gate != null)
                 return new { ok = false, reason = "gated", note = gate };
 
@@ -687,7 +690,8 @@ namespace KKLLMNPC
                 try { j = Json.Write(res); } catch (Exception) { }
                 bool failed = j != null && j.Contains("\"ok\":false");
                 if (!failed)
-                    PushWorldEvent("[vore] REGROW FLOW begun: the player is converting inside you (unbirth, egg fate). "
+                    PushWorldEvent("[vore] REGROW FLOW begun: the player is converting inside you (taken in through your "
+                        + SwallowLogic.DestinationLabel(dest).ToLowerInvariant() + ", egg fate). "
                         + "When the egg pops at your feet: grab it; then find soil — go_to the nearest bare soil, drop the egg on it, and use it to plant. "
                         + "They will wake GROWN, gene-mixed with you, and their memories travel with them. "
                         + "Narrate every stage to them (echo — they hear you from inside); when they hatch, greet them by name — same person, new body. "
