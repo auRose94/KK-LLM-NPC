@@ -58,6 +58,33 @@ raw RAM was never the limit (117Gi).
 - Startup probe no longer blocks the chainloader (~12s, v1.7.0 async).
 - Stuck-breaker replan storms, vision hammer, salvage loops (v1.5.x–v1.6.0).
 
+## Package currency (checked 2026-11-18, CachyOS / Strix Halo)
+
+Already current: `mesa-git 27.0.0-devel`, `linux-firmware 20261019` (carries
+the gfx1150/MES microcode — the reset path in the incident receipts), kernel
+`linux-cachyos 7.3.5`, `libdrm 2.4.134`, `llvm-libs 23.1.5`. The morning hang
+happened ON this stack — currency is necessary but not sufficient.
+
+The two levers not yet pulled:
+
+1. **NTSYNC** — the kernel module is built and loaded (`CONFIG_NTSYNC=m`),
+   but the game runs stock Proton 11.0-2. Newer Proton builds
+   (`proton-cachyos`, or `PROTON_USE_NTSYNC=1` on stock Proton) switch the
+   game's synchronization primitives from fsync-style emulation to native
+   ntsync — a known fix for CPU-side stalls/hangs under Proton. Change ONE
+   variable at a time so a difference is attributable. Verify the module is
+   actually engaged while playing: `lsmod | grep ntsync` should show a
+   nonzero refcount.
+2. **MangoHud as verification** — pressure-vessel picks the NEWER of the
+   Steam-runtime vs system Mesa, so your mesa-git should win; confirm it
+   rather than assume: `mangohud %command%` in launch options shows the live
+   RADV/driver string plus frametime spikes (a stutter climb is the early
+   warning of the kind of submission storm that precedes a ring timeout).
+
+Optional, advanced: `umr` (AUR) — AMD's GPU register/ring forensics; if a
+hang recurs it can dump what the ring was executing, which turns "driver
+reset, cause unknown" into a filing.
+
 ## When it happens again — collect these
 
 1. `journalctl -k -b -1 | grep -iE "amdgpu|gpu"` (the kernel receipts).
