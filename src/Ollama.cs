@@ -59,6 +59,8 @@ namespace KKLLMNPC
         private static volatile List<string> _replicas;  // null/1 = shared base; [0]=base, [1..]=copies
         private static string _replicaBase = "";         // base model the set was built for
         private static int _agentSeq;                    // round-robin source for per-agent ordinals
+        private static int _shrinkHold;                  // consecutive low-population polls before scaling down
+        private const int ShrinkHoldPolls = 3;           // ~30s at the default 10s poll — don't churn VRAM on flicker
 
         // ------------------------------------------------------------------
         // lifecycle
@@ -81,7 +83,9 @@ namespace KKLLMNPC
             _cfgKeepAlive = plugin.Config.Bind("Ollama", "KeepAlive", "30m",
                 "Keep the adopted model resident so NPC turns never wait behind a model reload. The watcher pings /api/generate with an empty prompt (Ollama's documented keep-warm call) roughly every half of this window. Accepts Ollama durations ('45s', '30m', '2h'), a bare number (seconds), or '-1' to pin the model in RAM for the whole session. 'off' (or empty) disables the heartbeat — Ollama then unloads after its own ~5m idle and the next turn pays the reload. Pings stop with the game, so '30m' also unloads shortly after you quit.");
             _cfgReplicas = plugin.Config.Bind("Ollama", "Replicas", 1,
-                "Load this many TOTAL instances of the adopted model and give each agent its own — true parallel turns, each with a FULL context window (the OLLAMA_NUM_PARALLEL alternative SPLITS one window across its slots). Extra instances are created as zero-disk copies via /api/copy (same files, separate loaded runner); each loaded copy takes the model's FULL VRAM, so only set what the card fits — a copy that cannot exist/load is skipped and those agents fall back to the shared instance. Agents are assigned round-robin while the Ollama hand-off is live. 1 = the single shared instance (default). [LMStudio] has the same knob for LM Studio instances.");
+                "Load UP TO this many instances of the adopted model — scaled ON DEMAND to the live agent count (instance N loads only when a Nth agent exists; extras release VRAM when agents leave), so agents run parallel turns each with a FULL context window (the OLLAMA_NUM_PARALLEL alternative SPLITS one window across its slots). Extra instances are zero-disk copies via /api/copy (same files, separate loaded runner). Each loaded instance takes the model's FULL VRAM: 2 instances + server-side per-model concurrency is the sweet spot for one shared GPU — 4× a multi-GB model can black-screen/crash a machine that drives its display from the same card (seen live); use a second machine or a GPU dedicated to compute if you want more. Agents are assigned round-robin while the Ollama hand-off is live. 1 = the single shared instance (default). [LMStudio] has the same knob.");
+            if (_cfgReplicas.Value >= 3)
+                try { LLMNPCPlugin.Log?.LogWarning("Ollama Replicas=" + _cfgReplicas.Value + ": every loaded instance takes the model's FULL VRAM on the SAME GPU that may be driving your display — 4× a multi-GB model has black-screened a machine here. 2 + per-model server concurrency is the safer shape; consider a second machine or a compute-only GPU."); } catch (Exception) { }
             _running = true;
             _watch = new Thread(WatchLoop) { IsBackground = true, Name = "KKLLMNPC-OllamaWatch" };
             _watch.Start();
@@ -279,24 +283,65 @@ namespace KKLLMNPC
                 _replicaBase = "";
                 return;
             }
-            if (sameBase && have != null && have.Count == want) return; // maintained
-
-            // Model changed (or first run): retire the old copies before building
-            // the new set — otherwise they squat VRAM next to the new model's.
-            if (have != null && have.Count > 1 && !sameBase) UnloadShards(base_, have);
-
-            var set = OllamaArgs.ReplicaSet(cur, want);
-            var live = new List<string> { cur };
-            for (int i = 1; i < set.Count; i++)
+            if (!sameBase)
             {
-                string shard = set[i];
-                if (!EnsureShardExists(base_, cur, shard)) continue; // logged inside
-                PrewarmShard(base_, shard);
-                live.Add(shard);
+                // Model changed (or first run): retire the old copies before
+                // building the new set — otherwise they squat VRAM next to the
+                // new model's.
+                if (have != null && have.Count > 1) UnloadShards(base_, have);
+                _replicas = null;
+                _replicaBase = cur;
+                have = null;
             }
-            _replicaBase = cur;
+
+            // ON-DEMAND (v1.6.0): scale to the LIVE agent population, not the
+            // configured cap — instance N loads only when a Nth agent exists
+            // (a fresh cold load lands while that agent shares the base; the
+            // next query migrates it). Load-balancing: scale down (with a hold,
+            // so a body death/respawn flicker doesn't churn VRAM) too.
+            int target = OllamaArgs.ReplicasForPopulation(want, LLMNPCPlugin.LiveAgentCount);
+            if (have != null && have.Count == target) { _shrinkHold = 0; return; } // maintained
+            if (have != null && have.Count > target)
+            {
+                if (++_shrinkHold < ShrinkHoldPolls) return;
+                _shrinkHold = 0;
+                var shrunk = new List<string>(have);
+                while (shrunk.Count > target)
+                {
+                    var payload = new Dictionary<string, object>
+                    {
+                        ["model"] = shrunk[shrunk.Count - 1],
+                        ["prompt"] = "",
+                        ["keep_alive"] = 0,
+                    };
+                    HttpPost(base_ + "/api/generate", Json.Write(payload), 20000);
+                    shrunk.RemoveAt(shrunk.Count - 1);
+                }
+                _replicas = shrunk.Count > 1 ? shrunk : null;
+                try { LLMNPCPlugin.Log?.LogInfo("Ollama replicas: scaled down to " + target
+                    + " (agents left) — VRAM released"); } catch (Exception) { }
+                return;
+            }
+            _shrinkHold = 0;
+
+            // Scale up: add the next missing shard — ONE cold load per poll
+            // (a second attempt would just queue behind a load in progress).
+            var set = OllamaArgs.ReplicaSet(cur, target);
+            var live = new List<string>(have ?? new List<string> { cur });
+            if (live[0] != cur) live[0] = cur;
+            if (live.Count < set.Count)
+            {
+                string shard = set[live.Count];
+                if (EnsureShardExists(base_, cur, shard)) // failure logged inside — retry next poll
+                {
+                    PrewarmShard(base_, shard);
+                    live.Add(shard);
+                    try { LLMNPCPlugin.Log?.LogInfo("Ollama replicas: instance '" + shard + "' live for agent "
+                        + live.Count + " (on-demand)"); } catch (Exception) { }
+                }
+            }
             _replicas = live.Count > 1 ? live : null;
-            if (live.Count > 1)
+            if (live.Count > 1 && (have == null || have.Count < live.Count) && live.Count == target)
                 try { LLMNPCPlugin.Log?.LogInfo("Ollama replicas: " + live.Count + " instances of " + cur
                     + " live — each agent gets its own (full context window each)"); } catch (Exception) { }
         }

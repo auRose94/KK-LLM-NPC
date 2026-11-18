@@ -227,6 +227,15 @@ internal static class TestOctreeNav
         // straight-leg FIRST — the patch below removes exactly this wall voxel
         Assert(!nav.SegmentOpen(Grid.Wx(0), 0f, Grid.Wz(0), Grid.Wx(7), 0f, Grid.Wz(7)),
             "segment: wall voxel blocks the leg");
+        // tolerance (anti-zig-zag, 2026-11-18): a wall voxel only vetoes a leg
+        // when its CENTER is within the body-radius of the segment — a parallel
+        // lane one column over (0.5m) must stay open, a quarter-meter graze must
+        // still block. The old any-touch veto split legs at grazing voxels and
+        // the A* staircase survived as zig-zag.
+        Assert(nav.SegmentOpen(Grid.Wx(0), 0f, Grid.Wz(5), Grid.Wx(7), 0f, Grid.Wz(5)),
+            "segment: parallel lane 0.5m off the wall stays open");
+        Assert(!nav.SegmentOpen(Grid.Wx(0), 0f, Grid.Wz(4) - 0.15f, Grid.Wx(7), 0f, Grid.Wz(4) - 0.15f),
+            "segment: 0.15m-off graze still blocks");
         var g2 = new Grid(4, 4);
         g2.FloorAll(0, 0, 3, 3, 0f, OctreeNav.Clear);
         var nav2 = g2.Nav();

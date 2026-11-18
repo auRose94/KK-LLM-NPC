@@ -427,10 +427,21 @@ namespace KKLLMNPC
         // straight-leg check — march the segment against the wall-voxel set
         // ------------------------------------------------------------------
         // True when the segment (world coords, chest-height offset applied)
-        // touches no wall VOXEL. Coarse by design: the cheap pre-check before
-        // the physics raycasts (SegmentClear stays the final truth). Unlike the
-        // per-layer quadtree check this one crosses floors — a leg from a ramp
-        // onto an overpass is validated against the walls of BOTH levels.
+        // passes no wall voxel NEAR ENOUGH TO MATTER. A sample landing in a wall
+        // voxel only vetoes the leg when the voxel's CENTER is within one cell
+        // of the segment — matching the ±body-half-width ray lanes' semantics.
+        // The strict any-touch veto (pre-2026-11-18) blocked legs grazing voxel
+        // edges half a meter off the line, and every false veto split a leg —
+        // the A* staircase survived and kobolds walked zig-zag. Coarse by
+        // design: the cheap pre-check before the physics raycasts (SegmentClear
+        // stays the final truth). Unlike the per-layer quadtree check this one
+        // crosses floors — a leg from a ramp onto an overpass is validated
+        // against the walls of BOTH levels.
+        // Veto radius = body half width + margin (mirrors the ±lateral ray lanes
+        // and the simplifier's deviation bound — one notion of "near the line").
+        // A wall voxel whose center is farther than this never splits a leg.
+        internal const float SegmentVetoRadiusM = 0.45f;
+
         public bool SegmentOpen(float x0, float y0, float z0, float x1, float y1, float z1)
         {
             if (_walls.Count == 0) return true;
@@ -442,10 +453,31 @@ namespace KKLLMNPC
             for (int i = 0; i <= steps; i++)
             {
                 float x = x0 + sx * i, y = y0 + sy * i + 0.75f, z = z0 + sz * i;
-                if (_walls.Contains(Pack(VoxX(x), VoxelY(y, _cell), VoxZ(z))))
+                int vx = VoxX(x), vy = VoxelY(y, _cell), vz = VoxZ(z);
+                if (!_walls.Contains(Pack(vx, vy, vz))) continue;
+                // Near-enough-to-matter: distance from the wall voxel's center to
+                // the SEGMENT (3D — the line can slope between floors), not just
+                // "the sample touched the voxel's cell".
+                float cx = _minX + (vx + 0.5f) * _cell;
+                float cy = (vy + 0.5f) * _cell;
+                float cz = _minZ + (vz + 0.5f) * _cell;
+                if (PointSegmentDist(cx, cy, cz, x0, y0 + 0.75f, z0, x1, y1 + 0.75f, z1) <= SegmentVetoRadiusM)
                     return false;
             }
             return true;
+        }
+
+        // Distance from point p to segment ab (3D). Pure.
+        private static float PointSegmentDist(float px, float py, float pz,
+            float ax, float ay, float az, float bx, float by, float bz)
+        {
+            float abx = bx - ax, aby = by - ay, abz = bz - az;
+            float apx = px - ax, apy = py - ay, apz = pz - az;
+            float denom = abx * abx + aby * aby + abz * abz;
+            float t = denom > 1e-9f ? (apx * abx + apy * aby + apz * abz) / denom : 0f;
+            if (t < 0f) t = 0f; else if (t > 1f) t = 1f;
+            float qx = ax + abx * t - px, qy = ay + aby * t - py, qz = az + abz * t - pz;
+            return (float)Math.Sqrt(qx * qx + qy * qy + qz * qz);
         }
 
         // ------------------------------------------------------------------

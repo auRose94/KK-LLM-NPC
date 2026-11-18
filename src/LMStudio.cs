@@ -67,6 +67,8 @@ namespace KKLLMNPC
         private static readonly Dictionary<string, int> _instanceAttempts = new Dictionary<string, int>(); // pending instance → load attempts
         private static readonly HashSet<string> _modLoaded = new HashSet<string>(); // instances the MOD loaded (only these are auto-unloaded)
         private const int MaxInstanceAttempts = 6;
+        private static int _shrinkHold;      // consecutive low-population polls before scaling mod-loaded down
+        private const int ShrinkHoldPolls = 3; // ~30s at the default 10s poll — don't churn VRAM on flicker
 
         // ------------------------------------------------------------------
         // lifecycle
@@ -90,7 +92,9 @@ namespace KKLLMNPC
             _cfgKeepAlive = plugin.Config.Bind("LMStudio", "KeepAlive", "30m",
                 "Keep the adopted model resident so NPC turns never wait behind a model load. LM Studio evicts JIT-loaded models after their idle TTL (default 60m); the watcher sends a 1-token completion (which resets the idle timer) roughly every half of this window. Accepts durations ('45s', '30m', '2h'), a bare number (seconds), or '-1' to keep it resident for the whole session (15m cadence). 'off' (or empty) disables the heartbeat. GUI-loaded models have no TTL and stay resident on their own.");
             _cfgReplicas = plugin.Config.Bind("LMStudio", "Replicas", 1,
-                "Parallel turns: every LOADED instance of the adopted model (its '<model>:N' keys — manual UI loads are adopted automatically) joins the agent pool, one instance per agent with a full context window each. This value only says 'ensure at least N': when fewer are loaded, the watcher loads the next missing index (one cold load per poll, TTL from KeepAlive) and adopts it once a poll confirms it loaded. Only mod-loaded instances are ever auto-unloaded (on model change or a return to 1) — yours stay. Each loaded instance takes the model's FULL VRAM. 1 = single shared instance (default). NOTE: server auth (0.4+) requires the token in [LLM].ApiKey or every probe 401s.");
+                "Load UP TO this many instances of the adopted model — scaled ON DEMAND to the live agent count (the Nth agent spawns its instance; extras the MOD loaded release VRAM when agents leave). Every LOADED instance of the model (its '<model>:N' keys — manual UI loads included) joins the agent pool with a full context window each, but only mod-loaded instances are ever auto-unloaded — yours stay. Each loaded instance takes the model's FULL VRAM: 2 instances + server-side per-model concurrency is the sweet spot for one shared GPU — 4× a multi-GB model can black-screen/crash a machine that drives its display from the same card (seen live); use a second machine or a GPU dedicated to compute if you want more. 1 = single shared instance (default). NOTE: server auth (0.4+) requires the token in [LLM].ApiKey or every probe 401s.");
+            if (_cfgReplicas.Value >= 3)
+                try { LLMNPCPlugin.Log?.LogWarning("LMStudio Replicas=" + _cfgReplicas.Value + ": every loaded instance takes the model's FULL VRAM on the SAME GPU that may be driving your display — 4× a multi-GB model has black-screened a machine here. 2 + per-model server concurrency is the safer shape; consider a second machine or a compute-only GPU."); } catch (Exception) { }
             _running = true;
             _watch = new Thread(WatchLoop) { IsBackground = true, Name = "KKLLMNPC-LMStudioWatch" };
             _watch.Start();
@@ -281,10 +285,11 @@ namespace KKLLMNPC
         // a request to that key hits THAT instance. ADOPTION FIRST: every loaded
         // instance of the base joins the pool, manual UI loads included — the
         // pool is what the server says is live, not what the mod created.
-        // `Replicas` only says "ensure at least N": when fewer are loaded, the
-        // watcher loads the next missing index (ONE attempt per poll — cold
-        // loads are slow), capped per instance. Instances the MOD loaded are
-        // unloaded on teardown; the user's manual ones are never touched.
+        // ON-DEMAND (v1.6.0): the mod loads an extra instance only when the LIVE
+        // AGENT POPULATION needs one (target = min(Replicas, agents)) — the Nth
+        // agent spawns its instance, which is the load-balancing behavior too:
+        // mod-loaded extras beyond the population scale back down (with a hold)
+        // and release VRAM, while USER-loaded instances are never touched.
         private static void MaybeMaintainReplicas(string cur, List<LmStudioModel> models)
         {
             if (string.IsNullOrEmpty(cur)) return;
@@ -312,18 +317,45 @@ namespace KKLLMNPC
             }
 
             // Adopt everything the server says is loaded for this base family.
-            var confirmed = LMStudioArgs.LoadedInstancesOf(models, cur);
-            if (confirmed.Count == 0) confirmed.Add(cur); // nothing loaded yet — the pool is the base
+            var pool = LMStudioArgs.LoadedInstancesOf(models, cur);
+            if (pool.Count == 0) pool.Add(cur); // nothing loaded yet — the pool is the base
 
-            // Ensure the configured count: attempt the next missing index, one
-            // cold load per poll (it shows up as loaded on a later poll and is
-            // adopted then — verification-driven, never trusted blind).
-            if (confirmed.Count < want && confirmed.Count < 8)
+            int target = LMStudioArgs.ReplicasForPopulation(want, LLMNPCPlugin.LiveAgentCount);
+            if (pool.Count > target && _modLoaded.Count > 0)
+            {
+                // Shrink OUR extras (never user loads) after a hold, so a body
+                // death/respawn flicker doesn't churn VRAM.
+                if (++_shrinkHold >= ShrinkHoldPolls)
+                {
+                    _shrinkHold = 0;
+                    var ours = new List<string>();
+                    for (int i = 1; i < pool.Count; i++) // [0] = the live base — stays
+                        if (_modLoaded.Contains(pool[i])) ours.Add(pool[i]);
+                    while (ours.Count > 0 && pool.Count > target)
+                    {
+                        string drop = ours[ours.Count - 1];
+                        ours.RemoveAt(ours.Count - 1);
+                        var body = new Dictionary<string, object> { ["model"] = drop };
+                        HttpPost(_base + "/api/v0/models/unload", Json.Write(body), 20000);
+                        _modLoaded.Remove(drop);
+                        pool.Remove(drop);
+                    }
+                    if (pool.Count <= target)
+                        try { LLMNPCPlugin.Log?.LogInfo("LMStudio replicas: scaled down to " + pool.Count
+                            + " (agents left) — mod-loaded extras released"); } catch (Exception) { }
+                }
+            }
+            else _shrinkHold = 0;
+
+            // Scale up on demand: one cold load per poll when the population
+            // needs an instance the pool doesn't have yet (it joins the pool on
+            // a later poll, once state=loaded confirms it).
+            if (pool.Count < target && pool.Count < 8)
             {
                 for (int i = 2; i <= 8; i++)
                 {
                     string name = LMStudioArgs.InstanceName(cur, i);
-                    if (confirmed.Contains(name)) continue;
+                    if (pool.Contains(name)) continue;
                     int tries;
                     _instanceAttempts.TryGetValue(name, out tries);
                     if (tries < MaxInstanceAttempts)
@@ -338,12 +370,13 @@ namespace KKLLMNPC
                 }
             }
 
-            if (confirmed.Count > 1)
+            if (pool.Count > 1)
             {
-                if (have == null || have.Count != confirmed.Count)
-                    try { LLMNPCPlugin.Log?.LogInfo("LMStudio replicas: " + confirmed.Count + " loaded instance(s) of " + cur
-                        + " adopted — each agent gets its own" + (_modLoaded.Count > 0 ? " (" + _modLoaded.Count + " loaded by the mod)" : "")); } catch (Exception) { }
-                _replicas = confirmed;
+                if (have == null || have.Count != pool.Count)
+                    try { LLMNPCPlugin.Log?.LogInfo("LMStudio replicas: " + pool.Count + " loaded instance(s) of " + cur
+                        + " in the pool (target " + target + " for " + LLMNPCPlugin.LiveAgentCount + " agent(s))"
+                        + (_modLoaded.Count > 0 ? " — " + _modLoaded.Count + " loaded by the mod" : "")); } catch (Exception) { }
+                _replicas = pool;
             }
             else if (have != null)
                 _replicas = null;

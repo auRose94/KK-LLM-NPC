@@ -149,6 +149,14 @@ namespace KKLLMNPC
             return replicas[agentOrdinal % replicas.Count];
         }
 
+        // On-demand scaling (v1.6.0): instances to keep LIVE right now — capped by
+        // the configured max AND the live agent count, floor 1 (the shared base).
+        // Identical math to OllamaArgs.ReplicasForPopulation by design.
+        public static int ReplicasForPopulation(int want, int liveAgents)
+        {
+            return OllamaArgs.ReplicasForPopulation(want, liveAgents);
+        }
+
         // Every LOADED instance of `baseModel` (the base plus any ":N"), ordered
         // base-first then by index, capped at 8. This is the ADOPTION scan:
         // instances the user loaded by hand in the LM Studio UI are picked up

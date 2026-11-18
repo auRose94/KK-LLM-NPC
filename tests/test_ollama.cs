@@ -150,6 +150,19 @@ internal static class TestOllama
         Eq(null, OllamaArgs.ReplicaFor(emptySet, 4), "assign: empty set → null");
     }
 
+    // On-demand scaling: live instances = min(cap, agents), floor 1.
+    private static void TestReplicasForPopulation()
+    {
+        Eq(1, OllamaArgs.ReplicasForPopulation(4, 1), "scale: one agent → base only");
+        Eq(2, OllamaArgs.ReplicasForPopulation(4, 2), "scale: second agent spawns its instance");
+        Eq(4, OllamaArgs.ReplicasForPopulation(4, 9), "scale: cap wins over extra agents");
+        Eq(2, OllamaArgs.ReplicasForPopulation(2, 3), "scale: cap wins over more agents");
+        Eq(1, OllamaArgs.ReplicasForPopulation(1, 4), "scale: cap 1 stays shared");
+        Eq(1, OllamaArgs.ReplicasForPopulation(4, 0), "scale: no agents → base");
+        Eq(1, OllamaArgs.ReplicasForPopulation(4, -2), "scale: junk population → base");
+        Eq(8, OllamaArgs.ReplicasForPopulation(99, 99), "scale: hard cap 8");
+    }
+
     internal static int Run()
     {
         TestBaseUrl();
@@ -162,6 +175,7 @@ internal static class TestOllama
         TestHumanSize();
         TestKeepAlive();
         TestReplicas();
+        TestReplicasForPopulation();
 
         if (_failed > 0)
         {

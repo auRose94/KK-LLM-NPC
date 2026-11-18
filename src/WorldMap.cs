@@ -907,6 +907,12 @@ namespace KKLLMNPC
                     outWay.Add(way[j]);
                     i = j;
                 }
+                    // Anti-zig-zag second pass: the string-pull only fuses what BOTH
+                    // gates accept, so a conservative veto anywhere splits a leg and
+                    // the A* staircase survives as many short posts. Physics rays are
+                    // the final truth — drop any post whose removal keeps the segment
+                    // ray-clear AND stays within a body width of the line.
+                    outWay = SimplifyDeviating(outWay);
                     if (outWay.Count >= 2 && outWay[outWay.Count - 1] == outWay[outWay.Count - 2])
                         outWay.RemoveAt(outWay.Count - 1);
                     return outWay.Count >= 2 ? outWay : null;
@@ -918,6 +924,47 @@ namespace KKLLMNPC
                 LLMNPCPlugin.Log?.LogWarning("KKLLMNPC: world map query: " + e.Message);
                 return null;
             }
+        }
+
+        // Deviation-tolerant path straightening (the string-pull's second pass).
+        // A post is dropped when: the physics rays clear the segment over it,
+        // its HORIZONTAL distance from that segment stays within a body width
+        // (+margin), and its height stays within a step-and-a-half of the
+        // interpolated line (steps/ramps simplify; cliffs don't). Iterative —
+        // dropping one post can enable the next; lists after string-pulling are
+        // tens of posts, so the restart loop is cheap. Main thread (Physics).
+        internal const float SimplifyDeviationM = 0.45f;  // BodyHalfWidthM + margin
+        internal const float SimplifyDeviationYM = 1.0f;  // ≈ ClimbStep + MaxDrop band
+
+        private static List<Vector3> SimplifyDeviating(List<Vector3> way)
+        {
+            if (way == null || way.Count < 3) return way;
+            var keep = new List<Vector3>(way);
+            int guard = 0;
+            bool changed = true;
+            while (changed && guard++ < 4096)
+            {
+                changed = false;
+                for (int i = 1; i < keep.Count - 1; i++)
+                {
+                    Vector3 a = keep[i - 1], b = keep[i], c = keep[i + 1];
+                    float abx = c.x - a.x, abz = c.z - a.z;
+                    float denom = abx * abx + abz * abz;
+                    if (denom < 1e-6f) continue; // vertical stack — nothing to straighten
+                    float t = ((b.x - a.x) * abx + (b.z - a.z) * abz) / denom;
+                    if (t < 0f) t = 0f; else if (t > 1f) t = 1f;
+                    float qx = a.x + abx * t, qz = a.z + abz * t;
+                    float dx = b.x - qx, dz = b.z - qz;
+                    if (dx * dx + dz * dz > SimplifyDeviationM * SimplifyDeviationM) continue;
+                    float qy = a.y + (c.y - a.y) * t;
+                    if (Math.Abs(b.y - qy) > SimplifyDeviationYM) continue;
+                    if (!RayClear(a, c)) continue;
+                    keep.RemoveAt(i);
+                    changed = true;
+                    break;
+                }
+            }
+            return keep;
         }
 
         // Chest-height line-of-sight between two waypoints, each raised above its own

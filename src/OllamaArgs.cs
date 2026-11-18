@@ -219,6 +219,18 @@ namespace KKLLMNPC
             return replicas[agentOrdinal % replicas.Count];
         }
 
+        // On-demand scaling (v1.6.0): how many instances should be LIVE right now —
+        // never more than the configured cap, never more than there are agents, and
+        // always at least the shared base. want≤1 → 1. Negative/zero agents → 1
+        // (the base is the fallback every agent shares until its instance exists).
+        public static int ReplicasForPopulation(int want, int liveAgents)
+        {
+            if (want < 1) want = 1;
+            if (want > 8) want = 8;
+            if (liveAgents < 1) liveAgents = 1;
+            return Math.Min(want, liveAgents);
+        }
+
         // Navigate a dotted key (e.g. "general.architecture") through nested dictionaries and
         // return the final value as a string. Returns "" if any segment is missing or not a dict.
         private static string Str(Dictionary<string, object> o, string key)

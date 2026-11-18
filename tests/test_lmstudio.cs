@@ -139,6 +139,15 @@ internal static class TestLMStudio
         Eq(null, LMStudioArgs.ReplicaFor(null, 0), "assign: no set → null");
     }
 
+    // On-demand scaling mirrors OllamaArgs.ReplicasForPopulation (one shared math).
+    private static void TestReplicasForPopulation()
+    {
+        Eq(1, LMStudioArgs.ReplicasForPopulation(4, 1), "scale: one agent → base only");
+        Eq(2, LMStudioArgs.ReplicasForPopulation(4, 2), "scale: second agent spawns its instance");
+        Eq(4, LMStudioArgs.ReplicasForPopulation(4, 9), "scale: cap wins over extra agents");
+        Eq(1, LMStudioArgs.ReplicasForPopulation(4, 0), "scale: no agents → base");
+    }
+
     // The ADOPTION scan: every loaded instance of a base (base first, then :N by
     // index; manual UI loads included; not-loaded siblings ignored; cap 8).
     // Shape verified against a live dual-instance server (2026-11-17).
@@ -187,6 +196,7 @@ internal static class TestLMStudio
         TestKeepAlive();
         TestInstances();
         TestLoadedInstancesOf();
+        TestReplicasForPopulation();
 
         if (_failed > 0)
         {

@@ -207,8 +207,11 @@ Configuration is documented in full — every section, key, default and range �
 - **`[Console]`** — the bash-like REPL the agents drive (default ON; `Enabled=false`
   restores the legacy push-perception loop)
 - **`[Ollama]`** — external-host adoption + the keep-alive heartbeat (default `30m`)
-  + optional **replicas** (`Replicas`, default 1): N loaded instances of the model,
-  one per agent — parallel turns with a full context window each
+  + optional **replicas** (`Replicas`, default 1): on-demand instances that scale
+  with the agent population — parallel turns with a full context window each.
+  ⚠️ Each instance takes the model's full VRAM: 2 + server-side concurrency is
+  the sweet spot for one shared GPU; more wants a second machine or a
+  compute-only GPU (4× a multi-GB model has black-screened a machine here)
 - **`[LMStudio]`** — the same adoption for LM Studio: live model list with load state
   and real context windows, a TTL keep-warm heartbeat, a picker that *loads*
   the model for you, and the same **replicas** support (`model:2`, `model:3`… —

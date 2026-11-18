@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-11-19
+
+### Added (2026-11-19 — on-demand replicas: instances scale with the agent population)
+
+Rose's morning verdict on v1.5.1: **A+ — "this version is the best so far"**,
+with the first fully autonomous farm chain observed (walked to the mailbox,
+took the starter egg, planted and watered it — following the letter's
+instructions, unprompted). The one gap: instances loaded even when no agent
+needed them (4× a multi-GB model black-screened her machine mid-play).
+
+- **Replicas now scale ON DEMAND on both hosts** — instance N loads only when
+  a Nth agent actually exists (`min(Replicas, live agents)`), which is also
+  the load-balancing behavior: the second agent's instance spawns at its
+  thread creation (a fresh cold load lands while it shares the base; its next
+  query migrates), and mod-loaded extras release VRAM when agents leave
+  (3-poll hold so a body death/respawn flicker doesn't churn). A genuinely
+  different configured model still overrides everything, as before.
+- **LM Studio user loads stay sovereign**: hand-loaded instances are always
+  adopted, never auto-unloaded, and never counted against scale-down — only
+  the mod's own extras release.
+- **Hardware guidance, learned the hard way**: both `Replicas` descriptions
+  and a one-shot startup warning at ≥3 now say it plainly — every instance
+  takes the model's FULL VRAM on the same GPU that may be driving your
+  display; 4× a multi-GB model has black-screened a machine here. 2 +
+  per-model server concurrency is the safer shape; use a second machine or a
+  compute-only GPU for more.
+- Pure scaling math `ReplicasForPopulation` (+9 assertions in test_ollama).
+
+## [1.5.1] — 2026-11-19
+
+### Fixed (2026-11-18 — octree path straightening: the zig-zag pass)
+
+Rose's verdict on v1.5.0 navigation: "a lot better, little zig-zaggie but
+functional." Two causes, both fixed:
+
+- **The straight-leg voxel march over-blocked** — twice. First, a latent typo
+  packed the sample's Z from its X coordinate (`VoxZ(x)`), so the march
+  consulted the wrong column entirely; second, ANY sample touching a wall
+  voxel vetoed the whole leg, even when that voxel's center was half a meter
+  off the line while the physics rays passed. A wall voxel now vetoes only
+  when its center is within the body radius (`SegmentVetoRadiusM` 0.45m —
+  the same notion of "near the line" as the ±0.35m lateral ray lanes and the
+  simplifier below). Every false veto used to split a leg, and the A*
+  staircase survived as zig-zag.
+- **Deviation-tolerant simplification pass** (`WorldMap.SimplifyDeviating`):
+  after string-pulling, a post is dropped when the physics rays clear the
+  segment over it, its horizontal deviation from that segment is within a
+  body width (+margin), and its height stays within a step-and-a-half of the
+  interpolated line (steps/ramps straighten; cliffs don't). Iterative, so
+  dropping one post can enable the next.
+- Tolerance pinned in `test_octreenav`: a parallel lane one column off the
+  wall stays open; a 0.15m graze still blocks.
+
 ## [1.5.0] — 2026-11-18
 
 Volumetric pathfinding: the world map's sampled data now navigates as true 3D.

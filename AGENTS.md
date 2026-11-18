@@ -157,13 +157,25 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 - `CONTRIBUTING.md` — style, PR checklist, game-API integration notes
 - `wip/BASE-GAME-AI.md` — reverse-engineered game internals
 
-## Current state (2026-11-17)
+## Current state (2026-11-19)
 
-- `main` is the PR target and is current; **v1.5.0 is COMMITTED** (GitHub release pending)
-  and v1.3.1 was the last GitHub release. CI runs on every branch push plus a nightly deep-soak schedule
+- `main` is the PR target and is current; **v1.6.0 wraps v1.5.0+v1.5.1+v1.6.0**
+  (GitHub release pending — Rose plans to release the evening of 2026-11-19).
+  **Rose's morning verdict on v1.5.1: A+, "best version so far"** — first fully
+  autonomous farm chain observed (mailbox → starter egg → planted → watered,
+  following the letter's instructions, unprompted). CI runs on every branch push plus a nightly deep-soak schedule
   (`workflow_dispatch` works too). `ws/*` branches are checked out in
   worktrees under `/mnt/Matrix/Work/KK-LLM-NPC-wt/<name>` — don't try to
   check them out here.
+- 2026-11-19 **v1.6.0: on-demand replicas (deployed)** — instances scale with
+  the LIVE agent population (`min(Replicas, agents)`, both hosts): the Nth
+  agent spawns its instance at thread creation (cold load lands while it
+  shares the base; next query migrates), mod-loaded extras release VRAM when
+  agents leave (3-poll hold); LM Studio user loads stay sovereign (adopted,
+  never auto-unloaded, never scaled down). Hardware warning at Replicas ≥ 3 +
+  docs: every instance takes FULL VRAM on the display GPU — 4× a multi-GB
+  model black-screened Rose's machine; 2 + per-model server concurrency is
+  the sweet spot, more wants a second machine or compute-only GPU.
 - 2026-11-17 **OctreeNav — volumetric 3D pathfinding (v1.5.0, committed)** — `src/OctreeNav.cs` (pure): every sampled surface becomes a
   floor voxel in per-column Y-sorted sparse sets; true-3D A* with
   cross-column climb/drop edges + same-column fall shafts + door tolls.
@@ -173,7 +185,13 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
   layers (was 8); straight-leg fusing is a 3D wall-voxel march (quadtree =
   fallback); layered A* stays the safety net (`WorldMap3D=false` for legacy).
   `test_octreenav.cs`: stacked tunnels/overpass asymmetry, shafts, 30m
-  stepped caves, long-trek smoke. 26 C# suites.
+  stepped caves, long-trek smoke. - 2026-11-18 night **v1.5.1: octree path straightening (deployed, uncommitted)** —
+  the zig-zag pass: SegmentOpen got a latent VoxZ(x) typo fixed (the march read
+  the wrong column) + a body-radius veto (wall voxel blocks only within 0.45m
+  of the line — matches the ray lanes), and FindPathSmoothed gained a
+  deviation-tolerant simplification pass (drop posts whose removal keeps rays
+  clear and stays within a body width; steps straighten, cliffs don't).
+26 C# suites.
 - 2026-11-17 **LM Studio adoption (v1.4.0, committed in v1.5.0)** — the
   `[LMStudio]` section mirrors `[Ollama]`: watcher adopts an externally-running
   LM Studio via `/api/v0/models` (load state + REAL context window + quant in

@@ -21,13 +21,17 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.5.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.6.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
         internal new BepInEx.Logging.ManualLogSource Logger => base.Logger;
         // Static logger accessible from other classes (e.g. ModelProbe).
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
+
+        // Live NPCInstance count, refreshed with the reconcile loop — the replica
+        // watchers scale on it (instance N loads only when a Nth agent exists).
+        internal static volatile int LiveAgentCount;
 
         // Unity's overloaded == reports a DESTROYED component as null. This plugin
         // component IS destroyed — the game kills BepInEx_Manager at t=0 (canary-
@@ -947,6 +951,9 @@ namespace KKLLMNPC
             {
                 _lastReconcile = Time.unscaledTime;
                 HangGuard("ReconcileInstances", () => { try { ReconcileInstances(); } catch (Exception e) { Logger.LogWarning("reconcile: " + e.Message); } });
+                // The replica watchers scale on this: instance N is only loaded
+                // when a Nth agent actually exists (on-demand + load balancing).
+                lock (_instancesLock) LiveAgentCount = _instances.Count;
             }
 
             // World map advance + player-quest/trail watching, each under a HangGuard
