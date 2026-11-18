@@ -285,6 +285,7 @@ MIT — see [LICENSE.txt](LICENSE.txt).
 - [BEHAVIOR.md](docs/BEHAVIOR.md) — Every agent behavior in detail, with the design reasoning
 - [VORE.md](docs/VORE.md) — The full swallow-vore / spectate mechanics (opt-in, all OFF by default)
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Architecture overview
+- [STABILITY.md](docs/STABILITY.md) — Long-session testing guide: the APU/driver-receipt incident, settings checklist, what the mod patches
 - [MODELS.md](docs/MODELS.md) — Ranked model compatibility list + benchmark plan
 - [training/README.md](training/README.md) — Fine-tune a game-native model: record your own sessions (`[DataRecord]`), extract the dataset, eval + train (Qwen / Gemma4-QAT dual-track)
 - [CHANGELOG.md](CHANGELOG.md) — Release history (older rounds: [changelog-archive.md](docs/changelog-archive.md))

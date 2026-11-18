@@ -148,6 +148,7 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 ## Docs map
 
 - `docs/ARCHITECTURE.md` — full component breakdown, data flow, thread model
+- `docs/STABILITY.md` — long-session testing guide (APU/driver-receipt incident, checklist, what the mod already patches)
 - `docs/CONFIG.md` — complete config reference (the `tools/lint_config.py` source of truth)
 - `docs/BEHAVIOR.md` — long-form behavior highlights (moved out of README 2026-11-15)
 - `docs/VORE.md` — swallow-vore/spectate mechanics (opt-in features)
