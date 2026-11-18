@@ -81,6 +81,9 @@ namespace KKLLMNPC
                 foreach (var s in _skills)
                     if (NormalizeSkillName(s.Name) == norm) { rec = s; break; }
             if (rec == null) return "no skill named '" + name + "' — " + (SkillListImpl());
+            if (norm.StartsWith("fsm", StringComparison.Ordinal))
+                return "'fsm" + "' skills are BEHAVIOR PROGRAMS (state machines the mod runs itself) — not runnable here; edit with: skill add " + rec.Name + " | <line> ; <line>";
+
             var outp = new System.Text.StringBuilder();
             // A saved skill's steps were VALIDATED at save; they run as a single
             // batch (one history entry), independent of the per-turn command budget
@@ -179,6 +182,19 @@ namespace KKLLMNPC
         }
 
         // Flat storage form ("name|step1;step2") for MemoryStore + transfers.
+        // The authored steps of ONE skill (null = no such skill) — the FSM
+        // runtime reads its machine (skill name "fsm") from here each tick, so
+        // edits take effect live and saved lives carry the machine forward.
+        internal List<string> SkillStepsFor(string name)
+        {
+            string norm = NormalizeSkillName(name);
+            lock (_skillLock)
+                foreach (var s in _skills)
+                    if (NormalizeSkillName(s.Name) == norm)
+                        return new List<string>(s.Steps.ToArray());
+            return null;
+        }
+
         internal List<string> SkillsSnapshotLines()
         {
             var outp = new List<string>();

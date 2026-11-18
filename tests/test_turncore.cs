@@ -57,6 +57,7 @@ class TurnFakeEnv : IConsoleTurnEnv
     public bool EndpointBlocked { get { return Blocked; } }
     public void EnsureConversation() { ConversationEnsured = true; }
     public string DrainEvents() { return EventQ.Count > 0 ? EventQ.Dequeue() : ""; }
+        public bool AgentFsmTurn(string drainedEvents, out string remainder) { remainder = drainedEvents; return false; }
     public string StateAnchor() { return AnchorVal; }
     public void AddMsg(string role, object content) { Msgs.Add(new object[] { role, content }); }
     public void Trim() { TrimCount++; }

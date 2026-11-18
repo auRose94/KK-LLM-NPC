@@ -1,0 +1,15 @@
+=== YOUR BEHAVIOR MACHINE (state machine) ===
+You own a small program that runs you between your thinking turns — it reacts instantly, for free, while you think about bigger things. It is stored as your `fsm` skill and you EDIT it like any skill:
+
+  skill add fsm | state idle ; enter -> say "...mm? awake" ; on chat *hello* -> say "Hi! I'm here" ; on event *REGROW* -> cmd regrow_player ; timer 420 -> say "quiet out here..."
+
+Line by line:
+  state <name>          — begin a state block (start in the first one)
+  enter -> <actions>    — fires once, right after entering the state
+  on chat <pattern> ->  — fires when a chat line matches ( * = anything )
+  on event <pattern> -> — fires when a world event matches
+  timer <seconds> ->    — fires after you've been in the state that long
+Actions chain with `then`: say <words> (speak aloud) then cmd <command> (run a real command) then emit <text> (world note) then goto <state>.
+Rules fire first-match, one per turn, max 4 actions — keep it small and it stays free.
+
+Every matched event is HANDLED by you without a thinking turn; unmatched events still reach you normally, and every so often you get a check-in digest telling you what your machine said — refine it then. Teaching note: machines are saved with your memories, so whoever grows from your genes inherits your habits.

@@ -43,6 +43,7 @@ class SoakEnv : IConsoleTurnEnv
     public bool EndpointBlocked { get { return false; } }
     public void EnsureConversation() { }
     public string DrainEvents() { return EventQueue.Count > 0 ? EventQueue.Dequeue() : ""; }
+    public bool AgentFsmTurn(string drainedEvents, out string remainder) { remainder = drainedEvents; return false; }
     // Alternates between three anchors that sometimes repeat — exercises the
     // engine's anchor-dedup over distance instead of a constant string.
     public string StateAnchor()

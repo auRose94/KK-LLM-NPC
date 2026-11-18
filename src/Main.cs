@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.11.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.12.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -135,6 +135,7 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgMapRayDepth;
         internal ConfigEntry<bool> _cfgSceneKnowledge;
         internal ConfigEntry<string> _cfgSceneDumpDir;
+        internal ConfigEntry<string> _cfgAgentFsmMode;
         internal ConfigEntry<int> _cfgMaxNPCs;
         internal ConfigEntry<bool> _cfgSpawnMissing;
         internal ConfigEntry<bool> _cfgRadarEnabled;
@@ -584,6 +585,8 @@ namespace KKLLMNPC
                 "Ingest a static scene-dump (world gazetteer) so find/go_to work MAP-WIDE: live senses only reach ~30m, but the dump knows where every station, nest, egg, soil tile and structure sits — 'find my egg' resolves across the whole map and go_to creates a real path to it. Dumps are the *.full.json snapshots from the KodotKare port tooling; the file whose 'scene' field (or filename) matches the running scene is loaded once per scene on a background thread. Off or no dump = live-only behavior, unchanged.");
             _cfgSceneDumpDir = Config.Bind("SceneKnowledge", "DumpDir", "",
                 "Directory holding the scene-dump *.full.json files. Empty = the gazetteer is off (live senses only). Example: the KodotKare port's scene_dumps/scene folder.");
+            _cfgAgentFsmMode = Config.Bind("AgentFSM", "Mode", "assist",
+                "The LLM-programmed state machine (v1.12.0): each agent owns a behavior machine stored as its 'fsm' skill (seeded with a standard one; edit with 'skill add fsm | state idle ; on chat *hello* -> say Hi' — line by line). off = machines don't run. assist = the machine acts first on each turn's events, the LLM still polls every beat (safe rollout). full = a machine that consumed every event SKIPS the LLM turn entirely — the token economy for multi-avatar play, with a forced-poll ladder (direct chat never skips; a periodic check-in hands the model a digest so it can refine the machine). Machines persist as skills, so saved lives and inherited bodies carry the behavior culture forward.");
             _cfgVisionEvery = Config.Bind("Vision", "EveryNTicks", 3, "Run the vision pass every N action ticks (lower = more aware, slower)");
             _cfgVisionPrompt = Config.Bind("Vision", "Prompt",
                 "You are the SPATIAL reasoner for an NPC. Produce a compact SCENE REPORT: (a) landmarks/stations/people in view with a rough bearing, (b) which directions are OPEN to walk (-90 left .. +90 right), (c) any hazard or drop. " +

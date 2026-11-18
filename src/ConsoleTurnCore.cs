@@ -78,6 +78,13 @@ namespace KKLLMNPC
         bool EndpointBlocked { get; }              // circuit breaker open
         void EnsureConversation();                 // InitConsoleConversation when wiped
         string DrainEvents();                      // [chat]/[event] queues (consumed)
+        // AGENT FSM PRE-STAGE (v1.12.0, Rose's design): the agent-programmed
+        // state machine gets FIRST bite of the drained events. Implementations
+        // execute their machine's actions (say/cmd/emit) and return true to SKIP
+        // the whole LLM turn (the machine consumed everything — the token
+        // economy for multi-avatar play), or false with `remainder` = the events
+        // text for the normal turn (unmatched lines flow to the model).
+        bool AgentFsmTurn(string drainedEvents, out string remainder);
         string StateAnchor();                      // goal/needs/state line
         void AddMsg(string role, object content);  // transcript append (string or multipart)
         void Trim();                               // rolling-window trim
@@ -159,6 +166,14 @@ namespace KKLLMNPC
             // events MUST be drained every turn (the queues are consumed) even when
             // we skip re-emitting the anchor — otherwise events would be lost.
             string events = env.DrainEvents();
+
+            // AGENT FSM PRE-STAGE (see the interface note): the machine works even
+            // when the endpoint is down/blocked — it IS the cheap alternative.
+            {
+                string fsmRemainder;
+                if (env.AgentFsmTurn(events, out fsmRemainder)) return;
+                events = fsmRemainder ?? "";
+            }
             string anchor = env.StateAnchor();
 
             // ANCHOR DEDUP: only re-paste the full state anchor when it (or fresh

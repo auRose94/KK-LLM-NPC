@@ -26,6 +26,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restarts with zero storage. Pure `VorePersonaCore.cs` + tests (spectate
   suite grew PointText cases: bearings, height annotations, coords).
 
+## [1.12.0] — 2026-11-18
+
+### Added (2026-11-18 night — AgentFSM: LLM-programmed state machines, the token economy)
+
+Rose's architecture idea, built: **the model programs, the machine performs.**
+Each agent owns a behavior STATE MACHINE stored as its `fsm` skill (seeded
+with a standard one; edited line-by-line via `skill add fsm | …`), and the
+turn engine runs it BEFORE the LLM every beat:
+
+- **DSL** (`AgentStateMachineCore.cs`, pure + tested): `state` blocks with
+  `enter` / `on chat <pattern>` / `on event <pattern>` / `timer <seconds>`
+  triggers, and `say` / `cmd <command>` / `emit` / `goto` actions chained
+  with `then`. Wildcard patterns, one-rule-per-tick, a 4-action budget and
+  state/rule caps — a machine can loop forever without spinning the runtime.
+- **Turn-engine pre-stage**: the machine gets first bite of every turn's
+  drained events, executing say/cmd/emit through the SAME pipeline the model
+  uses (repeat guards, command dispatch). Matched events are consumed;
+  unmatched ones flow to the model untouched.
+- **Modes** (`[AgentFSM] Mode`, default `assist`): assist = machine acts,
+  LLM still polls (safe rollout). **full** = a machine that consumed every
+  event SKIPS the LLM turn — the multi-avatar token economy — with a forced-
+  poll ladder: direct chat never skips, and a periodic check-in hands the
+  model a digest of what its machine said so it can refine it.
+- **Machines inherit**: stored as skills, so saved lives and bodies that
+  grow from the agent's genes carry the behavior culture forward. Fresh
+  agents are seeded with the standard machine and add to it over time —
+  "the one thing agentic models are good at, programming."
+- `prompt_extras/fsm.txt` teaches the DSL; suites grew `agentfsm` (29
+  total); the turn-engine seam is config-gated and fake-env tested.
+
 ## [1.10.0] — 2026-11-18
 
 ### Added (2026-11-18 night — Endo: non-fatal vore, RimVore-2 Hold parity)

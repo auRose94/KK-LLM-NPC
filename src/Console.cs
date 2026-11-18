@@ -799,6 +799,7 @@ namespace KKLLMNPC
             public bool EndpointBlocked { get { return Time.unscaledTime < _n._endpointBlockUntil; } }
             public void EnsureConversation() { if (_n._consoleMsgs == null) _n.InitConsoleConversation(); }
             public string DrainEvents() { return _n.DrainConsoleEvents(); }
+            public bool AgentFsmTurn(string drainedEvents, out string remainder) { return _n.AgentFsmTurn(drainedEvents, out remainder); }
             public string StateAnchor() { return _n.StateAnchorLine(); }
             public void AddMsg(string role, object content) { _n.AddConsoleMsg(role, content); }
             public void Trim() { _n.TrimConsoleConversation(); }

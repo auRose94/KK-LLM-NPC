@@ -119,6 +119,7 @@ run_headless_suites() {
   run_suite octreenav tests/test_octreenav.cs -- src/OctreeNav.cs src/Constants.cs
   run_suite sceneknowledge tests/test_sceneknowledge.cs -- src/SceneKnowledgeCore.cs src/Json.cs
   run_suite vorepersona tests/test_vorepersona.cs -- src/VorePersonaCore.cs
+  run_suite agentfsm tests/test_agentfsm.cs -- src/AgentStateMachineCore.cs
   run_suite consent    tests/test_consent.cs -- src/ConsentDetector.cs
 }
 

@@ -215,6 +215,27 @@ DumpDir =                ; folder holding the *.full.json dumps (empty = off)
 | `Enabled` | `true` | bool | Load a scene dump as a static world gazetteer: `find <thing>` resolves map-wide (distance, bearing, ready `go_to x:… z:…`) when live lookup misses; `go_to <name>` falls back to dump coords before "unknown_place"; agents get a one-shot "world intel" grounding event listing the world's contents. |
 | `DumpDir` | *(empty)* | path | Folder holding the dumps. Empty = off. Example: the KodotKare port's `scene_dumps/scene` folder. |
 
+## [AgentFSM] — LLM-programmed behavior machines
+
+Each agent owns a behavior STATE MACHINE stored as its `fsm` skill (seeded
+with a standard one at first turn; the model edits it line-by-line with
+`skill add fsm | state idle ; on chat *hello* -> say Hi ; timer 420 -> say
+"still here"` — triggers: `enter`, `on chat <pat>`, `on event <pat>`,
+`timer <s>`; actions: `say`, `cmd <command>`, `emit`, `goto <state>`;
+chain with `then`). The runtime executes it every turn BEFORE the LLM is
+consulted — matched events are handled instantly and for free, unmatched
+ones flow to the model as usual, and machines persist as skills (saved
+lives and inherited bodies carry the behavior culture forward).
+
+```ini
+[AgentFSM]
+Mode = assist
+```
+
+| Key | Default | Range | Purpose |
+|-----|---------|-------|---------|
+| `Mode` | `assist` | off, assist, full | `off` = machines don't run. `assist` = the machine acts first on each turn's events and the LLM still polls every beat (safe rollout). `full` = a machine that consumed every event SKIPS the LLM turn entirely — the token economy for multi-avatar play — with a forced-poll ladder (unmatched events never skip; a periodic check-in hands the model a digest of what its machine said so it can refine it). |
+
 ## [Needs] — Body State
 
 | Key | Default | Range | Purpose |
