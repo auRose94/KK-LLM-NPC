@@ -5,13 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.0] — 2026-11-19
+## [1.7.0] — 2026-11-18
 
 New project direction: **stability + quality of life** — dissecting the whole
 playthrough log (game log + Unity player log) and fixing what it shows, in the
 mod and in the game itself via monkey-patching.
 
-### Added (2026-11-19 — log forensics: engine stability guards + faster loading)
+### Added (2026-11-18 — log forensics: engine stability guards + faster loading)
 
 - **JigglePhysics stability guards** (the log's biggest engine offender): the
   game's embedded jiggle-physics library threw NullReferenceExceptions at two
@@ -31,6 +31,22 @@ mod and in the game itself via monkey-patching.
   on the thread pool; consumers are lazy and null-tolerant, so the mod uses
   defaults for its first turns and upgrades itself when the probe lands.
 
+### Fixed (2026-11-18 evening — the marshal hang, named at last)
+
+Second session, same day: the game froze mid-play again — but this time the
+hang watchdog caught it live: main thread no beat for 26+ seconds, phase
+`marshal-callback` (a RunOnMainThread callback never returned), LLM loops
+timed out and backed off exactly as designed, and — notably — **zero kernel
+GPU events** (the amdgpu ring-timeout receipts from the morning were a
+separate, once-only event). Two shipped changes:
+
+- **Marshal flight recorder**: every main-thread callback now carries its
+  name (`Type.Method`, cheap reflection); the hang warning names the
+  callback in flight, marshal timeouts name it too, and any callback taking
+  >2s logs its duration once. The next hang names its culprit on its own.
+- Verified today's freeze left no driver trace — it is ours (or the game's)
+  to fix, and now it self-reports where.
+
 ### Known remaining (from the same log, queued)
 
 - 82 `referenced script (Unknown) is missing!` + one `Unknown managed type
@@ -43,9 +59,9 @@ mod and in the game itself via monkey-patching.
 - Unity's crash reporter uploads every swallowed-by-us exception ("Uploading
   Crash Report") — roadmap: bootstrapper-level opt-out.
 
-## [1.6.0] — 2026-11-19
+## [1.6.0] — 2026-11-18
 
-### Added (2026-11-19 — on-demand replicas: instances scale with the agent population)
+### Added (2026-11-18 — on-demand replicas: instances scale with the agent population)
 
 Rose's morning verdict on v1.5.1: **A+ — "this version is the best so far"**,
 with the first fully autonomous farm chain observed (walked to the mailbox,
@@ -71,7 +87,7 @@ needed them (4× a multi-GB model black-screened her machine mid-play).
   compute-only GPU for more.
 - Pure scaling math `ReplicasForPopulation` (+9 assertions in test_ollama).
 
-## [1.5.1] — 2026-11-19
+## [1.5.1] — 2026-11-18
 
 ### Fixed (2026-11-18 — octree path straightening: the zig-zag pass)
 

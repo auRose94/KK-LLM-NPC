@@ -1185,6 +1185,7 @@ namespace KKLLMNPC
                         if (gap > longest) longest = gap;
                         if (gap >= 4f)
                             plugin.Logger.LogWarning("KKLLMNPC: main thread appears HUNG (no beat for " + gap.ToString("0.0") + "s) — last phase: " + (MainPhase ?? "none")
+                                + (MarshalInFlight != null ? " — callback in flight: '" + MarshalInFlight + "'" : "")
                                 + " (the game freezes HERE; send us this line with the surrounding log; repeats every second while stuck)");
                     }
                     catch (Exception) { }
@@ -1934,6 +1935,24 @@ namespace KKLLMNPC
         // ------------------------------------------------------------------
         // main-thread marshalling
         // ------------------------------------------------------------------
+        // Flight-recorder state for RunOnMainThread (see comment there).
+        internal static string MarshalInFlight; // label of the callback running on the main thread right now
+        private static readonly System.Collections.Generic.HashSet<string> _slowMarshalWarned
+            = new System.Collections.Generic.HashSet<string>();
+
+        // "<Type>.<Method>" of a marshaled delegate — lambdas surface as
+        // "<LLMLoop>b__42"-style names, method groups as the method itself.
+        private static string MarshalLabel(Func<object> fn)
+        {
+            try
+            {
+                var m = fn.Method;
+                string type = m.DeclaringType != null ? m.DeclaringType.Name : "?";
+                return type + "." + m.Name;
+            }
+            catch (Exception) { return "?"; }
+        }
+
         internal object RunOnMainThread(Func<object> fn, int timeoutMs = 120000)
         {
             if (fn == null) throw new ArgumentNullException(nameof(fn));
@@ -1948,6 +1967,12 @@ namespace KKLLMNPC
                 return fn();
             object result = null; Exception error = null;
             var done = new ManualResetEventSlim(false);
+            // FLIGHT RECORDER (v1.7.0, the 2026-11-18 marshal hang): when the main
+            // thread wedges inside one of these callbacks, the hang detector could
+            // only say 'marshal-callback' — not WHICH callback. Name it (delegate
+            // target, cheap reflection) and expose it to the watcher; slow callbacks
+            // warn with their duration.
+            string label = MarshalLabel(fn);
             try
             {
                 _mainContext.Post(_ =>
@@ -1955,22 +1980,38 @@ namespace KKLLMNPC
                     try
                     {
                         MainPhase = "marshal-callback";
+                        MarshalInFlight = label;
+                        long start = MainClock.ElapsedTicks;
                         Beat();
                         result = fn();
+                        double ms = (MainClock.ElapsedTicks - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                        if (ms > 2000)
+                        {
+                            bool first;
+                            lock (_slowMarshalWarned) first = _slowMarshalWarned.Add(label);
+                            if (first) Logger.LogWarning("KKLLMNPC: slow main-thread callback '" + label
+                                + "' took " + ms.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + "ms — contentions here stall every agent turn");
+                        }
                     }
                     catch (Exception e) { error = e; }
-                    finally { done.Set(); MainPhase = "idle"; Beat(); }
+                    finally
+                    {
+                        if (string.Equals(MarshalInFlight, label, StringComparison.Ordinal)) MarshalInFlight = null;
+                        done.Set(); MainPhase = "idle"; Beat();
+                    }
                 }, null);
             }
             catch (Exception e) { throw new InvalidOperationException("failed to post to main thread: " + e.Message, e); }
             if (!done.Wait(timeoutMs))
             {
                 // The LLM loop catches + logs this — make each line a diagnosis:
-                // which phase the main thread died in and its true wall-clock idle.
+                // which phase the main thread died in, which callback was in
+                // flight, and its true wall-clock idle.
                 double idle = MainIdleWallSeconds;
                 throw new TimeoutException("main thread timeout (" + timeoutMs + "ms) — main thread last beat "
                     + idle.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
-                    + "s ago, in phase '" + (MainPhase ?? "?") + "'");
+                    + "s ago, in phase '" + (MainPhase ?? "?") + "'"
+                    + (MarshalInFlight != null ? " — callback in flight: '" + MarshalInFlight + "'" : ""));
             }
             if (error != null) throw error;
             return result;
