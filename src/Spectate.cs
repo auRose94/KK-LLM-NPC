@@ -582,6 +582,7 @@ namespace KKLLMNPC
             if (_registered) return;
             _registered = true;
             ModuleRegistry.Tool("eat_player", (n, p) => n.ToolEatPlayer(p));
+            ModuleRegistry.Tool("regrow_player", (n, p) => n.ToolRegrowPlayer(p));
         }
     }
 
@@ -647,6 +648,56 @@ namespace KKLLMNPC
                 note = "you swallowed the player WHOLE — they are inside you now, watching everything through your body's eyes and unable to act. "
                      + SwallowManager.PlayerOutcomeNote(_kobold),
             };
+        }
+
+        // regrow_player — THE PLAYER-REGROWTH FLOW (v1.8.0, Rose's design): take
+        // the player by unbirth, convert them to an egg, plant the egg, and the
+        // PLAYER wakes grown from it (their identity + memories ride the egg's
+        // rebirth link, and the grown body is gene-mixed with YOU — the carrier).
+        // Consent shape: SwallowEnabled + SwallowAgentEat arm it, and the
+        // unbirth framing requires the PLAYER's own SwallowDestination = pussy —
+        // the destination is theirs to choose, so the agent can never steer
+        // around it. The fate is pinned to egg for the agent (the whole point of
+        // the flow); they can change it back with the vore controls afterwards.
+        internal object ToolRegrowPlayer(JsonObj p)
+        {
+            var plugin = SwallowManager.Plugin;
+            if (!LLMNPCPlugin.Alive(plugin)) return new { ok = false, reason = "no_plugin" };
+            bool masterOn = plugin._cfgSwallowEnabled != null && plugin._cfgSwallowEnabled.Value;
+            bool agentEat = plugin._cfgSwallowAgentEat != null && plugin._cfgSwallowAgentEat.Value;
+            var dest = SwallowManager.Destination();
+            string gate = SwallowLogic.RegrowGate(masterOn, agentEat, dest == SwallowDestination.Pussy, dest);
+            if (gate != null)
+                return new { ok = false, reason = "gated", note = gate };
+
+            // The fate IS the flow: pin the agent's own vore_mode to egg (through
+            // the same validated setter the vore_mode tool uses — it persists with
+            // the agent) so the conversion, which reads the actor's override at
+            // completion, lands as a plantable egg carrying the player's rebirth
+            // identity. Failures below keep the pin: retrying with the fate
+            // already right is the sensible state.
+            ToolVoreMode(new JsonObj(new Dictionary<string, object> { ["mode"] = "egg" }));
+            try
+            {
+                var res = ToolEatPlayer(p);
+                // ToolEatPlayer returns an anonymous object; serialize to detect
+                // the ok flag without a type dance (the writer emits "ok":false
+                // with no spaces on failures).
+                string j = null;
+                try { j = Json.Write(res); } catch (Exception) { }
+                bool failed = j != null && j.Contains("\"ok\":false");
+                if (!failed)
+                    PushWorldEvent("[vore] REGROW FLOW begun: the player is converting inside you (unbirth, egg fate). "
+                        + "When the egg pops at your feet: grab it; then find soil — go_to the nearest bare soil, drop the egg on it, and use it to plant. "
+                        + "They will wake GROWN, gene-mixed with you, and their memories travel with them. "
+                        + "Narrate every stage to them (echo — they hear you from inside); when they hatch, greet them by name — same person, new body. "
+                        + "Your fate stays pinned to egg for this; change it with the vore controls afterwards if you like.");
+                return res;
+            }
+            catch (Exception e)
+            {
+                return new { ok = false, reason = "failed", note = TextUtil.Shorten(e.Message, 160) };
+            }
         }
     }
 }

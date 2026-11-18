@@ -222,16 +222,19 @@ level IS the digestion. Game-side feasibility verified against the decompile:
 
 Pairs naturally with **reincarnation** (same consume/mind-transfer plumbing).
 
-## Queued design: player regrowth by egg (Rose, 2026-11-18)
+## Player regrowth by egg — SHIPPED (`regrow_player`, 2026-11-18 night)
 
-An agent can take the player, unbirth them, convert them to an egg, plant
-the egg, and the PLAYER regrows from the grown body. Composes systems that
-all ship today: the agent-takes-player flow (spectate's grab), egg fates
-(egg/belly-egg), the belly-gene rebirth link (offspring reincarnation), and
-egg planting + growth. New pieces needed: an unbirth absorb trigger for the
-PLAYER body (consent-gated like spectate — explicit opt-in act, never a
-brush-by), a player→egg conversion step that carries the player's identity
-(name, memories) onto the egg's rebirth link, and the wake-up path routing
-the player into the grown body with their session restored. Every stage
-should narrate, and the player must be able to abort until the conversion
-completes. Do not weaken the existing double gates while building this.
+`regrow_player` (agent act, alongside `eat_player`) runs the whole ritual:
+take the player by unbirth, convert them to an egg, plant it, and the PLAYER
+wakes grown from it — gene-mixed with the carrier, identity and memories
+riding the egg's rebirth link.
+
+Consent shape (unchanged gates, composed): [LittleTreats] SwallowEnabled +
+SwallowAgentEat arm it, and the unbirth framing additionally requires the
+PLAYER's own SwallowDestination = pussy — the destination is theirs to
+choose, so the agent can never steer around it (`SwallowLogic.RegrowGate`).
+The acting agent's vore fate is pinned to egg through the same validated
+setter the `vore_mode` tool uses (it persists — the conversion reads it at
+completion; change it back afterwards). The success path pushes the full
+recipe as a guidance event (grab → find soil → drop → use → narrate every
+stage → greet by name on hatch).

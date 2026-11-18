@@ -373,6 +373,16 @@ internal static class TestSwallow
         True(SwallowLogic.BellyBulge(1f, 0.5f) < SwallowLogic.BellyBulge(1f, 0f),
             "bulge shrinks monotonically with progress");
 
+        // RegrowGate: the player-regrowth-by-egg consent checks (v1.8.0 design
+        // shipped 2026-11-18 night) — vore armed, agent act enabled, and the
+        // player's OWN destination must be pussy (unbirth; the destination is
+        // theirs to choose, never the agent's).
+        Eq(null, SwallowLogic.RegrowGate(true, true, true, SwallowDestination.Pussy), "regrow: full consent passes");
+        True(SwallowLogic.RegrowGate(false, true, true, SwallowDestination.Pussy) != null, "regrow: vore off gates");
+        True(SwallowLogic.RegrowGate(true, false, true, SwallowDestination.Pussy) != null, "regrow: agent-eat off gates");
+        True(SwallowLogic.RegrowGate(true, true, false, SwallowDestination.Mouth) != null, "regrow: mouth destination gates");
+        True(SwallowLogic.RegrowGate(true, true, false, SwallowDestination.Off) != null, "regrow: off destination gates");
+
         if (_failed == 0) Console.WriteLine("test_swallow: all OK");
         else Console.WriteLine("test_swallow: " + _failed + " failure(s)");
         Environment.Exit(_failed);

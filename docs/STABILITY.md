@@ -75,11 +75,15 @@ The two levers not yet pulled:
    variable at a time so a difference is attributable. Verify the module is
    actually engaged while playing: `lsmod | grep ntsync` should show a
    nonzero refcount.
-2. **MangoHud as verification** — pressure-vessel picks the NEWER of the
-   Steam-runtime vs system Mesa, so your mesa-git should win; confirm it
-   rather than assume: `mangohud %command%` in launch options shows the live
-   RADV/driver string plus frametime spikes (a stutter climb is the early
-   warning of the kind of submission storm that precedes a ring timeout).
+2. **NTSYNC attribution (field result 2026-11-18)**: the first session after
+   enabling it ran longest-yet with a clean close — AND it never picked up
+   the new Mesa (the session ran on the runtime's older Mesa), so the
+   stability win is attributable to **NTSYNC, not Mesa**. For Proton
+   targeting: enable NTSYNC first (`proton-cachyos` or
+   `PROTON_USE_NTSYNC=1`), verify via `lsmod | grep ntsync` refcount
+   mid-game, and treat Mesa builds as a separate later variable.
+   MangoHud: slightly more detailed than Steam's built-in performance
+   overlay but functionally redundant — optional, keep Steam's overlay.
 
 Optional, advanced: `umr` (AUR) — AMD's GPU register/ring forensics; if a
 hang recurs it can dump what the ring was executing, which turns "driver

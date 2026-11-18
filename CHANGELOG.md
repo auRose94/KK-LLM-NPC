@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] — 2026-11-18
+
+### Added (2026-11-18 night — `regrow_player`: the player-regrowth ritual)
+
+Rose's design, built the same night: an agent can take the player by
+UNBIRTH, convert them to an egg, plant it, and the PLAYER wakes grown from
+it — gene-mixed with the carrier, identity and memories riding the egg's
+rebirth link. `regrow_player` composes systems that all ship (agent-takes-
+player, egg fate, rebirth links, planting) into one consent-gated act:
+
+- **Consent gates composed and pinned** (`SwallowLogic.RegrowGate`, pure +
+  tested): SwallowEnabled + SwallowAgentEat arm it, and the unbirth framing
+  requires the PLAYER's own `SwallowDestination = pussy` — the destination
+  is theirs to choose, so the agent can never steer around it.
+- **The fate is the flow**: the acting agent's vore_mode is pinned to egg
+  through the same validated setter `vore_mode` uses (persists — the
+  conversion reads it at completion; change it back afterwards).
+- **The agent gets taught**: success pushes the full recipe as a guidance
+  event (grab the egg → find soil → drop → use to plant → narrate every
+  stage → greet them by name on hatch). Manual + prompt text updated in
+  sync.
+
 ## [1.8.0] — 2026-11-18
 
 The scene dump becomes the agents' map. Plus directional walk.

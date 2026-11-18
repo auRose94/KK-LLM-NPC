@@ -348,6 +348,22 @@ namespace KKLLMNPC
             }
         }
 
+        // REGROW GATE (player-regrowth-by-egg, v1.8.0): the consent + framing
+        // checks specific to `regrow_player` — vore armed by the operator, the
+        // agent-eats-player act enabled, and the player's own SwallowDestination
+        // set to pussy (unbirth is THE act here; the destination is the player's
+        // consent setting, so the agent can never override it to force this).
+        // Null = pass; otherwise a model-facing reason. Pure + unit-tested.
+        public static string RegrowGate(bool masterOn, bool agentEat, bool holeIsPussy, SwallowDestination dest)
+        {
+            if (!masterOn) return "vore is disabled by the operator ([LittleTreats] SwallowEnabled) — regrow_player needs it armed";
+            if (!agentEat) return "regrow_player needs the agent-eats-player act enabled ([LittleTreats] SwallowAgentEat)";
+            if (!holeIsPussy)
+                return "unbirth needs the player's SwallowDestination set to pussy (it is theirs to choose — yours is "
+                    + DestinationLabel(dest) + " right now); ask them to set it, or use eat_player with their current destination";
+            return null;
+        }
+
         // How a body "goes in" through each destination — the pull narration uses it.
         public static string EntryVerb(SwallowDestination d)
         {
