@@ -222,6 +222,20 @@ level IS the digestion. Game-side feasibility verified against the decompile:
 
 Pairs naturally with **reincarnation** (same consume/mind-transfer plumbing).
 
+## Rolled vore personas (2026-11-18 night, RimVore-2 quirks + RimWorld identity)
+
+Every body rolls a STABLE vore persona from its identity key (`VorePersonaCore`,
+deterministic FNV hash — same body, same persona, survives restarts with zero
+storage): an appetite trait (gluttonous ×1.6 / yearning ×1.25 / even-keeled
+×1.0 / picky ×0.75 / reluctant ×0.45 — scales the vore-drive climb, so some
+agents YEARN and others mostly ignore the loop), a style (gentle / fierce /
+playful / shy), and a curiosity (adventurous / curious / cautious). The line
+surfaces in the vore state as self-knowledge ("let it color HOW you feel about
+vore, not WHETHER you obey" — gates stay the operator's). Parity direction:
+RimVore-2 attaches quirks/preferences to identities and rolls them at spawn;
+the deeper RimWorld-style character systems (relationships, opinions,
+memories-with-feelings) are the natural next layers for the storytelling drama.
+
 ## Non-fatal vore — Endo mode (2026-11-18 night, RimVore-2 Hold parity)
 
 RimVore-2's Hold goal ("temporarily store… the pawn inside is intact, not

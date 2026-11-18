@@ -189,6 +189,18 @@ namespace KKLLMNPC
             }
         }
 
+        // POINT (v1.11.0): the spectating guest's host — the agent whose eyes
+        // they're watching through (null = not spectating). The HUD's click
+        // handler routes its raycast result to this agent.
+        internal static NPCInstance SpectatingEaterNpc()
+        {
+            lock (_lock)
+            {
+                var eater = _active != null ? _active.Eater : null;
+                return eater != null ? Plugin.InstanceForBody(eater) : null;
+            }
+        }
+
         // The always-on HUD/status line for the spectating player (null = idle).
         // HatchHint non-empty = there IS a hatch coming (digest or parked phase);
         // empty (only after MarkNoHatch for Grow/Destroy) = the no-hatch variant.

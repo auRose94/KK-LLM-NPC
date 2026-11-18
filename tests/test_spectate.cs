@@ -32,9 +32,31 @@ internal static class TestSpectate
         }
     }
 
+    // ---- PointText: the swallowed guest's click → pred-facing line ----
+    static void TestPointText()
+    {
+        // dead ahead: due north of the pred while facing north (yaw 0)
+        string s1 = SpectateLogic.PointText("Blender", 0, 0, 5, 0, 0, 0, 0);
+        True(s1.Contains("Blender") && s1.Contains("dead ahead") && s1.Contains("5m"), "point: dead ahead + distance");
+        // northeast (azimuth 45) of a north-facing pred is to the RIGHT
+        string s2 = SpectateLogic.PointText("Bucket", 3.5, 0, 3.5, 0, 0, 0, 0);
+        True(s2.Contains("your right"), "point: ne of north-facer is right");
+        // behind: due south
+        string s3 = SpectateLogic.PointText("Rock", 0, 0, -5, 0, 0, 0, 0);
+        True(s3.Contains("behind"), "point: south of north-facer is behind");
+        // above/below annotations
+        True(SpectateLogic.PointText("Lamp", 0, 4, 5, 0, 0, 0, 0).Contains("above you"), "point: above annotation");
+        True(SpectateLogic.PointText("Root", 0, -4, 5, 0, 0, 0, 0).Contains("below you"), "point: below annotation");
+        // world coords ride along for the gazetteer/go_to
+        True(SpectateLogic.PointText("Egg", 1.25, 0, 3.5, 0, 0, 0, 0).Contains("x:1.25"), "point: world coords in the line");
+        // empty name falls back to "something"
+        True(SpectateLogic.PointText("", 0, 0, 5, 0, 0, 0, 0).Contains("something"), "point: unnamed falls back");
+    }
+
     public static int Main()
     {
         // ---- the agent-eat gate: every reason is reachable, ok = null ----
+        TestPointText();
         Eq("disabled", SpectateLogic.AgentEatGate(false, true, true, false, 1f, 4f, false, false), "gate cfg off");
         Eq("no_body", SpectateLogic.AgentEatGate(true, false, true, false, 1f, 4f, false, false), "gate eater dead");
         Eq("no_player", SpectateLogic.AgentEatGate(true, true, false, false, 1f, 4f, false, false), "gate no player");

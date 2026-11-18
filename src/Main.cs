@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.10.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.11.0")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -2187,10 +2187,66 @@ namespace KKLLMNPC
     public class SpectateHudUI : MonoBehaviour
     {
         internal static LLMNPCPlugin PluginRef;
+
+        // POINT (v1.11.0, Rose's design): while spectating (swallowed / riding
+        // along), clicking the world = the guest POINTING something out to their
+        // host. The raycast turns the click into a world position + object name,
+        // the host's agent gets it as an event (bearing/distance relative to its
+        // own facing + world coords the gazetteer can route to), and the guest
+        // sees a circle marker + a confirmation line.
+        private string _pointFeedback;
+        private float _pointFeedbackUntil;
+        private Vector2 _pointCirclePos;
+        private float _pointCircleUntil;
+
+        private void HandleSpectatePoint()
+        {
+            try
+            {
+                var mouse = UnityEngine.InputSystem.Mouse.current;
+                if (mouse == null || !mouse.leftButton.wasPressedThisFrame) return;
+                if (SpectateManager.HudText() == null) return; // not spectating
+                var eaterNpc = SpectateManager.SpectatingEaterNpc();
+                if (eaterNpc == null) return;
+                var cam = Camera.main;
+                if (cam == null) return;
+                var mousePos = mouse.position.ReadValue();
+                mousePos.y = Screen.height - mousePos.y; // input system y is top-down; the camera wants bottom-up
+                var ray = cam.ScreenPointToRay(mousePos);
+                var hits = new RaycastHit[8];
+                int n = Physics.RaycastNonAlloc(ray, hits, 120f, ~0, QueryTriggerInteraction.Ignore);
+                var eaterBody = eaterNpc.KoboldObj as Kobold;
+                for (int i = 0; i < n; i++)
+                {
+                    var h = hits[i];
+                    if (h.collider == null) continue;
+                    try { if (h.collider.GetComponentInParent<Kobold>() != null) continue; } catch (Exception) { }
+                    // Skip hits behind the camera plane (the pred's own body shell).
+                    if (Vector3.Dot(h.point - ray.origin, ray.direction) < 0f) continue;
+                    string nm;
+                    try { nm = NPCInstance.CleanName(h.collider.gameObject.name); } catch (Exception) { nm = "something"; }
+                    float yaw = 0f;
+                    Vector3 ep = Vector3.zero;
+                    try { yaw = eaterNpc.YawDeg; ep = eaterBody != null ? eaterBody.transform.position : Vector3.zero; } catch (Exception) { }
+                    string msg = SpectateLogic.PointText(nm, h.point.x, h.point.y, h.point.z, ep.x, ep.y, ep.z, yaw);
+                    try { eaterNpc.PushWorldEvent("[point] " + msg); } catch (Exception) { }
+                    _pointFeedback = "pointed at " + nm + " — your host was told";
+                    _pointFeedbackUntil = Time.unscaledTime + 2f;
+                    _pointCirclePos = mousePos;
+                    _pointCircleUntil = Time.unscaledTime + 1.2f;
+                    return;
+                }
+                _pointFeedback = "pointed at the void — nothing there";
+                _pointFeedbackUntil = Time.unscaledTime + 1.5f;
+            }
+            catch (Exception) { }
+        }
+
         private void OnGUI()
         {
             try
             {
+                HandleSpectatePoint();
                 float y = 6f;
                 string hud = SpectateManager.HudText();
                 if (!string.IsNullOrEmpty(hud))
@@ -2255,6 +2311,23 @@ namespace KKLLMNPC
                             ly += 17f;
                         }
                     }
+                }
+
+                // POINT feedback: the click circle + confirmation line (guest-facing).
+                if (Time.unscaledTime < _pointCircleUntil)
+                {
+                    var r = new Rect(_pointCirclePos.x - 14f, _pointCirclePos.y - 14f, 28f, 28f);
+                    var oldColor = GUI.color;
+                    GUI.color = new Color(1f, 0.85f, 0.3f, 0.9f);
+                    GUI.Box(r, string.Empty);
+                    GUI.color = oldColor;
+                    GUI.Label(new Rect(_pointCirclePos.x + 18f, _pointCirclePos.y - 10f, 200f, 22f), "◯");
+                }
+                if (!string.IsNullOrEmpty(_pointFeedback) && Time.unscaledTime < _pointFeedbackUntil)
+                {
+                    var fs = new GUIStyle(GUI.skin.label);
+                    fs.alignment = TextAnchor.LowerCenter;
+                    GUI.Label(new Rect((Screen.width - 620f) / 2f, Screen.height - 46f, 620f, 26f), _pointFeedback, fs);
                 }
             }
             catch (Exception) { }

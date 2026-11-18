@@ -109,6 +109,19 @@ namespace KKLLMNPC
                     : "vore is DISABLED by the operator (SwallowEnabled is off — nothing you set takes effect until they enable it)")
                 + "; your own target = " + (target ?? "(none — follows the operator's setting: " + globalTarget + ")")
                 + "; your own fate = " + (mode ?? "(none — follows the operator's setting: " + globalMode + ")");
+            // ROLLED PERSONA (v1.11.0, RimVore-2 quirks parity): stable per body —
+            // self-knowledge the LLM reads as identity, appetite trait feeds the
+            // drive climb (see VoreAppetiteClimb).
+            try
+            {
+                if (_kobold != null)
+                {
+                    var persona = VorePersonaCore.Roll(NPCInstance.BodyKey(_kobold));
+                    string pl = VorePersonaCore.StateLine(persona);
+                    if (!string.IsNullOrEmpty(pl)) line += "\n" + pl;
+                }
+            }
+            catch (Exception) { }
             return line;
         }
 

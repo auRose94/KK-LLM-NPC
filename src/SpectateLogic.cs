@@ -149,5 +149,33 @@ namespace KKLLMNPC
             }
             return b;
         }
+
+        // POINT (v1.11.0, Rose's design): a swallowed guest clicks something in
+        // the world they're watching through their pred's eyes — the click turns
+        // into this line for the PRED's agent: what it is, bearing relative to
+        // the pred's own facing (they can just turn), distance, and the world
+        // coords (the scene gazetteer / go_to can route to it). Pure + unit-tested.
+        public static string PointText(string hitName, double hx, double hy, double hz,
+            double ax, double ay, double az, double yawDeg)
+        {
+            string who = string.IsNullOrEmpty(hitName) ? "something" : hitName;
+            double dx = hx - ax, dz = hz - az, dy = hy - ay;
+            double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            double rel = AzimuthDeg(dx, dz) - yawDeg;
+            while (rel < -180f) rel += 360f;
+            while (rel > 180f) rel -= 360f;
+            string side = Math.Abs(rel) < 22.5 ? "dead ahead"
+                : rel < 0 ? (rel < -67.5 ? "behind-left" : rel < -22.5 ? "to your left" : "ahead-left")
+                : (rel > 67.5 ? "behind-right" : rel > 22.5 ? "to your right" : "ahead-right");
+            string heightWord = Math.Abs(dy) < 1.2 ? ""
+                : (dy > 0 ? " (above you)" : " (below you)");
+            return "your guest is POINTING at " + who + " — " + side + ", "
+                + dist.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "m"
+                + heightWord
+                + " (world x:" + hx.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)
+                + " y:" + hy.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)
+                + " z:" + hz.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + ")"
+                + " — they want you to notice it";
+        }
     }
 }

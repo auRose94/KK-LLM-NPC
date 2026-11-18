@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-11-18
+
+### Added (2026-11-18 night — prey pointing + rolled vore personas)
+
+- **Prey click-to-point** (Rose's design): while swallowed and spectating,
+  clicking the world = the guest POINTING something out. The HUD raycasts the
+  click, skips the pred's own body, and turns the hit into a pred-facing
+  event: what it is, bearing relative to the pred's own facing, distance,
+  height annotation, and the world coords (the gazetteer/go_to can route to
+  it). The guest sees a gold circle at the click point + a confirmation line.
+  Prey inside a pred finally has EYES WITH AGENCY.
+- **Rolled vore personas** (RimVore-2 quirks parity + RimWorld identity):
+  every body rolls a stable persona from its identity key — gluttonous/
+  yearning/even-keeled/picky/reluctant (appetite trait scales the vore-drive
+  climb: some agents yearn, others mostly ignore the loop), plus style
+  (gentle/fierce/playful/shy) and curiosity (adventurous/curious/cautious)
+  as self-knowledge in the vore state ("color HOW you feel, not WHETHER you
+  obey"). Deterministic per body — same body, same persona, survives
+  restarts with zero storage. Pure `VorePersonaCore.cs` + tests (spectate
+  suite grew PointText cases: bearings, height annotations, coords).
+
 ## [1.10.0] — 2026-11-18
 
 ### Added (2026-11-18 night — Endo: non-fatal vore, RimVore-2 Hold parity)

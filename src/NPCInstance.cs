@@ -717,7 +717,16 @@ namespace KKLLMNPC
         {
             float rate = 1.5f;
             try { if (_cfgVoreAppetiteRate != null && _cfgVoreAppetiteRate.Value >= 0f) rate = _cfgVoreAppetiteRate.Value; } catch (Exception) { }
-            lock (_stateLock) { if (rate > 0f) _voreAppetite = Mathf.Min(1f, _voreAppetite + (rate / 60f) * dt); }
+            // VORE PERSONA (v1.11.0): the rolled appetite trait scales the climb —
+            // a gluttonous body yearns fast, a reluctant one barely hungers. The
+            // persona is deterministic per body identity, so it IS the body.
+            double personaMult = 1.0;
+            try
+            {
+                if (_kobold != null) personaMult = VorePersonaCore.Roll(NPCInstance.BodyKey(_kobold)).ClimbMultiplier;
+            }
+            catch (Exception) { }
+            lock (_stateLock) { if (rate > 0f) _voreAppetite = Mathf.Min(1f, _voreAppetite + (float)((rate / 60f) * personaMult) * dt); }
         }
         // Previous tick's stimulation, NORMALIZED 0-1 (see UpdateHorniness), and how
         // long stimulation has been sustained near max without a climax.
