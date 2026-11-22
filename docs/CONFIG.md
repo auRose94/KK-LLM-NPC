@@ -181,13 +181,14 @@ Potency   = 1.0
 | `Deceleration` | `6` | 0.5–50 units/s² | How fast the entity slows down when stopping |
 | `BrakeDistance` | `2` | 0.1–20m | Distance from go_to target where the entity starts slowing down |
 | `PathfindingEnabled` | `true` | bool | A* pathfinding on a local walkability grid around go_to |
-| `PathfindingCellSize` | `0.5` | 0.1–5m | A* grid cell size in meters |
+| `PathfindingCellSize` | `0.4` | 0.1–5m | A* grid cell size in meters. 0.4 default (was 0.5): finer local detail so small gaps resolve — smaller = finer + slower + more memory. |
 | `PathfindingWindow` | `20` | 2–100m | A* search window radius in meters around start and goal |
 | `PathfindingNodes` | `9000` | 200–50000 | Max pathfinding grid node budget before it gives up and falls back to direct steering |
 | `PathTimeBudgetMs` | `8` | ≥1ms | Time budget (ms) for A* path expansion. On overrun, returns partial path instead of null |
 | `PathMaxExpansions` | `20000` | ≥100 | Max A* node expansions. On overrun, returns partial path instead of null |
 | `WorldMapEnabled` | `true` | bool | Build & cache a full-scene 3D walkability map shared by ALL agents |
-| `WorldMapCellSize` | `1.0` | 0.25–4m | World-map grid cell size in meters (auto-inflates if the node budget is exceeded) |
+| `WorldMapCellSize` | `0.4` | 0.25–4m | World-map grid cell size in meters (auto-inflates if the node budget is exceeded). 0.4 default (was documented 1.0, code shipped 0.5): finer voxels represent narrower gaps — tiny kobolds route through cracks the coarse map couldn't see. Costs map memory/build time (~1.5× at 0.4 vs 0.5) and invalidates cached .kkmap files for the scene (one rebuild). |
+| `NavRadiusScale` | `1.0` | 0.5–3 | Global multiplier on every body's navigation clearance. The body's own size is the base (transform scale — tiny genes squeeze, vore growth widens; clamped 0.18–1.4m radius), so 1.0 = size-honest paths: tiny kobolds slip through gaps, large ones route around what they can't fit. <1 squeezes harder (0.7 ≈ one size smaller), >1 forces headroom. The pathfinder's string-pull veto, simplifier deviation and physics-ray lanes all use it. |
 | `WorldMapMaxSpan` | `2000` | ≥2m | Max span (m) for the full-scene world map. Adaptive cell sizing (span/1200, clamped to [0.5,4.0]) keeps the grid within the hard cell cap (~4M) |
 | `WorldMapMaxCells` | `4000000` | ≥1 | Hard cell cap for the world map. If cols×rows exceeds this, cell size is inflated |
 | `WorldMapAutoLayers` | `true` | bool | Auto-detect floor layers from scene Y samples (gap > 1.5m = new layer, cap 16). If false, uses fixed layer count |

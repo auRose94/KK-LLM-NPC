@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.1] — 2026-11-21
+
+### Added (2026-11-21 — the shopping district + body-size-aware navigation)
+
+- **The shop district is on the map** (Rose: agents must reach the store and
+  the wall contracts). Ground-truthed against the game source port: the
+  construction shop's wall contracts are `ConstructionContract : GenericUsable`
+  stations (`Buy*Contract`, star-gated in `CanUse`), the shop shelves are
+  `GenericPurchasable` stations (51 across the map — seeds/eggs/buckets/
+  equipment, 30s restock), and there is no shopkeeper — the sheep is flavor
+  text. `places` now lists **shop / contract / goods / mailbox** kinds
+  scene-wide alongside nests/beds/farms/water (`ClassifyByType` gained
+  `genericpurchasable`→goods; `ClassifyUsable` gained shop/market/peddler/
+  vendor, ordered before contract so `ConstructionShop` lands as the STORE).
+  The dead `mailbox` kind in the places filter is live again.
+- **Prompt lore — the shopping flow + navigation honesty**: `:needs_buy` now
+  teaches the route (contracts hang on the wall at the construction shop —
+  `places`/`find` give the real route — walk close, `buy <name>`), the star
+  gate (a refusing contract needs more quest stars — check the objective
+  scroll), 30s restock, and NAVIGATION HONESTY: never narrate corridors or
+  doorways perception hasn't shown; a failed `cd`/`go_to` means the route
+  doesn't exist yet — re-check places/find/ask, never invent a hallway.
+- **Body-size-aware navigation** — the fixed 0.35m/0.45m clearance constants
+  are per-body now: a body's nav radius = 0.35m × its transform scale (vore
+  growth, shrink effects, tiny/large genes), clamped 0.18–1.4m, threaded
+  through the octree string-pull veto, the simplifier's deviation bound, the
+  physics-ray lanes and every `FindPathSmoothed`/`SegmentClear` call
+  (Movement, Pathfinding, ModGrab). Tiny kobolds squeeze through cracks the
+  old constant refused; large ones route around gaps they can't fit.
+  `[Movement] NavRadiusScale` (default 1.0) tunes globally; world-map cells
+  default finer (0.4, was 0.5 — narrower gaps resolve; one .kkmap rebuild).
+
+## [1.13.1] — 2026-11-21
+
+### Fixed (2026-11-21 — roleplay quoted as JSON reached the say tool; adversarial test round)
+
+- **Speech hygiene rebuilt as pure `SpeechClean.cs`** (Rose: "quoting roleplay
+  as json formatted strings that get sent to the say tool" + "write unit tests
+  that try to use the systems wrong"). The old cleaner extracted a voice field
+  and returned it UNCLEANED — a JSON blob nested inside the say parameter
+  ({"say":"{\"roleplay\":{\"line\":…}}"}) sailed straight to chat — and nested
+  objects dodged the flat-fragment regex ([^{}]* cannot cross a brace). Now:
+  voice fields clean RECURSIVELY (object-valued fields re-serialize and
+  recurse; depth-capped), mid-text fragments strip by BRACE-MATCHED scan
+  (nested included; RP braces and {{user}} placeholders survive the
+  quoted-key+colon look test), double-escaped payloads retry once unescaped
+  (gated on the lenient parser's garbage-empty-key signature), and the
+  INVARIANT — the cleaned say is never a parseable JSON document (object OR
+  array); everything-else-refused feeds the model the format note. The
+  adversarial suite (test_speechclean.cs, 27 asserts) was written FIRST per
+  Rose's ask and caught the first fix being insufficient three times — the
+  tests drove the final design.
+- **In-game options-menu diagnosis continues**: the injection structurally
+  succeeds (18 tabs in the ButtonPanel per the VR mod's own dump); an open-time
+  layout doctor now dumps live button/view state and auto-fits the panel from
+  rendered heights. See docs + log lines `options-dump:` / `options-fit:`.
+
 ## [1.13.0] — 2026-11-21
 
 ### Fixed (2026-11-21 — phantom sex after eating someone; Rose's field report)

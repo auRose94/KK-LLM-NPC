@@ -82,6 +82,7 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgBrakeDist;
         internal ConfigEntry<bool> _cfgPathEnabled;
         internal ConfigEntry<float> _cfgPathCell;
+        internal ConfigEntry<float> _cfgNavRadius;
         internal ConfigEntry<float> _cfgPathSpan;
         internal ConfigEntry<int> _cfgPathCap;
         internal ConfigEntry<float> _cfgPathTimeBudget;
@@ -835,6 +836,7 @@ namespace KKLLMNPC
             _cfgBrakeDist = plugin._cfgBrakeDist;
             _cfgPathEnabled = plugin._cfgPathEnabled;
             _cfgPathCell = plugin._cfgPathCell;
+            _cfgNavRadius = plugin._cfgNavRadius;
             _cfgPathSpan = plugin._cfgPathSpan;
             _cfgPathCap = plugin._cfgPathCap;
             _cfgPathTimeBudget = plugin._cfgPathTimeBudget;

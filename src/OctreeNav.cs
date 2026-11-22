@@ -444,6 +444,15 @@ namespace KKLLMNPC
 
         public bool SegmentOpen(float x0, float y0, float z0, float x1, float y1, float z1)
         {
+            return SegmentOpen(x0, y0, z0, x1, y1, z1, SegmentVetoRadiusM);
+        }
+
+        // BODY-SIZE-AWARE (2026-11-21): the veto radius follows the requesting
+        // body — tiny kobolds get narrow lanes (squeeze through cracks), large
+        // ones wide lanes (route around gaps they can't fit). WorldMap threads
+        // its per-body radius in; the const remains the default for compat.
+        public bool SegmentOpen(float x0, float y0, float z0, float x1, float y1, float z1, float vetoRadiusM)
+        {
             if (_walls.Count == 0) return true;
             float dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
             float len = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
@@ -461,7 +470,8 @@ namespace KKLLMNPC
                 float cx = _minX + (vx + 0.5f) * _cell;
                 float cy = (vy + 0.5f) * _cell;
                 float cz = _minZ + (vz + 0.5f) * _cell;
-                if (PointSegmentDist(cx, cy, cz, x0, y0 + 0.75f, z0, x1, y1 + 0.75f, z1) <= SegmentVetoRadiusM)
+                float veto = vetoRadiusM > 0.05f ? vetoRadiusM : 0.05f;
+                if (PointSegmentDist(cx, cy, cz, x0, y0 + 0.75f, z0, x1, y1 + 0.75f, z1) <= veto)
                     return false;
             }
             return true;

@@ -855,13 +855,13 @@ namespace KKLLMNPC
         // from a ramp onto an overpass is checked against both levels' walls);
         // otherwise per-layer 2D as before. Unavailable tree / unknown layer → no
         // constraint (the rays decide); tree math hiccups → conservative refusal.
-        private static bool TreeLegOpen(WorldMapBuild b, WorldMapGrid g, List<Vector3> way, int i, int j)
+        private static bool TreeLegOpen(WorldMapBuild b, WorldMapGrid g, List<Vector3> way, int i, int j, float radiusM)
         {
             try
             {
                 OctreeNav oct = _octree;
                 if (oct != null)
-                    return oct.SegmentOpen(way[i].x, way[i].y, way[i].z, way[j].x, way[j].y, way[j].z);
+                    return oct.SegmentOpen(way[i].x, way[i].y, way[i].z, way[j].x, way[j].y, way[j].z, radiusM);
                 int ci = CellIndexOf(b, way[i].x, way[i].z);
                 if (ci < 0) return true;
                 int layer = g.LayerNear(ci, way[i].y);
@@ -885,6 +885,17 @@ namespace KKLLMNPC
         // A* + string-pull in one shot. Main thread (smoothing raycasts).
         internal static List<Vector3> FindPathSmoothed(Vector3 start, Vector3 goal)
         {
+            return FindPathSmoothed(start, goal, BodyHalfWidthM);
+        }
+
+        // BODY-SIZE-AWARE (2026-11-21): radiusM is the requesting body's half
+        // width — tiny kobolds get narrow lanes and squeeze through cracks,
+        // large ones get wide lanes and route around gaps they can't fit. The
+        // radius flows into the string-pull veto, the simplifier's deviation
+        // bound, and the physics-ray lanes.
+        internal static List<Vector3> FindPathSmoothed(Vector3 start, Vector3 goal, float radiusM)
+        {
+            float r = Mathf.Clamp(radiusM, 0.15f, 1.5f);
             WorldMapBuild b; WorldMapGrid g;
             lock (_gate) { b = _build; g = _grid; }
             if (b == null || !b.Ready || g == null) return null;
@@ -903,7 +914,7 @@ namespace KKLLMNPC
                 {
                     int j = n - 1;
                     for (; j > i + 1; j--)
-                        if (RayClear(way[i], way[j]) && TreeLegOpen(b, g, way, i, j)) break;
+                        if (RayClear(way[i], way[j], r) && TreeLegOpen(b, g, way, i, j, r)) break;
                     outWay.Add(way[j]);
                     i = j;
                 }
@@ -912,7 +923,7 @@ namespace KKLLMNPC
                     // the A* staircase survives as many short posts. Physics rays are
                     // the final truth — drop any post whose removal keeps the segment
                     // ray-clear AND stays within a body width of the line.
-                    outWay = SimplifyDeviating(outWay);
+                    outWay = SimplifyDeviating(outWay, r + 0.10f);
                     if (outWay.Count >= 2 && outWay[outWay.Count - 1] == outWay[outWay.Count - 2])
                         outWay.RemoveAt(outWay.Count - 1);
                     return outWay.Count >= 2 ? outWay : null;
@@ -938,6 +949,11 @@ namespace KKLLMNPC
 
         private static List<Vector3> SimplifyDeviating(List<Vector3> way)
         {
+            return SimplifyDeviating(way, SimplifyDeviationM);
+        }
+
+        private static List<Vector3> SimplifyDeviating(List<Vector3> way, float deviationM)
+        {
             if (way == null || way.Count < 3) return way;
             var keep = new List<Vector3>(way);
             int guard = 0;
@@ -955,7 +971,7 @@ namespace KKLLMNPC
                     if (t < 0f) t = 0f; else if (t > 1f) t = 1f;
                     float qx = a.x + abx * t, qz = a.z + abz * t;
                     float dx = b.x - qx, dz = b.z - qz;
-                    if (dx * dx + dz * dz > SimplifyDeviationM * SimplifyDeviationM) continue;
+                    if (dx * dx + dz * dz > deviationM * deviationM) continue;
                     float qy = a.y + (c.y - a.y) * t;
                     if (Math.Abs(b.y - qy) > SimplifyDeviationYM) continue;
                     if (!RayClear(a, c)) continue;
@@ -979,6 +995,27 @@ namespace KKLLMNPC
         // string-pulled paths used to slice the door opening dead-center, and the body
         // clipped the frame post on every pass.
         internal const float BodyHalfWidthM = 0.35f;
+
+        // BODY-SIZE-AWARE clearance (2026-11-21): a body's nav radius scales with
+        // its actual size — the game grows/shrinks bodies via transform scale
+        // (vore growth, the shrink ray, tiny/large genes), so lossyScale.x is the
+        // honest size factor. Clamped: even the tiniest kobold keeps a walking
+        // lane, and even the largest never routes through walls. scaleMul is the
+        // operator's global [Movement] NavRadiusScale tuning knob.
+        internal static float NavRadiusFor(Kobold k, float scaleMul)
+        {
+            float size = 1f;
+            try
+            {
+                if (k != null && k.transform != null)
+                {
+                    var ls = k.transform.lossyScale;
+                    if (ls.x > 0.01f) size = ls.x;
+                }
+            }
+            catch (Exception) { }
+            return Mathf.Clamp(BodyHalfWidthM * size * Mathf.Max(0.1f, scaleMul), 0.18f, 1.4f);
+        }
 
         internal static bool SegmentClear(Vector3 a, Vector3 b, Func<Collider, bool> reject)
         {
@@ -1012,7 +1049,12 @@ namespace KKLLMNPC
 
         private static bool RayClear(Vector3 a, Vector3 b)
         {
-            return SegmentClear(a, b, c => c.GetComponentInParent<Kobold>() != null, BodyHalfWidthM);
+            return RayClear(a, b, BodyHalfWidthM);
+        }
+
+        private static bool RayClear(Vector3 a, Vector3 b, float radiusM)
+        {
+            return SegmentClear(a, b, c => c.GetComponentInParent<Kobold>() != null, radiusM);
         }
 
         // ------------------------------------------------------------------

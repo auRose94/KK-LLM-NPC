@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.13.0")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.13.1")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).
@@ -122,6 +122,7 @@ namespace KKLLMNPC
         internal ConfigEntry<float> _cfgBrakeDist;
         internal ConfigEntry<bool> _cfgPathEnabled;
         internal ConfigEntry<float> _cfgPathCell;
+        internal ConfigEntry<float> _cfgNavRadius;
         internal ConfigEntry<float> _cfgPathSpan;
         internal ConfigEntry<int> _cfgPathCap;
         internal ConfigEntry<float> _cfgPathTimeBudget;
@@ -540,6 +541,8 @@ namespace KKLLMNPC
             _cfgBrakeDist = Config.Bind("Movement", "BrakeDistance", 2f, "Distance from go_to target where the entity starts slowing down (m)");
             _cfgPathEnabled = Config.Bind("Movement", "PathfindingEnabled", true, "A* pathfinding on a local walkability grid around go_to (falls back to direct steering when disabled, blocked, or no path exists)");
             _cfgPathCell = Config.Bind("Movement", "PathfindingCellSize", Consts.DefaultPathCellSize, "A* grid cell size in meters");
+            _cfgNavRadius = Config.Bind("Movement", "NavRadiusScale", 1.0f,
+                "Global multiplier on every body's navigation clearance. The body's OWN size is the base (its transform scale — tiny genes squeeze, vore growth widens), so 1.0 = size-honest paths. <1 lets everyone squeeze harder (0.7 ≈ one size smaller), >1 forces more headroom (large avatars stop clipping doorways). Clamped to a 0.18–1.4m radius either way.");
             _cfgPathSpan = Config.Bind("Movement", "PathfindingWindow", Consts.DefaultPathSpan, "A* search window radius in meters around start and goal (clamped by node budget)");
             _cfgPathCap = Config.Bind("Movement", "PathfindingNodes", Consts.DefaultPathNodeCap, "Max pathfinding grid node budget before it gives up and falls back to direct steering");
             // Time budget for A* expansion (ms). On overrun, partial path is returned.
@@ -547,7 +550,7 @@ namespace KKLLMNPC
             _cfgPathMaxExpansions = Config.Bind("Movement", "PathMaxExpansions", Consts.PathMaxExpansions, "Max A* node expansions. On overrun, returns partial path instead of null.");
             _cfgMapEnabled = Config.Bind("Movement", "WorldMapEnabled", true,
                 "Build & cache a full-scene 3D walkability map shared by ALL agents (BepInEx/config/kkllmnpc_maps/<scene>.kkmap). go_to routes stairs/ramps/other floors and any in-bounds distance; falls back to the local window grid while it builds");
-            _cfgMapCell = Config.Bind("Movement", "WorldMapCellSize", 0.5f,
+            _cfgMapCell = Config.Bind("Movement", "WorldMapCellSize", 0.4f,
                 "World-map grid cell size in meters (0.5 = door-width paths; auto-inflates for huge maps up to the hard cell cap; a cached coarser map is discarded so this always applies)");
             _cfgMapSpan = Config.Bind("Movement", "WorldMapMaxSpan", 2000f,
                 "Max span (m) for the full-scene world map. Adaptive cell sizing (span/1200, clamped to [0.5,4.0]) keeps the grid within the hard cell cap (~4M).");
@@ -734,6 +737,7 @@ namespace KKLLMNPC
             _cfgCommentTemp.Value = Mathf.Clamp(_cfgCommentTemp.Value, 0f, 2f);
             _cfgAutoFindRange.Value = Mathf.Clamp(_cfgAutoFindRange.Value, 1f, 500f);
             _cfgPathCell.Value = Mathf.Clamp(_cfgPathCell.Value, Consts.MinPathCellSize, Consts.MaxPathCellSize);
+            _cfgNavRadius.Value = Mathf.Clamp(_cfgNavRadius.Value, 0.5f, 3f);
             _cfgPathSpan.Value = Mathf.Clamp(_cfgPathSpan.Value, Consts.MinPathSpan, Consts.MaxPathSpan);
             _cfgPathCap.Value = Mathf.Clamp(_cfgPathCap.Value, Consts.MinPathNodeCap, Consts.MaxPathNodeCap);
             _cfgPathTimeBudget.Value = Mathf.Max(1f, _cfgPathTimeBudget.Value);

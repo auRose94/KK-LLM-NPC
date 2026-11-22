@@ -125,6 +125,7 @@ run_headless_suites() {
   run_suite modhooks   tests/test_modhooks.cs -- src/ModHooksCore.cs
   run_suite l10n       tests/test_l10n.cs -- src/L10nCore.cs src/Json.cs
   run_suite promptresolve tests/test_promptresolve.cs -- src/PromptSource.cs
+  run_suite speechclean tests/test_speechclean.cs -- src/SpeechClean.cs src/Json.cs
 }
 
 # Every *.cs in tests/ must be reachable from a run_suite line above, otherwise a

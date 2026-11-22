@@ -389,7 +389,7 @@ namespace KKLLMNPC
             // 2) plan the route (same shapes ToolGoTo stores).
             Vector3 arrive = targetTf != null ? targetTf.position : _deliveredTargetPos;
             object pathObj = null;
-            try { pathObj = RunOnMainThread(() => WorldMap.Ready ? (object)WorldMap.FindPathSmoothed(_kobold.transform.position, arrive) : null, 20000); }
+            try { pathObj = RunOnMainThread(() => WorldMap.Ready ? (object)WorldMap.FindPathSmoothed(_kobold.transform.position, arrive, NavRadius()) : null, 20000); }
             catch (Exception) { }
             var path = pathObj as List<Vector3>;
             if (path == null || path.Count < 2)

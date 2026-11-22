@@ -419,6 +419,114 @@ namespace KKLLMNPC
             Plugin = plugin;
         }
 
+        // THE MOD DOCTOR (menu no-show, 2026-11-21): runs when the Options
+        // screen is actually OPEN (poll — GetCurrentMode is a public static and
+        // ShowMenu proved unreliable to patch), when rects are laid out for
+        // real. Dumps the live layout + fits the ButtonPanel to its children
+        // using RENDERED heights (boot-time sizeDelta lied: the layout group
+        // stretches buttons, so the first fit under-measured and the panel
+        // grew by a token 94px — game buttons shifted half of it up into the
+        // back button, mod buttons stayed clipped).
+        private static bool _wasOptions;
+        private static FieldInfo _mmInstanceF;
+
+        private static void PollOpenMenu()
+        {
+            bool isOpen;
+            try { isOpen = MainMenu.GetCurrentMode() == MainMenu.MainMenuMode.Options; }
+            catch (Exception) { return; } // boot race: the menu singleton isn't up yet — silent, retried next tick
+            try
+            {
+                if (!isOpen) { _wasOptions = false; return; }
+                if (_wasOptions) return; // once per open
+                _wasOptions = true;
+                // The static instance survives even when the GameObject sleeps —
+                // FindObjectOfType misses inactive hierarchies (that NRE cost us
+                // the first dump). Reflection fetch is reliable either way.
+                if (_mmInstanceF == null)
+                    _mmInstanceF = typeof(MainMenu).GetField("instance",
+                        BindingFlags.NonPublic | BindingFlags.Static);
+                var menu = _mmInstanceF != null ? _mmInstanceF.GetValue(null) as MainMenu : null;
+                if (menu == null) { DumpLine("options-dump: MainMenu instance not reachable"); return; }
+                DumpLine("options-dump: stage1 instance OK");
+                var optionsRoot = FindChild(menu.transform, "View - Options");
+                if (optionsRoot == null) { DumpLine("options-dump: View - Options NOT FOUND"); return; }
+                var body = FindChild(optionsRoot, "Body");
+                var bp = body != null ? FindChild(body, "ButtonPanel") : null;
+                var panel = body != null ? FindChild(body, "Panel") : null;
+                DumpLine("options-dump: stage2 root found");
+                DumpLine("options-dump: OptionsTab active=" + optionsRoot.gameObject.activeInHierarchy
+                    + " (self=" + optionsRoot.gameObject.activeSelf + ")");
+                if (bp != null)
+                {
+                    var rt = bp as RectTransform;
+                    var lg = bp.GetComponent<UnityEngine.UI.VerticalLayoutGroup>();
+                    // ancestor masks: a RectMask2D/Mask anywhere above the panel
+                    // clips overflow — the #1 suspect for "buttons exist but don't show".
+                    string masks = "";
+                    for (var t = bp.parent; t != null; t = t.parent)
+                    {
+                        if (t.GetComponent<UnityEngine.UI.RectMask2D>() != null) masks += " RectMask2D(" + t.name + ")";
+                        if (t.GetComponent<UnityEngine.UI.Mask>() != null) masks += " Mask(" + t.name + ")";
+                    }
+                    DumpLine("options-dump: stage3 buttonpanel located");
+                    if (rt != null)
+                        DumpLine("options-dump: ButtonPanel h=" + R1(rt.rect.height)
+                            + " children=" + bp.childCount
+                            + (lg != null ? " layout[spacing=" + R1(lg.spacing) + " controlH=" + lg.childControlHeight
+                                + " forceH=" + lg.childForceExpandHeight + " align=" + lg.childAlignment + "]" : " no-layout")
+                            + (masks.Length > 0 ? " CLIPS VIA:" + masks : " (no ancestor mask)"));
+                    for (int i = 0; i < bp.childCount; i++)
+                    {
+                        try {
+                        var c = bp.GetChild(i) as RectTransform;
+                        if (c == null) { DumpLine("options-dump:   [" + i + "] " + bp.GetChild(i).name + " (no RectTransform)"); continue; }
+                        var b = c.GetComponent<Button>();
+                        var tmp = c.GetComponentInChildren<TMPro.TMP_Text>(false);
+                        string label = tmp != null && tmp.text != null
+                            ? tmp.text.Substring(0, Math.Min(24, tmp.text.Length)) : "";
+                        DumpLine("options-dump:   [" + i + "] " + c.name
+                            + " active=" + (c.gameObject.activeInHierarchy ? "yes" : "no")
+                            + " h=" + R1(c.rect.height)
+                            + " y=" + R1(c.anchoredPosition.y)
+                            + (b != null ? " btn(en=" + b.enabled + ",int=" + b.interactable + ")" : " no-button")
+                            + (tmp != null ? " label='" + label + "'" : ""));
+                        } catch (Exception pe) { DumpLine("options-dump:   [" + i + "] child dump failed: " + pe.Message); }
+                    }
+                    try { RelayoutModdedButtons(bp); } catch (Exception re) { DumpLine("options-relayout failed: " + re); }
+                    try { FitButtonPanel(bp); } catch (Exception fe) { DumpLine("options-fit failed hard: " + fe); }
+                }
+                if (panel != null)
+                {
+                    for (int i = 0; i < panel.childCount; i++)
+                    {
+                        var v = panel.GetChild(i);
+                        if (!v.name.StartsWith("View - ")) continue;
+                        var content = FindChild(v, "Content");
+                        DumpLine("options-dump: view " + v.name + " active=" + (v.gameObject.activeInHierarchy ? "yes" : "no")
+                            + " (self=" + v.gameObject.activeSelf + ")"
+                            + (content != null ? " rows=" + content.childCount : " no-content"));
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                // FULL STACK (mono emits method names without symbols) — the
+                // plain NRE message cost us two round-trips already.
+                DumpLine("options-dump failed: " + e);
+            }
+        }
+
+        private static string R1(float f)
+        {
+            return f.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private static void DumpLine(string msg)
+        {
+            try { LLMNPCPlugin.Log.LogInfo(msg); } catch (Exception) { }
+        }
+
         // Cheap poll from the plugin's update loop: build once the menu prefab
         // and the SettingsManager singleton exist (a few seconds after boot).
         // Retry budget: a transient not-ready state (SettingsManager Awake
@@ -437,6 +545,9 @@ namespace KKLLMNPC
 
         internal static void Tick()
         {
+            // The mod doctor: runs whether or not the build succeeded — the
+            // open-menu dump/fit is the diagnosis channel for a visual no-show.
+            try { PollOpenMenu(); } catch (Exception) { }
             if (_built || _failed) return;
             var cfg = Plugin != null ? Plugin._cfgOptionsMenu : null;
             if (cfg != null && !cfg.Value) { _built = true; return; }
@@ -569,6 +680,124 @@ namespace KKLLMNPC
                     if (entry == null) continue; // key renamed/removed upstream — skip quietly
                     RegisterProxy(group, opt, entry);
                 }
+            }
+        }
+
+        // The prefab's ButtonPanel was laid out for the game's SIX buttons; we
+        // add six more and the VR rig adds its own — without help the extras
+        // render past the panel's bottom edge (the BG image only covers the
+        // original height). Measured at OPTIONS-OPEN time from the RENDERED
+        // child rects (boot-time sizeDelta lied — the layout group stretches
+        // buttons, which is how the first fit under-measured by 6×) and
+        // idempotent: it measures live every open, never remembers state.
+        // The game's six canonical category buttons — everything else in the
+        // ButtonPanel is mod-injected (ours, the VR rig's, future mods').
+        private const float ModSlotHeight = 78f; // matches the VR rig's slot math (interop)
+
+        private static readonly string[] GameButtonNames =
+        {
+            "Button - Gameplay", "Button - Controls", "Button - Audio",
+            "Button - Graphics", "Button - Analytics", "Button - Multiplayer",
+        };
+
+        // RELAYOUT (2026-11-21, coordinating with the VR agent's forensics): the
+        // ButtonPanel has NO functioning runtime layout group — clones spawn at
+        // the template's position and stack invisibly behind Graphics. Re-flow
+        // every MODDED button (ours AND the VR rig's, name-sorted, deterministic)
+        // into 78px slots below the last game button (Multiplayer), then the fit
+        // expands the panel downward-only to cover them. Idempotent: runs on
+        // every Options-open from the live hierarchy.
+        private static void RelayoutModdedButtons(Transform bp)
+        {
+            var rt = bp as RectTransform;
+            if (rt == null) return;
+            // A layout group that wakes up later would fight manual placement.
+            var lg = rt.GetComponent<UnityEngine.UI.VerticalLayoutGroup>();
+            if (lg != null && lg.enabled)
+            {
+                lg.enabled = false;
+                DumpLine("options-relayout: disabled the panel's VerticalLayoutGroup (it was not laying out at runtime anyway)");
+            }
+            Transform anchor = null;
+            var modded = new List<RectTransform>();
+            for (int i = 0; i < bp.childCount; i++)
+            {
+                var c = bp.GetChild(i);
+                bool game = false;
+                foreach (var g in GameButtonNames) if (c.name == g) { game = true; break; }
+                if (game) { if (c.name == GameButtonNames[GameButtonNames.Length - 1]) anchor = c; continue; }
+                var crt = c as RectTransform;
+                if (crt != null && c.GetComponent<Button>() != null) modded.Add(crt);
+            }
+            if (anchor == null) { DumpLine("options-relayout: no game anchor button found — skipped"); return; }
+            if (modded.Count == 0) return;
+            modded.Sort((a, b) => string.CompareOrdinal(a.name, b.name));
+            var art = (RectTransform)anchor;
+            float x = art.anchoredPosition.x;
+            for (int i = 0; i < modded.Count; i++)
+            {
+                var m = modded[i];
+                m.anchoredPosition = new Vector2(x, art.anchoredPosition.y - (i + 1) * ModSlotHeight);
+                m.localScale = Vector3.one;
+            }
+            DumpLine("options-relayout: " + modded.Count + " modded buttons flowed below "
+                + anchor.name + " at " + ModSlotHeight.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + "px slots");
+        }
+
+        private static void FitButtonPanel(Transform buttonPanel)
+        {
+            try
+            {
+                var rt = buttonPanel as RectTransform;
+                if (rt == null) return;
+                var lg = buttonPanel.GetComponent<UnityEngine.UI.VerticalLayoutGroup>();
+                // A layout group that CONTROLS child heights squeezes every child
+                // into the panel by itself — nothing can overflow, no fit needed.
+                bool layoutLive = lg != null && lg.enabled;
+                if (layoutLive && lg.childControlHeight && lg.childForceExpandHeight)
+                {
+                    DumpLine("options-fit: layout controls heights — children squeeze automatically, no expansion needed");
+                    return;
+                }
+                float total = 0f;
+                int visible = 0;
+                for (int i = 0; i < buttonPanel.childCount; i++)
+                {
+                    var c = buttonPanel.GetChild(i) as RectTransform;
+                    if (c == null || !c.gameObject.activeSelf) continue;
+                    total += Mathf.Max(0f, c.rect.height);
+                    visible++;
+                }
+                if (layoutLive) total += lg.spacing * Mathf.Max(0, visible - 1)
+                    + lg.padding.top + lg.padding.bottom;
+                float current = rt.rect.height;
+                if (total <= current + 1f)
+                {
+                    DumpLine("options-fit: ButtonPanel " + R1(current) + "px fits " + visible
+                        + " buttons (" + R1(total) + "px needed)");
+                    return;
+                }
+                float deficit = total - current;
+                rt.sizeDelta = new Vector2(rt.sizeDelta.x, rt.sizeDelta.y + deficit);
+                // DOWNWARD-ONLY GROWTH: a center-pivoted rect grows both ways, which
+                // shoved the game buttons up into the Back button (field report).
+                // Keep the TOP edge fixed: shift the panel down by (1-pivot.y)×deficit.
+                rt.anchoredPosition -= new Vector2(0f, (1f - rt.pivot.y) * deficit);
+                // The BG sibling paints the panel's backdrop — stretch it too so
+                // the extended area isn't transparent (same downward-only rule).
+                var bgTf = buttonPanel.parent != null ? buttonPanel.parent.Find("ButtonPanelBG") : null;
+                var bg = bgTf as RectTransform;
+                if (bg != null && Mathf.Approximately(bg.rect.height, current))
+                {
+                    bg.sizeDelta = new Vector2(bg.sizeDelta.x, bg.sizeDelta.y + deficit);
+                    bg.anchoredPosition -= new Vector2(0f, (1f - bg.pivot.y) * deficit);
+                }
+                DumpLine("options-fit: ButtonPanel expanded " + R1(current) + " → " + R1(total)
+                    + "px for " + visible + " buttons (built for 6)");
+            }
+            catch (Exception e)
+            {
+                DumpLine("options-fit failed: " + e.Message);
             }
         }
 

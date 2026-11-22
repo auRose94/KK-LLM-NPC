@@ -491,7 +491,7 @@ namespace KKLLMNPC
             // reach the player's chat. Extract the voice field when the object carries
             // one; otherwise strip the JSON spans; say nothing if nothing speakable is
             // left (the returned note teaches the model the format).
-            text = CleanSpokenJson(text);
+            text = SpeechClean.CleanSpokenJson(text);
             text = TextUtil.ScrubTypeNames(text);
             if (text.Length == 0)
                 return new { ok = false, reason = "json_only",
@@ -635,83 +635,5 @@ namespace KKLLMNPC
             return new { ok = true, said = text };
         }
 
-        private static readonly string[] MachineryKeys = { "\"progress\"", "\"action\":", "\"thought\"", "\"why\":" };
-        private static bool IsMachineryLine(string line)
-        {
-            string l = line.Trim();
-            if (l.Length == 0) return true;
-            string low = l.ToLowerInvariant();
-            foreach (var k in MachineryKeys) if (low.Contains(k)) return true;
-            if (low.Contains("json") || low.Contains("schema") || low.Contains("action object")) return true;
-            if (low.StartsWith("we need to output") || low.StartsWith("we can combine") || low.StartsWith("so we need")
-                || low.StartsWith("let me output") || low.StartsWith("the schema")) return true;
-            return false;
-        }
-
-        // gpt-oss (and other reasoning models) sometimes answer chat turns with the
-        // act-shaped JSON instead of spoken words — a {"say": "..."} echo, a whole act
-        // object, or fenced fragments. Extract the speakable field when the whole reply
-        // is one JSON object carrying a voice field ("say"/"text"/"message"/…); strip
-        // flat JSON fragments from mid-text prose; return "" when nothing speakable
-        // remains (the caller then refuses to speak and feeds the model a format note).
-        // {{user}}-style RP placeholders are untouched: the strip pattern requires a
-        // quote right after the brace, which "{{" never matches.
-        private static string CleanSpokenJson(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return text;
-            string t = text.Trim();
-            // Strip one markdown-fence wrapper.
-            if (t.StartsWith("```", StringComparison.Ordinal))
-            {
-                int firstNl = t.IndexOf('\n');
-                if (firstNl > 0) t = t.Substring(firstNl + 1);
-                int lastFence = t.LastIndexOf("```", StringComparison.Ordinal);
-                if (lastFence >= 0) t = t.Substring(0, lastFence);
-                t = t.Trim();
-            }
-            // Whole reply is (probably) one JSON object: speak its voice field if it
-            // has one; an act object without a voice field says nothing.
-            if (t.Length > 1 && t[0] == '{' && t[t.Length - 1] == '}')
-            {
-                var parsed = Json.Parse(t) as System.Collections.Generic.Dictionary<string, object>;
-                if (parsed != null)
-                {
-                    foreach (var key in new[] { "say", "text", "message", "msg", "dialogue", "line", "response" })
-                    {
-                        if (parsed.TryGetValue(key, out var v) && v is string s && s.Trim().Length > 0)
-                            return s.Trim().Trim('"');
-                    }
-                    return "";
-                }
-                // not parseable as JSON — fall through to fragment stripping
-            }
-            // Machinery-line filter: reasoning models narrate their own output format
-            // ("We need to output a proper JSON action object...", lines quoting the act
-            // schema keys) and none of that is speech. Dropped per line so a mixed block
-            // keeps its speakable lines; a kobold saying "I need to find food" still
-            // passes (the patterns require output/combine verbs or quoted JSON keys).
-            if (t.IndexOf('\n') >= 0 || IsMachineryLine(t))
-            {
-                var kept = new System.Collections.Generic.List<string>();
-                foreach (var ln in t.Split('\n'))
-                {
-                    string l2 = ln.Trim();
-                    if (l2.Length == 0 || IsMachineryLine(l2)) continue;
-                    kept.Add(l2);
-                }
-                t = string.Join(" ", kept.ToArray()).Trim();
-                if (t.Length == 0) return "";
-            }
-            // Mid-text flat JSON fragments: {"key": "value", ...} with no nesting.
-            // The quote-after-brace requirement keeps RP placeholders ({{user}}) intact.
-            try
-            {
-                var rx = new System.Text.RegularExpressions.Regex("\\{\\s*\"[^{}]*\\}");
-                t = rx.Replace(t, m => m.Value.Contains("\":") || m.Value.Contains("\": ") ? " " : m.Value);
-            }
-            catch (Exception) { }
-            t = System.Text.RegularExpressions.Regex.Replace(t, "\\s+", " ").Trim();
-            return t.Trim('"').Trim();
-        }
     }
 }

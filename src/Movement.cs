@@ -179,7 +179,7 @@ namespace KKLLMNPC
                 List<Vector3> np = null;
                 if (WorldMap.Ready)
                 {
-                    try { np = WorldMap.FindPathSmoothed(_kobold.transform.position, new Vector3(goal.x, _kobold.transform.position.y, goal.z)); }
+                    try { np = WorldMap.FindPathSmoothed(_kobold.transform.position, new Vector3(goal.x, _kobold.transform.position.y, goal.z), NavRadius()); }
                     catch (Exception) { }
                 }
                 if (np == null || np.Count < 2)
@@ -280,13 +280,14 @@ namespace KKLLMNPC
             // HYSTERESIS (the bee-in-a-window fix): without it, offset +20 clears this
             // frame and −20 the next, and the body wobbles at a wall forever. A steer
             // that actually cleared stays preferred for a stability window.
+            float navR = NavRadius();
             if (_activeSteerOff != 0f && Time.unscaledTime - _steerLockedUntil < 0f)
             {
                 // still locked in: retest the SAME offset first
                 Vector3 keepDir = Quaternion.Euler(0, _yawDeg + _activeSteerOff, 0) * Vector3.forward;
                 Vector3 keepRight = new Vector3(-keepDir.z, 0f, keepDir.x).normalized;
-                if (LaneClear(eye, keepDir, 0f) && LaneClear(eye, keepDir, WorldMap.BodyHalfWidthM)
-                    && LaneClear(eye, keepDir, -WorldMap.BodyHalfWidthM))
+                if (LaneClear(eye, keepDir, 0f) && LaneClear(eye, keepDir, navR)
+                    && LaneClear(eye, keepDir, -navR))
                     return _activeSteerOff;
             }
             float[] offsets = _activeSteerOff != 0f && Time.unscaledTime - _steerLockedUntil < 1.2f
@@ -296,8 +297,8 @@ namespace KKLLMNPC
             {
                 Vector3 dir = Quaternion.Euler(0, _yawDeg + off, 0) * Vector3.forward;
                 Vector3 right = new Vector3(-dir.z, 0f, dir.x).normalized;
-                if (LaneClear(eye, dir, 0f) && LaneClear(eye, dir, WorldMap.BodyHalfWidthM)
-                    && LaneClear(eye, dir, -WorldMap.BodyHalfWidthM))
+                if (LaneClear(eye, dir, 0f) && LaneClear(eye, dir, navR)
+                    && LaneClear(eye, dir, -navR))
                 {
                     _lastFanSteerSide = off > 0f ? 1f : -1f;
                     // Lock this heading for a moment so the next blocked frame keeps
@@ -310,7 +311,16 @@ namespace KKLLMNPC
             return 0f; // boxed in
         }
 
-        private bool LaneClear(Vector3 eye, Vector3 dir, float lateral)
+        // BODY-SIZE-AWARE nav radius (2026-11-21): the body's half width scales with
+    // its transform (vore growth, shrink ray, tiny/large genes) — the pathfinder
+    // and lane checks use THIS instead of a fixed 0.35m, so tiny kobolds squeeze
+    // through cracks and large ones route around gaps they can't fit.
+    private float NavRadius()
+    {
+        return WorldMap.NavRadiusFor(_kobold, _cfgNavRadius != null ? _cfgNavRadius.Value : 1f);
+    }
+
+    private bool LaneClear(Vector3 eye, Vector3 dir, float lateral)
         {
             Vector3 o = eye + (dir.y == 0 ? new Vector3(-dir.z, 0f, dir.x).normalized * lateral : Vector3.zero);
             return !Physics.Raycast(o, dir, WalkProbeRange * 1.3f, ~0, QueryTriggerInteraction.Ignore);
@@ -593,7 +603,7 @@ namespace KKLLMNPC
                             List<Vector3> fpath = null;
                             if (WorldMap.Ready)
                             {
-                                try { fpath = WorldMap.FindPathSmoothed(_kobold.transform.position, ppos); }
+                                try { fpath = WorldMap.FindPathSmoothed(_kobold.transform.position, ppos, NavRadius()); }
                                 catch (Exception e) { Logger.LogWarning("follow path: " + e.Message); }
                             }
                             if (fpath == null && _cfgPathEnabled.Value)
@@ -713,7 +723,7 @@ namespace KKLLMNPC
                             try
                             {
                                 finalLegClear = WorldMap.SegmentClear(goalPt, _kobold.transform.position,
-                                    c => c != null && c.GetComponentInParent<Kobold>() != null, WorldMap.BodyHalfWidthM);
+                                    c => c != null && c.GetComponentInParent<Kobold>() != null, NavRadius());
                             }
                             catch (Exception) { finalLegClear = true; }
                         }

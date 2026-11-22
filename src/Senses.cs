@@ -1118,6 +1118,9 @@ namespace KKLLMNPC
             if (s.Contains("kitchen") || s.Contains("stove") || s.Contains("blender") || s.Contains("food") || s.Contains("cook")) return "food";
             if (s.Contains("swap") || s.Contains("possess") || s.Contains("body")) return "bodyswap";
             if (s.Contains("door") || s.Contains("gate")) return "door";
+            // SHOP before contract: "ConstructionShop" must land as the STORE,
+            // not as one of the wall contracts it sells.
+            if (s.Contains("shop") || s.Contains("market") || s.Contains("peddler") || s.Contains("vendor")) return "shop";
             if (s.Contains("contract") || s.Contains("blueprint") || s.Contains("plan") || s.Contains("construction")) return "contract";
             if (s.Contains("upgrade") || s.Contains("machine") || s.Contains("milk")) return "machine";
             if (s.Contains("table") || s.Contains("chair") || s.Contains("sofa") || s.Contains("couch") || s.Contains("seat")) return "seat";
@@ -1227,6 +1230,9 @@ namespace KKLLMNPC
             if (s.Contains("electricblender") || s.Contains("blender") || s.Contains("grinder")) return "food";
             if (s.Contains("genericdoor") || s.Contains("stardoor") || s.Contains("freezerdoor") || s.Contains("door")) return "door";
             if (s.Contains("constructioncontract")) return "contract";
+            // GenericPurchasable = the shop GOOD stations (51 across the map:
+            // seeds/eggs/buckets/equipment, restock 30s) — the shop's shelves.
+            if (s.Contains("genericpurchasable")) return "goods";
             if (s.Contains("soiltile")) return "farm";
             if (s.Contains("wateringcan")) return "water";
             return null;
@@ -1945,7 +1951,12 @@ namespace KKLLMNPC
                 if (nm.Length == 0) continue;
                 // TYPE-first so a nest/bed whose mesh name lies still lands here.
                 string kind = ClassifyByType(u.gameObject) ?? ClassifyUsable(nm);
-                if (kind != "nest" && kind != "bed") continue;
+                // Commerce + communication join the survival kinds (2026-11-21,
+                // Rose: agents must find the construction shop and its WALL
+                // contracts — ":needs_buy" tags were useless without a route):
+                // nest/bed (rest+eggs), mailbox (quests), contract (the wall
+                // buyables), shop (the store itself).
+                if (kind != "nest" && kind != "bed" && kind != "mailbox" && kind != "contract" && kind != "shop" && kind != "goods") continue;
                 list.Add(new KeyPlace { Kind = kind, Name = nm, Pos = u.transform.position, Tf = u.transform });
             }
             foreach (var t in SoilTileList())

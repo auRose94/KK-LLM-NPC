@@ -54,7 +54,7 @@ namespace KKLLMNPC
         public const float CameraClipCrouchEaseRate = 0.5f;
 
         // ---- Pathfinding ----
-        public const float DefaultPathCellSize = 0.5f;
+        public const float DefaultPathCellSize = 0.4f;
         public const float DefaultPathSpan = 20f;
         public const int DefaultPathNodeCap = 9000;
         public const int MinPathNodeCap = 200;
