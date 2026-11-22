@@ -168,9 +168,11 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 
 ## Current state (2026-11-21)
 
-- `main` is the PR target and is current. **v1.13.0 committed locally**
-  (v1.9.0 regrow_player, v1.10.0 Endo non-fatal vore, v1.11.0 prey
-  click-to-point + rolled vore personas, v1.12.0 AgentFSM before it).
+- `main` is the PR target and is current. **v1.13.0 committed, pushed and
+  RELEASED 2026-11-21** (71baf3f; tag v1.13.0, GitHub release with the three
+  platform zips — Rose verified the update in-game). v1.9.0 regrow_player,
+  v1.10.0 Endo non-fatal vore, v1.11.0 prey click-to-point + rolled vore
+  personas, v1.12.0 AgentFSM before it.
   CI runs on every branch push plus a nightly deep-soak schedule
   (`workflow_dispatch` works too). `ws/*` branches are checked out in
   worktrees under `/mnt/Matrix/Work/KK-LLM-NPC-wt/<name>` — don't try to
