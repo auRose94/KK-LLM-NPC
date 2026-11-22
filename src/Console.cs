@@ -320,26 +320,32 @@ namespace KKLLMNPC
         // persona file (Console.SystemPromptFile), else the built-in persona.
         private string ConsolePersona()
         {
+            return ConsolePersonaRaw() + L10n.SpeechDirective(_cfgLanguage); // [LLM] Language spoken-word steering, last
+        }
+
+        private string ConsolePersonaRaw()
+        {
+            // Prompt provenance via PromptSource.Choose (see ResolveSystemPromptBase):
+            // genuinely-custom inline > Console.SystemPromptFile > the DLL's embedded
+            // copy. ConsolePersonaBuiltin below is only the catastrophic last resort.
+            string inline = null;
             try
             {
                 if (_cfgSystem != null)
                 {
                     string v = _cfgSystem.Value;
-                    object def = _cfgSystem.DefaultValue;
-                    if (!string.IsNullOrWhiteSpace(v) && !object.Equals(v, def)) return v.Trim();
+                    if (!string.IsNullOrWhiteSpace(v)) inline = v.Trim();
                 }
             }
             catch (Exception) { }
+            string file = null;
             if (_cfgConsolePromptFile != null)
             {
-                string file = (_cfgConsolePromptFile.Value ?? "").Trim();
-                if (file.Length > 0)
-                {
-                    string content = TryReadPromptFile(file);
-                    if (content != null) return content.Trim();
-                }
+                string path = (_cfgConsolePromptFile.Value ?? "").Trim();
+                if (path.Length > 0) file = TryReadPromptFile(path);
             }
-            return ConsolePersonaBuiltin;
+            return PromptSource.Choose(inline, file, PromptSource.Embedded("system_prompt_console.txt"))
+                ?? ConsolePersonaBuiltin;
         }
 
         private static readonly string ConsolePersonaBuiltin =
@@ -1399,6 +1405,13 @@ namespace KKLLMNPC
                     if (d == null) continue;
                     sb.Append("  ").Append(G(d, "name")).Append(" (body: ").Append(G(d, "body")).Append(")  ").Append(G(d, "d")).Append("m ").Append(G(d, "dir"));
                     if (d.ContainsKey("id")) sb.Append("  id:").Append(G(d, "id"));
+                    // Anatomy at a glance: gender + the breeding-relevant bit — eggs
+                    // need a STUD (a penis-haver), so an agent hunting one can scan
+                    // the ps line instead of interrogating everyone (2026-11-21).
+                    string g = G(d, "gender");
+                    if (!string.IsNullOrEmpty(g)) sb.Append("  ").Append(g);
+                    string pen = G(d, "penis");
+                    if (pen == "True" || pen == "true") sb.Append(" (penis)");
                     sb.Append('\n');
                 }
             }

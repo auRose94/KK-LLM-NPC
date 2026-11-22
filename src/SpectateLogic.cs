@@ -126,6 +126,12 @@ namespace KKLLMNPC
         // (2026-11-16): the chat-abort command is gone — a swallowed player MASHES
         // SPACE to struggle free, and the bar shows how close the stomach is to
         // heaving them back up.
+        // The HUD's English templates (the L10n keys — see docs/L10N.md).
+        public const string InsideHudTemplate = "you are inside {0} — watching";
+        public const string NoHatchHudTemplate = "(no hatch coming)";
+        public const string UntilHudTemplate = "until {0}";
+        public const string MashHudTemplate = " — MASH SPACE to struggle free [{0}] {1}%";
+
         public static string HudLine(string eaterLabel, string hatchHint)
         {
             return HudLine(eaterLabel, hatchHint, -1f);
@@ -133,10 +139,20 @@ namespace KKLLMNPC
 
         public static string HudLine(string eaterLabel, string hatchHint, float struggle01)
         {
+            // English (the default translator is the identity — English text IS
+            // the key, so a null t renders plain English; L10n passes the real one).
+            return HudLine(eaterLabel, hatchHint, struggle01, null);
+        }
+
+        // LOCALIZED HUD (v1.13.0): t(key) resolves through the lang files (the
+        // key IS the English template — {0}/{1} placeholders survive translation).
+        public static string HudLine(string eaterLabel, string hatchHint, float struggle01, Func<string, string> t)
+        {
+            if (t == null) t = k => k;
             string who = string.IsNullOrEmpty(eaterLabel) ? "someone" : eaterLabel;
-            string b = "you are inside " + who + " — watching";
-            if (string.IsNullOrEmpty(hatchHint)) b += " (no hatch coming)";
-            else b += " until " + hatchHint;
+            string b = L10nCore.Fmt(t(InsideHudTemplate), who);
+            if (string.IsNullOrEmpty(hatchHint)) b += " " + t(NoHatchHudTemplate);
+            else b += " " + L10nCore.Fmt(t(UntilHudTemplate), hatchHint);
             if (struggle01 >= 0f)
             {
                 int filled = (int)Math.Round(struggle01 * 8f);
@@ -144,8 +160,8 @@ namespace KKLLMNPC
                 if (filled > 8) filled = 8;
                 var bar = new System.Text.StringBuilder();
                 for (int i = 0; i < 8; i++) bar.Append(i < filled ? '#' : '-');
-                b += " — MASH SPACE to struggle free [" + bar + "] "
-                    + Math.Round(struggle01 * 100f) + "%";
+                b += L10nCore.Fmt(t(MashHudTemplate), bar.ToString(),
+                    Math.Round(struggle01 * 100f).ToString());
             }
             return b;
         }

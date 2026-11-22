@@ -137,9 +137,16 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
   `BepInEx/config/kkllmnpc_ai_reports.log`; live debug:
   WebUI `http://127.0.0.1:8338/`.
 - In-game F6 debug overlay was removed — the browser page is the debug surface.
-- Prompt files exist in two places by design: repo-root `system_prompt_*.txt`
-  (source of truth) and the copies `build.sh` ships into the game's
-  `BepInEx/plugins/`. Edit the repo copies.
+- Prompt files are single-source: repo-root `system_prompt_*.txt` +
+  `prompt_extras/*.txt` are compiled INTO the DLL (`KKLLMNPC.prompts.*`
+  resources — mcs `-resource:` in check_build.sh/build.sh) and shipped
+  alongside it; the shipped copy is the editable override, the embedded copy
+  is the never-missing fallback (`PromptSource.Embedded`). Config holds only
+  PATHS (`SystemPromptFile` etc.); the old inline `SystemPrompt` /
+  `[Vision] Prompt` defaults are EMPTY now — old installs carry the blob as
+  a stored value and must delete the line to switch to the file flow
+  (`PromptSource.Choose` treats an inline value equal to the file/embedded
+  copy as the untouched default and ignores it). Edit the repo copies.
 - The console's command table, manual pages (`Manual.cs`), persona text, and
   `ConsoleShell` help must stay in sync — several past bugs were exactly one of
   these drifting from the others. `tests/test_console_shell.cs` covers part of
@@ -152,23 +159,48 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 - `docs/CONFIG.md` — complete config reference (the `tools/lint_config.py` source of truth)
 - `docs/BEHAVIOR.md` — long-form behavior highlights (moved out of README 2026-11-15)
 - `docs/VORE.md` — swallow-vore/spectate mechanics (opt-in features)
+- `docs/MODHOOKS.md` — the public mod event API (`ModHooks`): vore/spectate/sex/possession events, the VR camera hand-off flag, threading + isolation contract
 - `docs/MODELS.md` — model compatibility notes + benchmark plan
 - `docs/changelog-archive.md` — pre-2026-10-14 changelog rounds (main CHANGELOG keeps the rest)
 - `tests/README.md` — suite table, how to add a suite, deleted-fake-tests history
 - `CONTRIBUTING.md` — style, PR checklist, game-API integration notes
 - `wip/BASE-GAME-AI.md` — reverse-engineered game internals
 
-## Current state (2026-11-18)
+## Current state (2026-11-21)
 
-- `main` is the PR target and is current; **v1.7.0 committed locally**
-  (v1.5.0 5079a7c, v1.6.0 54b08a6 before it; GitHub release pending — Rose
-  plans to release the evening of 2026-11-18).
-  **Rose's morning verdict on v1.5.1: A+, "best version so far"** — first fully
-  autonomous farm chain observed (mailbox → starter egg → planted → watered,
-  following the letter's instructions, unprompted). CI runs on every branch push plus a nightly deep-soak schedule
+- `main` is the PR target and is current. **v1.13.0 committed locally**
+  (v1.9.0 regrow_player, v1.10.0 Endo non-fatal vore, v1.11.0 prey
+  click-to-point + rolled vore personas, v1.12.0 AgentFSM before it).
+  CI runs on every branch push plus a nightly deep-soak schedule
   (`workflow_dispatch` works too). `ws/*` branches are checked out in
   worktrees under `/mnt/Matrix/Work/KK-LLM-NPC-wt/<name>` — don't try to
   check them out here.
+- **v1.13.0 (2026-11-21): phantom-sex fix + ModHooks + egg economy** —
+  (1) the meal is never a lover: pure `ContactCore` decides the `touch`
+  phrase vore-first (a body that just ate someone no longer reads
+  "being_penetrated" — the swallow's PenetrationTech insert is labeled meal
+  machinery end to end: listener gate `DickInIsMealMachinery`, perception
+  `vore_insert` key split from `penetrated`, prompt exceptions in both
+  personas); (2) `ModHooks` public event API for other mods
+  (`docs/MODHOOKS.md`) — vore lifecycle, spectate hand-off (start pairs
+  end OR hatch), REAL-sex-only Sex events, possession, plus
+  `ExternalSpectateCamera` so Rose's VR rig can drive the spectate camera
+  without the built-in writer fighting it; fires are main-thread,
+  exception-isolated via pure `ModHooksCore` (test_modhooks.cs);
+  (3) seeds are store goods and eggs need a STUD (no parthenogenesis) —
+  prompt lore + `gender`/`penis` on ps/people entries so agents can find a
+  breeder (`BodyHasPenis`/`BodyGender`); (4) the in-game options menu gains
+  KKLLM category tabs (`OptionsMenuTab.cs`, `[OptionsMenu] Enabled`) — rides
+  the game's UnityScriptableSettings framework (cloned views/buttons +
+  `SettingsManager.AddSetting` config-backed proxies; NO Harmony) — the game
+  SOURCE is at `/mnt/Matrix/Work/kodot-kare/KoboldKare` (decompile only when
+  source is missing); (5) localization (`docs/L10N.md`): pure `L10nCore` +
+  `L10n.cs` — English-text-key JSON files at
+  `BepInEx/plugins/KKLLMNPC/lang/<code>.json` (en template auto-written,
+  de complete, fr/es/pt-BR/ru/ja/zh-hans partial), options-tab labels inject
+  per-locale into the game's "GUID" localization table, HUD translator
+  overload, and `[LLM] Language` prompt steering makes kobolds SPEAK the
+  player's language (protocol text stays English on purpose).
 - **NEW PROJECT DIRECTION (2026-11-18, Rose): stability + QoL** — dissect the
   whole playthrough log (BepInEx + Unity player log) and fix the game itself
   via monkey-patching, fan-patch workshop-mod pain, speed up loading, and

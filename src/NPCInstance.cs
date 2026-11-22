@@ -37,6 +37,7 @@ namespace KKLLMNPC
         internal ConfigEntry<string> _cfgApiKey;
         internal ConfigEntry<string> _cfgSystem;
         internal ConfigEntry<string> _cfgSystemPromptFile;
+        internal ConfigEntry<string> _cfgLanguage;
         internal ConfigEntry<float> _cfgThinkInterval;
         internal ConfigEntry<bool> _cfgSendImage;
         internal ConfigEntry<int> _cfgImageEvery;
@@ -788,6 +789,7 @@ namespace KKLLMNPC
             _cfgModel = plugin._cfgModel;
             _cfgApiKey = plugin._cfgApiKey;
             _cfgSystem = plugin._cfgSystem;
+            _cfgLanguage = plugin._cfgLanguage;
             _cfgSystemPromptFile = plugin._cfgSystemPromptFile;
             _cfgThinkInterval = plugin._cfgThinkInterval;
             _cfgSendImage = plugin._cfgSendImage;

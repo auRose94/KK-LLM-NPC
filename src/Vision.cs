@@ -178,35 +178,28 @@ namespace KKLLMNPC
             catch (Exception e) { Logger.LogWarning("vision dump: " + e.Message); }
         }
 
-        // The vision caption's static text. Precedence mirrors the act-loop
-        // system prompt: 1) an explicitly customized [Vision] Prompt config,
-        // 2) the [Vision] PromptFile chat template ({stereo} expands to the
-        // stereo clause below), 3) the built-in default. Only the STATIC text
+        // The vision caption's static text. Provenance via PromptSource.Choose
+        // (mirrors the act-loop system prompt): 1) a genuinely-customized
+        // [Vision] Prompt config (an inline value equal to the file/embedded
+        // copy is the auto-written legacy default and is ignored), 2) the
+        // [Vision] PromptFile chat template ({stereo} expands to the stereo
+        // clause below), 3) the DLL's embedded copy. Only the STATIC text
         // lives in the file — goal/blocked/Previously are appended per call in
         // CaptionImage.
         private string VisionPromptBase()
         {
+            string inline = null;
+            try { inline = _cfgVisionPrompt != null ? _cfgVisionPrompt.Value : null; } catch (Exception) { }
+            string file = null;
             try
             {
-                if (_cfgVisionPrompt != null)
-                {
-                    string v = _cfgVisionPrompt.Value;
-                    object def = _cfgVisionPrompt.DefaultValue;
-                    if (!string.IsNullOrWhiteSpace(v) && !object.Equals(v, def)) return v;
-                }
+                string path = _cfgVisionPromptFile != null ? (_cfgVisionPromptFile.Value ?? "").Trim() : "";
+                if (path.Length > 0) file = TryReadPromptFile(path);
             }
             catch (Exception) { }
-            string file = _cfgVisionPromptFile != null ? (_cfgVisionPromptFile.Value ?? "").Trim() : "";
-            if (file.Length > 0)
-            {
-                string content = TryReadPromptFile(file);
-                if (content != null)
-                {
-                    var vars = new Dictionary<string, string> { ["{stereo}"] = StereoClause() };
-                    return TextUtil.ExpandTemplate(content, vars);
-                }
-            }
-            return Val(_cfgVisionPrompt);
+            string chosen = PromptSource.Choose(inline, file, PromptSource.Embedded("system_prompt_vision.txt"));
+            var vars = new Dictionary<string, string> { ["{stereo}"] = StereoClause() };
+            return TextUtil.ExpandTemplate(chosen, vars);
         }
 
         // The stereo-vision sentence, built dynamically (the Config default bakes

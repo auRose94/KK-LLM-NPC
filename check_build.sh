@@ -69,10 +69,24 @@ mcs -target:library -out:"$OUT/KKLLMNPC.dll" src/*.cs \
   -r:"$MGMT/Assembly-CSharp.dll" \
   -r:"$MGMT/Naelstrof.PenetrationTech.dll" \
   -r:"$MGMT/Naelstrof.JigglePhysics.dll" \
+  -r:"$MGMT/Naelstrof.UnityScriptableSettings.dll" \
+  -r:"$MGMT/Unity.Localization.dll" \
+  -r:"$MGMT/Unity.TextMeshPro.dll" \
   -r:"$MGMT/com.naelstrof.orbitcam.dll" \
   -r:"$MGMT/com.naelstrof.inflatable.dll" \
   -r:"$MGMT/NetStack.dll" \
   -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
+  -resource:system_prompt_default.txt,KKLLMNPC.prompts.system_prompt_default.txt \
+  -resource:system_prompt_console.txt,KKLLMNPC.prompts.system_prompt_console.txt \
+  -resource:system_prompt_vision.txt,KKLLMNPC.prompts.system_prompt_vision.txt \
+  -resource:system_prompt_name.txt,KKLLMNPC.prompts.system_prompt_name.txt \
+  -resource:prompt_extras/body_control.txt,KKLLMNPC.prompts.extras.body_control.txt \
+  -resource:prompt_extras/chat.txt,KKLLMNPC.prompts.extras.chat.txt \
+  -resource:prompt_extras/drunk.txt,KKLLMNPC.prompts.extras.drunk.txt \
+  -resource:prompt_extras/farmcook.txt,KKLLMNPC.prompts.extras.farmcook.txt \
+  -resource:prompt_extras/fsm.txt,KKLLMNPC.prompts.extras.fsm.txt \
+  -resource:prompt_extras/identity.txt,KKLLMNPC.prompts.extras.identity.txt \
+  -resource:prompt_extras/vore.txt,KKLLMNPC.prompts.extras.vore.txt \
   -r:"$MGMT/KoboldKare.ISavable.dll" > "$OUT/log" 2>&1
 rc=$?
 

@@ -173,11 +173,17 @@ namespace KKLLMNPC
         // prompt extras: each module may ship prompt_extras/<module>.txt next to
         // system_prompt_default.txt (plugin dir / game dir / CWD). They are
         // appended to the base system prompt in filename order, so modules never
-        // edit the shared prompt file.
+        // edit the shared prompt file. Every extras file is ALSO compiled into
+        // the DLL ("KKLLMNPC.prompts.extras.<name>") — an on-disk file overrides
+        // its embedded twin, and embedded copies fill in whatever the disk
+        // doesn't provide (fresh installs, deleted files) — all in filename
+        // order either way.
         // ------------------------------------------------------------------
         public static string PromptExtras()
         {
-            var parts = new List<string>();
+            // name → text (sorted by name at the end, so disk and embedded
+            // copies interleave in one stable order).
+            var byName = new SortedDictionary<string, string>(StringComparer.Ordinal);
             try
             {
                 var bases = new List<string>();
@@ -216,14 +222,30 @@ namespace KKLLMNPC
                         try
                         {
                             string txt = File.ReadAllText(f);
-                            if (!string.IsNullOrWhiteSpace(txt)) parts.Add(txt.Trim());
+                            if (!string.IsNullOrWhiteSpace(txt))
+                                byName[Path.GetFileName(f)] = txt.Trim(); // disk overrides embedded
                         }
                         catch (Exception) { }
                     }
                 }
+
+                // EMBEDDED EXTRAS (2026-11-21): fill in the ones the disk didn't
+                // provide — a fresh install or a deleted file never loses a
+                // module's guidance.
+                foreach (var name in PromptSource.EmbeddedExtraNames())
+                {
+                    if (byName.ContainsKey(name)) continue;
+                    try
+                    {
+                        string txt = PromptSource.Embedded("extras." + name);
+                        if (!string.IsNullOrWhiteSpace(txt)) byName[name] = txt.Trim();
+                    }
+                    catch (Exception) { }
+                }
             }
             catch (Exception) { }
-            return parts.Count == 0 ? "" : "\n" + string.Join("\n", parts);
+            if (byName.Count == 0) return "";
+            return "\n" + string.Join("\n", byName.Values);
         }
     }
 }

@@ -83,11 +83,25 @@ if [ "$COMPILER" = "mcs" ]; then
       -r:"$MGMT/Assembly-CSharp.dll" \
       -r:"$MGMT/Naelstrof.PenetrationTech.dll" \
       -r:"$MGMT/Naelstrof.JigglePhysics.dll" \
+      -r:"$MGMT/Naelstrof.UnityScriptableSettings.dll" \
+      -r:"$MGMT/Unity.Localization.dll" \
+      -r:"$MGMT/Unity.TextMeshPro.dll" \
       -r:"$MGMT/com.naelstrof.orbitcam.dll" \
       -r:"$MGMT/com.naelstrof.inflatable.dll" \
       -r:"$MGMT/NetStack.dll" \
       -r:"$MGMT/UnityEngine.IMGUIModule.dll" \
-      -r:"$MGMT/KoboldKare.ISavable.dll"
+      -r:"$MGMT/KoboldKare.ISavable.dll" \
+      -resource:system_prompt_default.txt,KKLLMNPC.prompts.system_prompt_default.txt \
+      -resource:system_prompt_console.txt,KKLLMNPC.prompts.system_prompt_console.txt \
+      -resource:system_prompt_vision.txt,KKLLMNPC.prompts.system_prompt_vision.txt \
+      -resource:system_prompt_name.txt,KKLLMNPC.prompts.system_prompt_name.txt \
+      -resource:prompt_extras/body_control.txt,KKLLMNPC.prompts.extras.body_control.txt \
+      -resource:prompt_extras/chat.txt,KKLLMNPC.prompts.extras.chat.txt \
+      -resource:prompt_extras/drunk.txt,KKLLMNPC.prompts.extras.drunk.txt \
+      -resource:prompt_extras/farmcook.txt,KKLLMNPC.prompts.extras.farmcook.txt \
+      -resource:prompt_extras/fsm.txt,KKLLMNPC.prompts.extras.fsm.txt \
+      -resource:prompt_extras/identity.txt,KKLLMNPC.prompts.extras.identity.txt \
+      -resource:prompt_extras/vore.txt,KKLLMNPC.prompts.extras.vore.txt
     cp KKLLMNPC.dll "$KDIR/BepInEx/plugins/KKLLMNPC.dll"
     # Ship the system-prompt file next to the DLL (LLM.SystemPromptFile default is
     # resolved relative to the plugin dir). Optional — built-in prompt is the fallback.
@@ -99,6 +113,11 @@ if [ "$COMPILER" = "mcs" ]; then
     if [ -d prompt_extras ] && [ -n "$(ls -A prompt_extras/*.txt 2>/dev/null)" ]; then
       mkdir -p "$KDIR/BepInEx/plugins/prompt_extras"
       cp -f prompt_extras/*.txt "$KDIR/BepInEx/plugins/prompt_extras/"
+    # Localization files (KKLLMNPC/lang/<locale>.json — docs/L10N.md).
+    if [ -d lang ] && [ -n "$(ls -A lang/*.json 2>/dev/null)" ]; then
+      mkdir -p "$KDIR/BepInEx/plugins/KKLLMNPC/lang"
+      cp -f lang/*.json "$KDIR/BepInEx/plugins/KKLLMNPC/lang/"
+    fi
     fi
     printf 'Built with mcs and deployed %s\n' "$KDIR/BepInEx/plugins/KKLLMNPC.dll"
 elif [ "$COMPILER" = "dotnet" ]; then
@@ -145,6 +164,14 @@ elif [ "$COMPILER" = "dotnet" ]; then
     <Reference Include="KoboldKare.ISavable">
       <HintPath>$(KOBOLDKARE_DIR)/KoboldKare_Data/Managed/KoboldKare.ISavable.dll</HintPath>
     </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="system_prompt_default.txt;system_prompt_console.txt;system_prompt_vision.txt;system_prompt_name.txt">
+      <LogicalName>KKLLMNPC.prompts.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="prompt_extras/*.txt">
+      <LogicalName>KKLLMNPC.prompts.extras.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>
 PROJ

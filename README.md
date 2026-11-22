@@ -222,6 +222,16 @@ Configuration is documented in full — every section, key, default and range �
 - **`[Memory]` / `[Farming]` / `[Autonomy]`** — long-run behavior
 - **`[LittleTreats]`** — opt-in oddities (nothing on by default), plus
   `[Multiplayer]`, `[Web]`, `[Debug]`, `[DataRecord]`
+- **`[OptionsMenu]`** — in-game options-menu integration: the game's own
+  Options screen gains KKLLM category tabs (native sliders/dropdowns, live
+  edits, same keys as the WebUI)
+- **Localization** — the mod follows the game's language: `[LLM] Language`
+  steers what the kobolds SPEAK (`auto` matches the humans; anything else is
+  a hard directive — the command protocol stays English), and the
+  player-facing UI (options tabs, spectate HUD) reads `lang/<locale>.json`
+  files (German complete; fr/es/pt-BR/ru/ja/zh-hans seeded; English
+  fallback everywhere) — **[docs/L10N.md](docs/L10N.md)** explains how to
+  contribute a language
 - **`[SceneKnowledge]`** — feed the agents a static scene dump (from the
   KodotKare port tooling) as a world gazetteer: `find`/`go_to` then work
   map-wide (long-distance search, real paths to far objects) instead of

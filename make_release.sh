@@ -166,6 +166,12 @@ stage_and_zip() {
   for f in system_prompt_default.txt system_prompt_console.txt system_prompt_vision.txt system_prompt_name.txt; do
     cp "$f" "$stage/BepInEx/plugins/"
   done
+  if [ -d lang ]; then
+    mkdir -p "$stage/BepInEx/plugins/KKLLMNPC/lang"
+    for f in lang/*.json; do
+      [ -f "$f" ] && cp "$f" "$stage/BepInEx/plugins/KKLLMNPC/lang/"
+    done
+  fi
   if [ -d prompt_extras ]; then
     for f in prompt_extras/*.txt; do
       [ -f "$f" ] && cp "$f" "$stage/BepInEx/plugins/prompt_extras/"

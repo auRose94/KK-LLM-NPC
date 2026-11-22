@@ -803,35 +803,26 @@ namespace KKLLMNPC
             }
         }
 
-        // Resolve the base system prompt. Precedence:
-        //   1. an explicitly-set SystemPrompt config value (the user wrote one — respect it),
-        //   2. the SystemPromptFile (documented to override the built-in; the full prompt
-        //      lives there),
-        //   3. the built-in default.
-        // File is searched relative to the game dir, the plugin dir, and the CWD.
+        // Resolve the base system prompt. Precedence (PromptSource.Choose, tested):
+        //   1. a genuinely-customized inline [LLM] SystemPrompt — DIFFERENT from
+        //      both the file and the embedded copy (an inline value equal to them
+        //      is the auto-written legacy default that old installs carry; it is
+        //      recognized and ignored so the file flow applies),
+        //   2. the SystemPromptFile (the editable source of truth; searched in
+        //      the game dir, plugin dir and CWD),
+        //   3. the DLL's embedded copy of the prompt (never missing, never stale).
         private string ResolveSystemPromptBase()
         {
-            // 1) Explicit user config wins: if SystemPrompt was customized (differs from the
-            //    built-in default), respect it.
+            string inline = null;
+            try { inline = _cfgSystem != null ? _cfgSystem.Value : null; } catch (Exception) { }
+            string file = null;
             try
             {
-                if (_cfgSystem != null)
-                {
-                    string v = _cfgSystem.Value;
-                    object def = _cfgSystem.DefaultValue;
-                    if (!string.IsNullOrWhiteSpace(v) && !object.Equals(v, def)) return v;
-                }
+                string path = _cfgSystemPromptFile != null ? (_cfgSystemPromptFile.Value ?? "").Trim() : "";
+                if (path.Length > 0) file = TryReadPromptFile(path);
             }
             catch (Exception) { }
-            // 2) Prompt file (the real source of truth for the full prompt).
-            string file = _cfgSystemPromptFile != null ? (_cfgSystemPromptFile.Value ?? "").Trim() : "";
-            if (file.Length > 0)
-            {
-                string content = TryReadPromptFile(file);
-                if (content != null) return content;
-            }
-            // 3) Built-in default.
-            return Val(_cfgSystem);
+            return PromptSource.Choose(inline, file, PromptSource.Embedded("system_prompt_default.txt"));
         }
 
         // [LLM] Thinking=off — merge the reasoning-suppression fields
@@ -925,6 +916,12 @@ namespace KKLLMNPC
                     }
                     catch (Exception) { }
                 }
+                // EMBEDDED FALLBACK (2026-11-21): the shipped prompt files are
+                // compiled into the DLL, so a lost/renamed on-disk copy can never
+                // leave the mod speechless. Custom user paths get NO fallback — a
+                // missing custom file stays null, never some other prompt.
+                if (PromptSource.IsShippedPromptName(file))
+                    return PromptSource.Embedded(file);
             }
             catch (Exception) { }
             return null;
@@ -939,8 +936,9 @@ namespace KKLLMNPC
             string base_ = ResolveSystemPromptBase();
             string extras = "";
             try { extras = ModuleRegistry.PromptExtras(); } catch (Exception) { }
-            if (string.IsNullOrEmpty(_persona)) return base_ + extras;
-            return base_ + "\n" + _persona + extras;
+            string lang = L10n.SpeechDirective(_cfgLanguage); // [LLM] Language — spoken-word steering, last (models weight the tail)
+            if (string.IsNullOrEmpty(_persona)) return base_ + extras + lang;
+            return base_ + "\n" + _persona + extras + lang;
         }
 
         // Compact system prompt for small models (7B-13B). Covers the essentials
@@ -969,7 +967,8 @@ namespace KKLLMNPC
                 "\nNearby tags: ':busy'=in use, ':needs_buy'=must buy contract first, ':not_built'=machine not constructed yet, ':done'=already bought." +
                 "\nMoney: your body carries coins (needs block/economy perception). Buy contracts/shop items with buy(name or id) once within arm's reach — walk there first. Coins are yours; no one approves purchases." +
                 "\nFood: blenders don't make food from nothing — drop a food item into it. If ':not_built', find its ConstructionContract first." +
-                "\nCompaction: if 'compaction' appears in perception, your context is being compressed — be extra terse, use fewer facts, shorter thoughts.";
+                "\nCompaction: if 'compaction' appears in perception, your context is being compressed — be extra terse, use fewer facts, shorter thoughts." +
+                L10n.SpeechDirective(_cfgLanguage);
         }
 
         // POST the perception+memory to the model. Sends response_format: json_schema

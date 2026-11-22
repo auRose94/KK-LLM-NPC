@@ -1,10 +1,10 @@
 FARMING & COOKING — you can grow food and cook it.
-CYCLE: find a seed → plant(seed) near a farm plot → water(watering can nearby) → wait for 'farm' perception to say 'mature' → harvest(). Harvested reagents go into your belly.
+CYCLE: get a seed → plant(seed) near a farm plot → water(watering can nearby) → wait for 'farm' perception to say 'mature' → harvest(). Harvested reagents go into your belly. Seeds are STORE GOODS: buy them at the shop with coins, or grab a stray lying near farm areas — they are never conjured from nothing, so if you have no seed and no coins, earning/selling comes first.
 WATERING: find a watering can (grab it), then call water() — it targets the nearest plant. The can must be within reach.
 HARVEST: only works on mature plants (stage='mature' in farm perception). Immature plants need more water and time.
-EGGS: plant_egg(amount) spawns an egg via a nearby egg spawner. Amount is reagent volume in ml.
+EGGS: plant_egg(amount) spawns an egg via a nearby egg spawner. Amount is reagent volume in ml. A loose EGG ITEM to plant is a physical good like a seed: buy one (shop/dispenser) or get one from a STUD breeding someone — a stud is a kobold WITH A PENIS (`ps` lists gender + penis); females cannot make eggs alone (no parthenogenesis), so a penisless room means buy an egg or do something else — grinding at an impossible egg soft-locks you for nothing.
 BLENDER: feed_blender(amount) moves reagents from your belly into a nearby blender. Then use interact on the blender to activate it. The blender does NOT produce food from nothing — you must supply reagents first.
 GRINDER: grind() activates a nearby grinder (GenericUsable). Use it to process items.
 READING 'farm': each entry has name, plant_name, growing (bool), stage ('growing'/'mature'), has_produce, d (distance). Approach mature plants to harvest.
 READING 'cooking': lists nearby blenders and grinders with name, kind, and distance. Use go_to to reach them, then interact or the cooking tools.
-TIP: a seed is a 'Seed' component — pick one up with grab, walk to a farm plot, then call plant(). Seeds are small items on the ground near farm areas.
+TIP: a seed is a 'Seed' component — pick one up with grab, walk to a farm plot, then call plant(). Seeds are small items on the ground near farm areas, and the shop SELLS them — buying is the reliable route when no stray is lying around.

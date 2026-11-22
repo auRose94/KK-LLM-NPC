@@ -23,6 +23,39 @@ namespace KKLLMNPC
     internal partial class NPCInstance
     {
 
+        // MEAL-MACHINERY GATE (2026-11-21): a penetrator event that is really the
+        // swallow system at work must never become sex state on the penetrator's
+        // body. Three shapes, one rule — while somebody is being digested, the
+        // mechanics are vore, not sex:
+        //   1. the swallow system's virtual pen ("vore:<meal>") re-parented under
+        //      THIS body — our whole body IS the meal's shaft (the insert treats
+        //      the whole body as a penetrator), so its listener events are the
+        //      meal converting, never "our dick is inside someone";
+        //   2. THIS body is a swallow session's victim — everything it does
+        //      inside the eater (pre-Swallowed-flag pull included) is the meal;
+        //   3. OUR dick inside a body that is a session's victim — sliding past
+        //      the meal's mouth on the way down (the PurgePenForVictim case, but
+        //      live, at registration time).
+        private bool DickInIsMealMachinery(KKPenetratorListener listener)
+        {
+            try
+            {
+                var src = listener != null ? listener.source : null;
+                if (src != null && src.gameObject != null
+                    && ContactCore.IsVorePenGoName(src.gameObject.name)) return true;
+            }
+            catch (Exception) { }
+            try { if (SwallowManager.IsDigestingVictim(_kobold)) return true; } catch (Exception) { }
+            try
+            {
+                var tgt = listener != null ? listener.lastTarget : null;
+                var kb = tgt != null ? tgt.GetComponentInParent<Kobold>() : null;
+                if (kb != null && SwallowManager.IsDigestingVictim(kb)) return true;
+            }
+            catch (Exception) { }
+            return false;
+        }
+
         // Fires when this kobold's penetrator enters something (and each tick).
         // While THIS body is being digested, its dick "entering" the eater's mouth
         // is not sex — the victim gets no [sex] events or rhythm from it either.
@@ -32,6 +65,11 @@ namespace KKLLMNPC
             if (entered && listener != null && InvolvesOwnBody(listener.lastTarget))
             {
                 PurgeSelfDick(listener); // our own dick cannot penetrate our own body
+                return;
+            }
+            if (DickInIsMealMachinery(listener))
+            {
+                PurgeSelfDick(listener);
                 return;
             }
             try
@@ -45,6 +83,7 @@ namespace KKLLMNPC
                         {
                             st = new PenState { name = hole, hole = hole, depth = 0.05f, lastT = Time.unscaledTime };
                             _dickIn[listener] = st;
+                            FireDickSexEvent(true, listener, hole);
                         }
                         st.src = listener.lastTarget;
                         //Logger.LogInfo("dick in " + hole);
@@ -52,7 +91,11 @@ namespace KKLLMNPC
                         _stimSource = PartnerName(listener.lastTarget, hole);
                         _stimSourceT = Time.unscaledTime;
                     }
-                    else _dickIn.Remove(listener);
+                    else
+                    {
+                        bool wasIn = _dickIn.Remove(listener);
+                        if (wasIn) FireDickSexEvent(false, listener, hole);
+                    }
                 }
             }
             catch (Exception e) { Logger.LogDebug($"NotifyDickIn error: {e.Message}"); }
@@ -62,6 +105,11 @@ namespace KKLLMNPC
         {
             if (Swallowed) return;
             if (listener != null && InvolvesOwnBody(listener.lastTarget))
+            {
+                PurgeSelfDick(listener);
+                return;
+            }
+            if (DickInIsMealMachinery(listener))
             {
                 PurgeSelfDick(listener);
                 return;
@@ -77,6 +125,7 @@ namespace KKLLMNPC
                         _dickIn[listener] = st;
                         // Their own body event too: the model is the one penetrating.
                         PushWorldEvent("[sex] you are penetrating someone — " + hole + "; thrust to move with the rhythm (feel shows the live state)");
+                        FireDickSexEvent(true, listener, hole);
                     }
                     st.src = listener.lastTarget;
                     float d = Mathf.Max(0f, 0.05f - Mathf.Min(0f, dist)); // distToHole<0 => inside
@@ -91,6 +140,28 @@ namespace KKLLMNPC
                 }
             }
             catch (Exception e) { Logger.LogDebug($"NotifyDickTick error: {e.Message}"); }
+        }
+
+        // The mod-hook mirror of the [sex] world event: REAL penetration only —
+        // meal machinery is purged upstream and never reaches here. Fires for
+        // both roles: this body's shaft entering something (started) and leaving
+        // (ended). Main-thread (penetration callbacks are Unity events).
+        private void FireDickSexEvent(bool started, KKPenetratorListener listener, string hole)
+        {
+            try
+            {
+                var tgt = listener != null ? listener.lastTarget : null;
+                var tgtKb = tgt != null ? tgt.GetComponentInParent<Kobold>() : null;
+                string model = null;
+                try { model = listener != null && listener.source != null && listener.source.gameObject != null ? CleanName(listener.source.gameObject.name) : null; } catch (Exception) { }
+                if (started)
+                    ModHooks.FireSexStarted(_kobold, _kobold != null ? _kobold.GetInstanceID() : 0,
+                        tgtKb, tgtKb != null ? tgtKb.GetInstanceID() : 0, hole, model);
+                else
+                    ModHooks.FireSexEnded(_kobold, _kobold != null ? _kobold.GetInstanceID() : 0,
+                        tgtKb, tgtKb != null ? tgtKb.GetInstanceID() : 0, hole, model);
+            }
+            catch (Exception) { }
         }
 
         private string DickInInfo()
@@ -379,6 +450,8 @@ namespace KKLLMNPC
                     _head = anim != null ? anim.GetBoneTransform(HumanBodyBones.Head) : target.transform;
                     SetupCamera();
                     Logger.LogInfo($"KKLLMNPC: {(reuseIdentity ? "re-" : "")}possessed '{target.name}'");
+                    // MOD HOOK (main-thread, post-binding): an agent mind now drives this body.
+                    ModHooks.FirePossessionStarted(target, target.GetInstanceID(), _npcName);
                 }
                 catch (Exception e) { Logger.LogError("BindBody head/cam: " + e); }
             });
@@ -973,6 +1046,9 @@ namespace KKLLMNPC
         // penetrable/penetrator listeners, ownership claim — restore native AI control.
         private void TeardownBody()
         {
+            // MOD HOOK payload — captured here, before the state null-out below.
+            Kobold releasedBody = _kobold;
+            int releasedBodyId = releasedBody != null ? releasedBody.GetInstanceID() : 0;
             if (_cam != null) { try { Destroy(_cam.gameObject); } catch (Exception) { } _cam = null; }
             if (_rt != null) { try { _rt.Release(); Destroy(_rt); } catch (Exception) { } _rt = null; }
             if (_camR != null) { try { Destroy(_camR.gameObject); } catch (Exception) { } _camR = null; }
@@ -996,6 +1072,9 @@ namespace KKLLMNPC
             _navTarget = null; _navTargetName = null; _path = null; _pathIdx = 0; _pathGoalSet = false; _stimSource = null;
             if (_currentKoboldId >= 0) { lock (LLMNPCPlugin.ClaimedKobolds) { LLMNPCPlugin.ClaimedKobolds.Remove(_currentKoboldId); } UnregisterAgentBody(_currentKoboldId); _currentKoboldId = -1; }
             StopMove();
+            // MOD HOOK: the body is released back to the world (the previous
+            // body reference was captured before the null-out above).
+            ModHooks.FirePossessionEnded(releasedBody, releasedBodyId);
         }
 
         // First-person eye camera: sits slightly in FRONT of the head to avoid face
@@ -1489,6 +1568,12 @@ namespace KKLLMNPC
                             st = new PenState { name = whoPen, lastT = now, depth = worldSpaceDistanceToPenetrator, vel = 0f, hole = ClassifyPenetrable(penetrable) };
                             _pen[penetrator] = st;
                             Logger.LogInfo("penetrated by " + whoPen + " (" + st.hole + ")");
+                            // MOD HOOK: real sex started — the labeled vore insert
+                            // (a meal, not a partner) deliberately never fires these.
+                            if (!voreInsert)
+                                ModHooks.FireSexStarted(owner, owner != null ? owner.GetInstanceID() : 0,
+                                    _kobold, _kobold != null ? _kobold.GetInstanceID() : 0,
+                                    st.hole, model);
                             //EmitAmbient("hah~"); // being entered
                             _stimSource = whoPen; // name the source: partner or machine part
                             _stimSourceT = now;
@@ -1523,6 +1608,10 @@ namespace KKLLMNPC
                     {
                         _pen.Remove(penetrator); // pulled out
                         Logger.LogInfo(whoPen + " pulled out");
+                        if (!voreInsert)
+                            ModHooks.FireSexEnded(owner, owner != null ? owner.GetInstanceID() : 0,
+                                _kobold, _kobold != null ? _kobold.GetInstanceID() : 0,
+                                st.hole, model);
                         PushWorldEvent(voreInsert
                             ? "[vore-pen] the vore insert (" + whoPen + ") withdrew/lost grip — your " + st.hole + " settles closed again"
                             : "[sex] " + whoPen + " withdrew — that round is over; your body is yours again (say how it was, if you like)");
@@ -1919,26 +2008,120 @@ namespace KKLLMNPC
         // comment + Movement.UpdateHorniness), so "very aroused" must NOT be read as
         // "someone is touching me". Returns a short phrase the perception layer drops
         // into 'touch'. Main-thread only (reads game state).
+        //
+        // VORE-FIRST (2026-11-21, ContactCore): the swallow system rides the game's
+        // PenetrationTech — the "victim as a large penis" insert registers in _pen
+        // like any penetrator — so the OLD first-two-lines lied: a body that had
+        // just EATEN someone read IsPenetrated()==true and reported "being_penetrated"
+        // (the model believed it was having sex with its meal). The phrase decision
+        // now lives in pure ContactCore.ContactPhrase, which names vore vore and
+        // reserves sex vocabulary for non-meal penetrations.
         internal string ContactText()
         {
             try
             {
-                if (IsPenetrated()) return "being_penetrated";
-                if (IsDickInside()) return "penetrating_something";
-                if (IsInAnimationStation()) return "mounted_in_station";
-                // Being carried / swallowed: the belly holds a guest (you're the
-                // carrier) OR you're the meal inside someone (Swallowed). Either way a
-                // body is inside you — that IS contact. BellyGuestText is null when the
-                // belly is empty, non-null when a guest is present.
-                try
-                {
-                    if (Swallowed) return "inside_a_stomach";
-                    if (SwallowManager.BellyGuestText(_kobold) != null) return "carrying_a_guest";
-                }
-                catch (Exception) { }
-                return "none — nothing is touching you";
+                bool bellyGuest = false, voreInsert = false, voreDick = false;
+                try { bellyGuest = SwallowManager.BellyGuestText(_kobold) != null; } catch (Exception) { }
+                try { voreInsert = HasVoreInsertPen(); } catch (Exception) { }
+                try { voreDick = HasVoreDickIn(); } catch (Exception) { }
+                return ContactCore.ContactPhrase(Swallowed, HasRealPenetration(), HasRealDickInside(),
+                    bellyGuest, voreInsert, voreDick, IsInAnimationStation());
             }
-            catch (Exception) { return "none — nothing is touching you"; }
+            catch (Exception) { return ContactCore.TouchNone; }
+        }
+
+        // Vore-aware split of _pen: a labeled "vore-insert:" entry is the swallowed
+        // MEAL acting as the shaft — real-sex signaling must never count it.
+        private bool HasRealPenetration()
+        {
+            lock (_pen)
+            {
+                float now = Time.unscaledTime;
+                foreach (var kv in _pen)
+                {
+                    if (kv.Value == null || now - kv.Value.lastT >= 3f) continue;
+                    if (!ContactCore.IsVoreInsertName(kv.Value.name)) return true;
+                }
+                return false;
+            }
+        }
+
+        private bool HasVoreInsertPen()
+        {
+            lock (_pen)
+            {
+                float now = Time.unscaledTime;
+                foreach (var kv in _pen)
+                {
+                    if (kv.Value == null || now - kv.Value.lastT >= 3f) continue;
+                    if (ContactCore.IsVoreInsertName(kv.Value.name)) return true;
+                }
+                return false;
+            }
+        }
+
+        // _dickIn split: the swallow system's virtual pen ("vore:<meal>") re-parented
+        // under this body means OUR BODY is the meal's shaft — meal machinery, never
+        // our dick having sex.
+        private bool HasRealDickInside()
+        {
+            lock (_dickIn)
+            {
+                float now = Time.unscaledTime;
+                foreach (var kv in _dickIn)
+                {
+                    if (kv.Value == null || now - kv.Value.lastT >= 3f) continue;
+                    try
+                    {
+                        var l = kv.Key as KKPenetratorListener;
+                        if (l != null && l.source != null && l.source.gameObject != null
+                            && ContactCore.IsVorePenGoName(l.source.gameObject.name)) continue;
+                    }
+                    catch (Exception) { }
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        private bool HasVoreDickIn()
+        {
+            lock (_dickIn)
+            {
+                float now = Time.unscaledTime;
+                foreach (var kv in _dickIn)
+                {
+                    if (kv.Value == null || now - kv.Value.lastT >= 3f) continue;
+                    try
+                    {
+                        var l = kv.Key as KKPenetratorListener;
+                        if (l != null && l.source != null && l.source.gameObject != null
+                            && ContactCore.IsVorePenGoName(l.source.gameObject.name)) return true;
+                    }
+                    catch (Exception) { }
+                }
+                return false;
+            }
+        }
+
+        // Static anatomy reads for OTHER bodies (ps / perception list people the
+        // instance helpers never reach). Same rules as InferGender: the game
+        // defines sex by equipment — a penis marks male, penetrables mark female.
+        // 'has a penis' is the breeding-relevant bit: eggs need a stud, so agents
+        // must be able to SEE who could be one (2026-11-21 egg-economy lore).
+        internal static bool BodyHasPenis(Kobold k)
+        {
+            try { return k != null && k.activeDicks != null && k.activeDicks.Count >= 1; }
+            catch (Exception) { return false; }
+        }
+
+        internal static string BodyGender(Kobold k)
+        {
+            bool penis = BodyHasPenis(k), female = false;
+            try { female = k != null && k.penetratables != null && k.penetratables.Count >= 3; } catch (Exception) { }
+            if (penis && !female) return "male";
+            if (female && !penis) return "female";
+            return "nonbinary";
         }
     }
 }

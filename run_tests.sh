@@ -108,7 +108,7 @@ run_headless_suites() {
   run_suite compass     tests/test_compass.cs -- src/Compass.cs
   run_suite swallow     tests/test_swallow.cs -- src/SwallowLogic.cs
   run_suite drunkcore   tests/test_drunkcore.cs -- src/DrunkCore.cs
-  run_suite spectate    tests/test_spectate.cs -- src/SpectateLogic.cs
+  run_suite spectate    tests/test_spectate.cs -- src/SpectateLogic.cs src/L10nCore.cs src/Json.cs
   run_suite httpretry   tests/test_httpretry.cs -- src/HttpRetry.cs src/Json.cs
   run_suite safehttp    tests/test_safehttp.cs -- src/SafeHttp.cs
   run_suite modelfamilies tests/test_modelfamilies.cs -- src/ModelFamilies.cs
@@ -121,6 +121,10 @@ run_headless_suites() {
   run_suite vorepersona tests/test_vorepersona.cs -- src/VorePersonaCore.cs
   run_suite agentfsm tests/test_agentfsm.cs -- src/AgentStateMachineCore.cs
   run_suite consent    tests/test_consent.cs -- src/ConsentDetector.cs
+  run_suite contact    tests/test_contact.cs -- src/ContactCore.cs
+  run_suite modhooks   tests/test_modhooks.cs -- src/ModHooksCore.cs
+  run_suite l10n       tests/test_l10n.cs -- src/L10nCore.cs src/Json.cs
+  run_suite promptresolve tests/test_promptresolve.cs -- src/PromptSource.cs
 }
 
 # Every *.cs in tests/ must be reachable from a run_suite line above, otherwise a
@@ -128,7 +132,7 @@ run_headless_suites() {
 # the skip list below instead.
 audit_coverage() {
   local declared
-  declared=$(grep -oE 'tests/test_[a-z_]+\.cs' "$0" | sort -u)
+  declared=$(grep -oE 'tests/test_[a-z0-9_]+\.cs' "$0" | sort -u)
   local orphan
   orphan=$(for f in tests/test_*.cs; do
              echo "$declared" | grep -q "$f" || echo "$f"

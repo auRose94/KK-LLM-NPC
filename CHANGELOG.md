@@ -5,6 +5,163 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] — 2026-11-21
+
+### Fixed (2026-11-21 — phantom sex after eating someone; Rose's field report)
+
+- **The meal is never a lover — vore-first contact signaling.** The swallow
+  system rides the game's PenetrationTech (the "victim as a large penis"
+  insert registers in `_pen` like any penetrator), so the touch field's old
+  first two checks lied: a body that had just EATEN someone read
+  `IsPenetrated()==true` and reported **"being_penetrated"** — the model
+  believed it was having sex with its meal. New pure `ContactCore.cs` decides
+  the phrase with the ordering as the honesty: vore states are named vore
+  (`carrying_a_guest — a VORE INSERT`, `vore_insert_sliding`,
+  `meal_machinery`, `inside_a_stomach`) and only a NON-meal penetrator may say
+  "being_penetrated" / "penetrating_something" (a real partner coexisting with
+  a swallowed guest gets the sex phrase with the guest explicitly disclaimed).
+  New tests: `test_contact.cs`.
+- **Penetrator-listener meal-machinery gate** (`DickInIsMealMachinery`): the
+  swallow system's virtual pen (`vore:<meal>`) re-parented under a body — the
+  "insertion treats the whole body as a penetrator" — plus anything the body
+  does while IT is a swallow session's victim (pre-`Swallowed`-flag pull
+  included) and our dick sliding past the meal's mouth on the way down are
+  purged at registration; they never become `_dickIn` state, never fire [sex]
+  events, never enter the rhythm graph.
+- **Perception honesty split**: `penetrated`/`penetrating` now report only
+  REAL sex (`HasRealPenetration`/`HasRealDickInside`); the labeled meal
+  surfaces under a new `vore_insert` key instead — the prompt taught models
+  "penetrated = you're mid-play with someone", which is exactly the
+  misunderstanding the old mixed key fed. Both act-mode and console prompts
+  gained the explicit vore-insert exception (plus the `touch` phrase list
+  update).
+
+### Added (2026-11-21 — ModHooks: the public event API for other mods)
+
+- **`ModHooks`** (`src/ModHooks.cs`, docs/MODHOOKS.md): the in-process C#
+  event surface for other BepInEx plugins, built for Rose's VR mod — every
+  signal passed honestly: `VoreStarted`/`VoreFullyInside`/`VoreEnded`
+  (outcomes: thrown_up/poured_out/hold_ended/converted_<fate>/…),
+  `SpectateStarted`/`SpectateEggLaid`/`SpectateEnded`/`SpectateHatched` (the
+  local-player perspective hand-off — start pairs with end OR hatch),
+  `SexStarted`/`SexEnded` (REAL sex only — the labeled vore insert never
+  fires these), `PossessionStarted`/`PossessionEnded`. Payload classes carry
+  the game Kobold refs + stable ids; all fires are main-thread, state
+  transitions (no per-frame spam), and exception-isolated through pure
+  `ModHooksCore` (a throwing subscriber is counted and skipped — the plugin
+  lives; tests: `test_modhooks.cs`).
+- **The VR hand-off, both directions** (controls/configs/patches can fight
+  either way — full contract in docs/MODHOOKS.md "Coexistence with
+  controls / VR mods"): `ModHooks.ExternalSpectateCamera` — a VR rig that
+  claims the camera on SpectateStarted silences the built-in last-writer
+  spectate camera entirely (checked per pre-cull before any write);
+  `ModHooks.ExternalPlayerControl` — the second claim: the spectate input
+  lock (`PlayerPossession`/`CameraSwitcher` disable + per-tick input-field
+  zeroing) stands down so a VR locomotion rig owns the player's controls
+  (the honest belly-parking still runs — it's state, not a control fight).
+  Both claims are cleared by the manager on release/hatch. Device-agnostic
+  feeds so the rig reads instead of re-implements: `SpectateHudLine()` (HUD
+  text), `SpectateStruggle01()` (escape meter), `SubmitPlayerStruggle()`
+  (one press from ANY device through the same meter/narration/vomit/remote-
+  abort logic as the flat SPACE poll — `PlayerStruggleHit` extracted in
+  SwallowManager), and `SubmitPreyPoint(worldPos, hitName)` (v1.11.0's prey
+  pointing from any device — the flat mouse click now routes through the
+  same core in `Main.HandleSpectatePoint`, one path, no drift).
+  `ModHooks.PatchOwnerIds` (`com.kk.llmnpc.patches`) + a full patch
+  inventory table give the VR mod conflict detection before patching the
+  same engine methods (the `Grabber.TryDrop` vore trigger is the one that
+  bites a "release held item" VR gesture). Polling helpers
+  `ModHooks.PlayerSpectating` / `ModHooks.EaterOfPlayer` survive scene loads.
+
+### Added (2026-11-21 — the in-game options menu tab)
+
+- **KKLLM categories in the game's Options screen** (`OptionsMenuTab.cs`,
+  Rose's ask: "a tab for the LLM system with categories like the WebUI").
+  Research first: decompiled the game + read Rose's KoboldKare source port —
+  the options menu runs on naelstrof's UnityScriptableSettings framework
+  (`ScriptableSettingSpawner` renders every `Setting` ScriptableObject whose
+  group matches a view's `targetGroup`; `SettingsManager.AddSetting` is the
+  framework's own public registration API). The mod rides that machinery with
+  ZERO Harmony and no prefab edits: per category it clones a `View - Graphics`
+  (ScrollRect + widget templates come free) and a `Button - Graphics`, points
+  the spawner at a runtime `SettingGroup`, clears the inherited rows, and
+  registers config-backed Setting proxies — BepInEx ConfigEntry stays the
+  source of truth (SetValue writes the entry live, Load reads it, the game's
+  own Save button persists, Reset-to-default maps to the entry's default).
+  Six tabs next to Graphics/Audio/Controls: **KKLLM** (model/params,
+  general, memory, autonomy), **KK Console**, **KK Senses**, **KK Movement**,
+  **KK Vore** (incl. the consent gates + spectate POV), **KK Servers**
+  (Ollama/LM Studio/vision model/NonConsent/Web). Bools and enums render as
+  dropdowns, ranged floats/ints as sliders, wide ints + strings as text
+  fields; labels resolve through the game's own localization table ("GUID")
+  via runtime table entries; `ApiKey` deliberately NOT exposed (typed
+  secrets on stream); keys needing a restart are labeled. `[OptionsMenu]
+  Enabled` (default true) turns the whole thing off; failure logs once and
+  the WebUI remains. New build references: Naelstrof.UnityScriptableSettings,
+  Unity.Localization, Unity.TextMeshPro.
+
+### Added (2026-11-21 — localization: the mod speaks the player's language)
+
+- **L10N framework + speech steering** (Rose: "localization support for the
+  whole mod"). Two honest layers, because the mod's text serves two masters:
+  (1) **`[LLM] Language`** — the kobolds' SPOKEN language: `auto` (default)
+  matches the humans, anything else becomes a hard directive appended last to
+  every persona (act, compact, console) — all say/echo lines in that
+  language, the command protocol stays English, proper nouns unchanged. (2)
+  **Player-facing UI** follows the game's OWN Unity Localization locale:
+  pure `L10nCore.cs` (+ tests) implements English-text-key lookup with a
+  exact→base→en→identity fallback chain over flat per-locale JSON files at
+  `BepInEx/plugins/KKLLMNPC/lang/<code>.json`; the options-menu tabs/labels
+  inject one runtime entry per string into the game's "GUID" localization
+  table for EVERY available locale (translated where a file provides one) so
+  the game's own LocalizeStringEvent re-renders on language switch; the
+  spectate HUD grew a translator overload (English templates are the keys,
+  `{0}` placeholders survive). `en.json` (122 keys) is auto-written as the
+  translator template; shipped seeds: German (complete), French, Spanish,
+  pt-BR, Russian, Japanese, zh-hans (tabs + HUD). NOT localized on purpose:
+  LLM-facing protocol text (English is the protocol), config descriptions,
+  logs — docs/L10N.md explains the split and how to contribute a language.
+  l10n suite added; spectate suite now compiles L10nCore.
+
+### Changed (2026-11-21 — prompts read from files, not the config)
+
+- **Prompt provenance cleanup** (Rose: "have a path to the prompt file
+  instead in the config"). The full act persona used to live as a BepInEx
+  config DEFAULT — every install's config file carried a ~23KB blob, and the
+  prompt text existed in three places (config default, repo `.txt`, shipped
+  copy). Now: the `system_prompt_*.txt` + `prompt_extras/*.txt` files are
+  compiled into the DLL as embedded resources (`KKLLMNPC.prompts.*`, mcs
+  `-resource:` + csproj EmbeddedResource), the on-disk copies remain the
+  editable override, and `[LLM] SystemPrompt` / `[Vision] Prompt` defaults
+  are EMPTY — the config holds only paths (`SystemPromptFile`,
+  `[Console] SystemPromptFile`, `[Vision] PromptFile`, `NamePromptFile`).
+  Pure `PromptSource.cs` (+ tests) owns the decision: genuinely-custom
+  inline wins; an inline value equal to the file/embedded copy is the
+  untouched auto-written default and is ignored; file beats embedded;
+  everything missing → the caller's minimal last resort. A lost or
+  unreadable prompt file now falls back to the DLL's embedded copy instead
+  of a broken persona, and `prompt_extras` fills embedded copies for
+  whatever the disk doesn't provide — still in filename order. Migration:
+  old installs keep their stored blob (behavior unchanged) — **delete the
+  `SystemPrompt` / `Prompt` lines from the config** to switch to the file
+  flow; the config descriptions say so. No breaking config changes (the
+  keys remain, inline overrides still honored).
+
+### Changed (2026-11-21 — eggs and seeds are physical goods; no parthenogenesis)
+
+- **Prompt lore** (act + console personas, default facts, farmcook extras):
+  SEEDS are store goods — buy at the shop or grab strays near farm areas;
+  they are never conjured. EGGS to plant come from the shop/dispenser, from a
+  STUD breeding someone at a two-slot breeding station, or from a vore
+  egg-fate conversion — **a female cannot make an egg alone (no
+  parthenogenesis)**: a penisless room means no bred eggs, so buy an egg,
+  wait for a stud, or spend the time on something else (grinding at an
+  impossible egg soft-locks you for nothing).
+- **Studs are findable**: `ps` lines and perception `people` entries now list
+  each kobold's `gender` and `penis` (equipment-derived — same rules as
+  InferGender, via new static `BodyHasPenis`/`BodyGender`), so an agent
+  hunting a breeder can scan the room instead of interrogating everyone.
+
 ## [1.11.0] — 2026-11-18
 
 ### Added (2026-11-18 night — prey pointing + rolled vore personas)

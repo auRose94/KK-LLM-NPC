@@ -313,8 +313,14 @@ namespace KKLLMNPC
             }
             else result["station_use"] = null;
             result["station_stay"] = _stayInStation;
-            result["penetrated"] = IsPenetrated() ? PenetrationInfo() : null;
-            result["penetrating"] = IsDickInside() ? DickInInfo() : null;
+            result["penetrated"] = HasRealPenetration() ? PenetrationInfo() : null;
+            result["penetrating"] = HasRealDickInside() ? DickInInfo() : null;
+            // VORE HONESTY (2026-11-21): the labeled "vore-insert:" entries (the
+            // swallowed meal's body acting as the shaft) are MEAL machinery — they
+            // never ride the 'penetrated'/'penetrating' keys (which the prompt
+            // teaches as "you're mid-play with someone"). The meal surfaces here
+            // and in 'belly'/'touch' instead, named vore.
+            result["vore_insert"] = HasVoreInsertPen() ? PenetrationInfo() : null;
             result["stim_from"] = StimFromText();
             // PHYSICAL CONTACT (bug fix 2026-11-08): arousal/stimulation RISE ON THEIR
             // OWN — the game's PumpUpDick runs continuously and our horniness climbs
@@ -1461,15 +1467,21 @@ namespace KKLLMNPC
             Vector3 d = k.transform.position - _kobold.transform.position;
             string name = nick;
             if (string.IsNullOrEmpty(name)) name = CleanName(k.name);
-            var entry = new Dictionary<string, object>
-            {
-                ["name"] = name,
-                ["body"] = CleanName(k.name),
-                ["id"] = k.GetInstanceID(), // stable handle: look-alike prefab clones share a name but never an id
-                ["d"] = F(d.magnitude),
-                ["dir"] = RelBearing(d),
-                ["dir_deg"] = F(RelBearingDeg(d)),
-                ["who"] = asAgent
+                var entry = new Dictionary<string, object>
+                {
+                    ["name"] = name,
+                    ["body"] = CleanName(k.name),
+                    ["id"] = k.GetInstanceID(), // stable handle: look-alike prefab clones share a name but never an id
+                    ["d"] = F(d.magnitude),
+                    ["dir"] = RelBearing(d),
+                    ["dir_deg"] = F(RelBearingDeg(d)),
+                    // Anatomy at a glance (2026-11-21 egg-economy lore): 'gender' is
+                    // the equipment read (BodyGender — same rules as InferGender) and
+                    // 'penis' is the breeding-relevant bit — eggs need a STUD, so an
+                    // agent hunting one must be able to see who could be.
+                    ["gender"] = BodyGender(k),
+                    ["penis"] = BodyHasPenis(k),
+                    ["who"] = asAgent
                     ? "another agent kobold (an LLM NPC) — a person like you; address them with: their name + a comma"
                     : "a wild kobold (not an agent you can name/address) — approach it directly if you need it",
             };

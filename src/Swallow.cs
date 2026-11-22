@@ -1131,6 +1131,22 @@ namespace KKLLMNPC
         // belongs to their client's session — destroying another player's avatar
         // can break their whole game). Release them at the eater's feet, return
         // their ownership, and announce the outcome to their mod.
+        // The public-mod-hook payload for a session (names best-effort; ids stable).
+        private static VoreHookEvent HookEvent(SwallowState st)
+        {
+            return new VoreHookEvent
+            {
+                Eater = st.Eater,
+                Victim = st.Victim,
+                VictimIsPlayer = st.VictimIsPlayer,
+                EaterName = st.Eater != null ? BodyLabel(st.Eater) : null,
+                VictimName = st.Name,
+                EaterId = st.Eater != null ? st.Eater.GetInstanceID() : 0,
+                VictimId = st.VictimId,
+                Hole = st.Hole,
+            };
+        }
+
         internal static bool ReleaseRemotePlayerVictim(SwallowState st, string outcome)
         {
             try
@@ -1432,6 +1448,7 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
             lock (_lock) _active.Remove(st);
+            try { ModHooks.FireVoreEnded(HookEvent(st), "poured_out"); } catch (Exception) { }
             try { DestroyVirtualPen(st); } catch (Exception) { }
             try { ClearPreyReagent(st.Eater); } catch (Exception) { }
             try { ClearBellyBulge(st.Eater); } catch (Exception) { }
@@ -1699,6 +1716,9 @@ namespace KKLLMNPC
                 Milestone = -1,
             };
             lock (_lock) _active.Add(st);
+            // MOD HOOK (v1.13.0): the pull begins — vore session started. Public
+            // event for other mods (Rose's VR mod subscribes for honest signaling).
+            try { ModHooks.FireVoreStarted(HookEvent(st)); } catch (Exception) { }
             RefreshBellyBulge(eater); // the meal SHOWS from the first moment
             PourPreyReagent(st, planRatio); // …and as REAL reagent when registration took (native bulge)
             DisarmVictimPenetrators(st);
@@ -2540,6 +2560,7 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
             lock (_lock) _active.Remove(st);
+            try { ModHooks.FireVoreEnded(HookEvent(st), "thrown_up"); } catch (Exception) { }
             try { DestroyVirtualPen(st); } catch (Exception) { }
             try { ClearPreyReagent(st.Eater); } catch (Exception) { }
             try { ClearBellyBulge(st.Eater); } catch (Exception) { }
@@ -2568,6 +2589,7 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
             lock (_lock) _active.Remove(st);
+            try { ModHooks.FireVoreEnded(HookEvent(st), "hold_ended"); } catch (Exception) { }
             try { DestroyVirtualPen(st); } catch (Exception) { }
             try { ClearPreyReagent(st.Eater); } catch (Exception) { }
             try { ClearBellyBulge(st.Eater); } catch (Exception) { }
@@ -2600,11 +2622,25 @@ namespace KKLLMNPC
         }
 
         // Main-thread poll (plugin RunUpdate): one SPACE press = one struggle hit.
+        // The SPACE key is this poll only — other input devices (Rose's VR
+        // gestures) route through PlayerStruggleHit via ModHooks, sharing the
+        // same meter, narration and vomit threshold (never a second impl).
         internal static void PollPlayerStruggle()
         {
             try
             {
                 if (!UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.Space)) return;
+                PlayerStruggleHit();
+            }
+            catch (Exception) { }
+        }
+
+        // ONE struggle press from ANY input device (main thread). Returns true
+        // when a player-victim session consumed it (local body or remote eater).
+        internal static bool PlayerStruggleHit()
+        {
+            try
+            {
                 SwallowState st = null;
                 lock (_lock)
                 {
@@ -2620,7 +2656,7 @@ namespace KKLLMNPC
                             + (st.PlayerStruggle >= SwallowLogic.StruggleVomitThreshold * 0.6f ? ". Your stomach is churning HARD — they might just get out." : "."));
                     if (!st.Surrendered && st.PlayerStruggle >= SwallowLogic.StruggleVomitThreshold)
                         VomitRelease(st, "the PLAYER pounded their way out");
-                    return;
+                    return true;
                 }
                 // Remote eater: our machine holds the meter; success = abort RPC.
                 if (SpectateManager.Active)
@@ -2631,9 +2667,11 @@ namespace KKLLMNPC
                         _remotePlayerStruggle = 0f;
                         try { BroadcastLine("swallow|abort-me|0|player|mash-escape"); } catch (Exception) { }
                     }
+                    return true;
                 }
             }
             catch (Exception) { }
+            return false;
         }
 
         // ---- belly bulge (2026-11-16): a swallowed meal SHOWS ------------------
@@ -2859,6 +2897,7 @@ namespace KKLLMNPC
                 DestroyVirtualPen(st);
                 EndSwallow(st);
                 _active.RemoveAt(index);
+                try { ModHooks.FireVoreEnded(HookEvent(st), "interrupted_victim_lost"); } catch (Exception) { }
                 return;
             }
 
@@ -2931,6 +2970,7 @@ namespace KKLLMNPC
                 if (st.Npc != null) try { st.Npc.Swallowed = false; } catch (Exception) { }
                 EndSwallow(st);
                 _active.RemoveAt(index);
+                try { ModHooks.FireVoreEnded(HookEvent(st), "launch_brake_release"); } catch (Exception) { }
                 return;
             }
 
@@ -2980,6 +3020,8 @@ namespace KKLLMNPC
                 if (st.LastPhase == 0 && !st.InsertFullNar)
                 {
                     st.InsertFullNar = true;
+                    // MOD HOOK: fully inside — the conversion begins.
+                    try { ModHooks.FireVoreFullyInside(HookEvent(st)); } catch (Exception) { }
                     try
                     {
                         if (st.EaterNpc != null)
@@ -3066,6 +3108,8 @@ namespace KKLLMNPC
                 DestroyVirtualPen(st);
                 EndSwallow(st);
                 _active.RemoveAt(index);
+                // MOD HOOK: the meal finished converting — the outcome IS the fate.
+                try { ModHooks.FireVoreEnded(HookEvent(st), "converted_" + EffectAt(st).ToString().ToLowerInvariant()); } catch (Exception) { }
             }
             // else: this tick's completion failed — keep the victim pinned and retry.
         }
@@ -3255,6 +3299,7 @@ namespace KKLLMNPC
                 {
                     var st = _active[i];
                     _active.RemoveAt(i);
+                    try { ModHooks.FireVoreEnded(HookEvent(st), "aborted"); } catch (Exception) { }
                     DestroyVirtualPen(st);
                     try { ClearPreyReagent(st.Eater); } catch (Exception) { }
                     try { ClearBellyBulge(st.Eater); } catch (Exception) { }

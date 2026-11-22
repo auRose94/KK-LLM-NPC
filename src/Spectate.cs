@@ -169,6 +169,13 @@ namespace KKLLMNPC
 
         internal static bool Active { get { lock (_lock) return _active != null; } }
 
+        // The eater whose perspective the local player is currently watching through
+        // (null = no spectate). ModHooks.EaterOfPlayer surfaces it publicly.
+        internal static Kobold ActiveEater
+        {
+            get { lock (_lock) return _active != null ? _active.Eater : null; }
+        }
+
         internal static bool IsSpectating(Kobold body)
         {
             if (body == null) return false;
@@ -211,7 +218,7 @@ namespace KKLLMNPC
                 if (_active == null) return null;
                 string who = _active.EaterLabel ?? "someone";
                 return SpectateLogic.HudLine(who, string.IsNullOrEmpty(_active.HatchHint) ? null : _active.HatchHint,
-                    SwallowManager.PlayerStruggle01());
+                    SwallowManager.PlayerStruggle01(), k => L10n.T(k));
             }
         }
 
@@ -251,8 +258,26 @@ namespace KKLLMNPC
             lock (_lock) created = _active != null && _active.Player == player ? _active : null;
             if (created != null)
             {
-                LockPlayerControl(created);
-                SuppressPlayerInput();
+                // EXTERNAL PLAYER CONTROL (ModHooks): a VR rig that has claimed the
+                // player's body owns its input for the whole watch — the component
+                // lock stands down entirely. The claim may predate this call
+                // (VoreStarted fires before spectate begins), so check BEFORE locking.
+                if (!ModHooks.ExternalPlayerControl)
+                {
+                    LockPlayerControl(created);
+                    SuppressPlayerInput();
+                }
+                // MOD HOOK (v1.13.0): the perspective hand-off is announced — other
+                // mods (Rose's VR rig) attach to created.Eater and may claim the
+                // camera via ModHooks.ExternalSpectateCamera (checked per-frame below).
+                try
+                {
+                    ModHooks.FireSpectateStart(created.Player, created.Eater, created.EaterLabel, created.Pov);
+                }
+                catch (Exception) { }
+                // A SpectateStarted subscriber may have claimed control mid-event —
+                // undo the lock taken above so the claim wins.
+                if (ModHooks.ExternalPlayerControl) UnlockPlayerControl(created);
             }
             try { LLMNPCPlugin.Log.LogInfo("spectate: camera taken over — the player watches from inside '" + (eaterLabel ?? "?") + "'"); } catch (Exception) { }
         }
@@ -261,13 +286,19 @@ namespace KKLLMNPC
         // egg's genes fingerprint is what the planted egg will arrive as.
         internal static void MarkEggLaid(Kobold player, string fingerprint, string hatchHint)
         {
+            Kobold eater = null;
+            string label = null;
             lock (_lock)
             {
                 if (_active == null || _active.Player != player) return;
                 _active.Fingerprint = fingerprint;
                 _active.HatchPending = !string.IsNullOrEmpty(fingerprint);
                 if (!string.IsNullOrEmpty(hatchHint)) _active.HatchHint = hatchHint;
+                eater = _active.Eater;
+                label = _active.EaterLabel;
             }
+            // MOD HOOK: the rebirth egg exists (genes fingerprint rides along).
+            try { ModHooks.FireSpectateEggLaid(player, eater, label, fingerprint); } catch (Exception) { }
         }
 
         // Called at consume time (Grow/Destroy): no hatch will come.
@@ -310,7 +341,10 @@ namespace KKLLMNPC
             }
             catch (Exception) { }
 
-            SuppressPlayerInput();
+            // The BODY PARKING above always runs (the player IS inside the eater —
+            // that state stays honest even when a VR rig owns their controls); only
+            // the flat-game input suppression yields to an external control claim.
+            if (!ModHooks.ExternalPlayerControl) SuppressPlayerInput();
         }
 
         private static void SuppressPlayerInput()
@@ -354,6 +388,13 @@ namespace KKLLMNPC
                     at = a.LastEaterPos + Vector3.up * 0.1f;
                 try { SwallowManager.RestoreVictimBody(a.Player, at); } catch (Exception) { }
             }
+            // MOD HOOK: the watch is over (cause names the ending). An external
+            // camera/control owner MUST stop driving now — the manager clears
+            // both claim flags itself so a forgotten claim can't strand the
+            // view or leave the player's controls disabled.
+            ModHooks.ExternalSpectateCamera = false;
+            ModHooks.ExternalPlayerControl = false;
+            try { ModHooks.FireSpectateEnd(a.Player, a.Eater, a.EaterLabel, CauseName(cause)); } catch (Exception) { }
             try { LLMNPCPlugin.Log.LogInfo("spectate: released (cause " + CauseName(cause) + ")"); } catch (Exception) { }
         }
 
@@ -403,6 +444,11 @@ namespace KKLLMNPC
             }
             lock (_lock) { if (_active == a) { _active = null; a.HatchPending = false; } }
             UnlockPlayerControl(a);
+            ModHooks.ExternalSpectateCamera = false;
+            ModHooks.ExternalPlayerControl = false;
+            // MOD HOOK: the player woke grown at the egg's hatch spot (same person,
+            // new body, egg's genes) — the perspective is handed back here.
+            try { ModHooks.FireSpectateHatch(a.Player, a.Eater, a.EaterLabel, a.Fingerprint); } catch (Exception) { }
             try { LLMNPCPlugin.Log.LogInfo("spectate: HATCH — the player was revived at the egg's hatch spot with the egg's genes"); } catch (Exception) { }
             return true;
         }
@@ -494,6 +540,10 @@ namespace KKLLMNPC
             SpectateState a;
             lock (_lock) a = _active;
             if (a == null || cam == null || a.Eater == null) return;
+            // EXTERNAL CAMERA CLAIM (ModHooks, v1.13.0): another mod (a VR rig)
+            // is driving the spectate view — the built-in last-writer stands down
+            // ENTIRELY, so the two never fight on pre-cull. Cleared on release/hatch.
+            if (ModHooks.ExternalSpectateCamera) return;
             try { if (cam != OrbitCamera.GetCamera()) return; } catch (Exception) { return; }
             if (!_hookLiveLogged)
             {
