@@ -166,8 +166,26 @@ docs/                ARCHITECTURE / CONFIG / MODELS / VORE / vision-dump-spec
 - `CONTRIBUTING.md` — style, PR checklist, game-API integration notes
 - `wip/BASE-GAME-AI.md` — reverse-engineered game internals
 
-## Current state (2026-11-21)
+## Current state (2026-11-27)
 
+- **v1.13.2 (2026-11-27): options tabs actually render their settings —
+  committed d3985c4, pushed, tagged and RELEASED same day** (GitHub release
+  "v1.13.2 — the in-game options menu actually works now", three platform
+  zips; release notes lead with the settings-menu announcement). Root cause:
+  the "GUID" localization table NEVER EXISTED: the game's LocalizeStringEvents
+  serialize `m_TableCollectionName: GUID:7b0547…` — a GUID-mode reference to
+  the string collection actually named **`StringDatabase`** (asset GUID
+  `7b0547fe1d039e3448e29797d2fc4463`), which the original port misread as a
+  table named "GUID". `GetTable("GUID")` returned null forever; the old Loc()
+  swallowed it into an empty `LocalizedString`, and the game spawner's first
+  `CreateTitle → GetLocalizedString()` threw `Empty Table Reference`, killing
+  the spawn coroutine — KK tabs rendered only a raw opaque "Label" title with
+  zero rows. Fix (jointly convicted with the VR rig's port, which had the
+  identical defect): GUID-mode `TableReference` in `OptionsMenuTab.Loc/TryLoc`,
+  Loc THROWS on an unusable table (Build → counted retry), injection defers
+  uncounted until `LocalizationSettings.InitializationOperation` completes,
+  and the build scripts reference game-provided `Unity.ResourceManager.dll`
+  (where the handle type lives). Verified: check_build 0 errors 0 warnings.
 - `main` is the PR target and is current. **v1.13.1 committed, pushed and
   RELEASED 2026-11-21** (80137e7; tag v1.13.1, GitHub release with the three
   platform zips — Rose-verified in-game, coexists with the VR rig's own
