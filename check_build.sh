@@ -71,6 +71,7 @@ mcs -target:library -out:"$OUT/KKLLMNPC.dll" src/*.cs \
   -r:"$MGMT/Naelstrof.JigglePhysics.dll" \
   -r:"$MGMT/Naelstrof.UnityScriptableSettings.dll" \
   -r:"$MGMT/Unity.Localization.dll" \
+  -r:"$MGMT/Unity.ResourceManager.dll" \
   -r:"$MGMT/Unity.TextMeshPro.dll" \
   -r:"$MGMT/com.naelstrof.orbitcam.dll" \
   -r:"$MGMT/com.naelstrof.inflatable.dll" \

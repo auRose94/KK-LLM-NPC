@@ -21,7 +21,7 @@ using Photon.Realtime;
 
 namespace KKLLMNPC
 {
-    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.13.1")]
+    [BepInPlugin("com.kk.llmnpc", "KKLLMNPC", "1.13.2")]
     public partial class LLMNPCPlugin : BaseUnityPlugin, Photon.Realtime.IOnEventCallback
     {
         // Expose logger for NPCInstance (BaseUnityPlugin.Logger is protected).

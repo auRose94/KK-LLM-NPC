@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.2] — 2026-11-27
+
+### Fixed (2026-11-27 — the options tabs finally render their settings)
+
+- **The "GUID" localization table never existed** (the "tab renders only a
+  raw opaque 'Label' title with zero rows" bug, confessed from the player
+  log + package source; the VR rig's port shipped the identical defect —
+  joint conviction with that agent, fix mirrored both sides). The game's
+  own LocalizeStringEvents serialize `m_TableCollectionName: GUID:7b0547…` —
+  that's a **GUID-mode reference** to the string collection actually named
+  **`StringDatabase`** (SharedData asset "NewStringDatabase Shared Data",
+  asset GUID `7b0547fe1d039e3448e29797d2fc4463`), which the original port
+  misread as a table *named* "GUID". `GetTable("GUID")` therefore returned
+  null forever; `Loc` swallowed that into an **empty** `LocalizedString`,
+  and when a KK tab first opened, the game spawner's first
+  `CreateTitle → GetLocalizedString()` threw `ArgumentException: Empty
+  Table Reference`, aborting the spawn coroutine mid-flight — leaving the
+  un-textified title template on screen and no setting rows. `Loc` now
+  resolves a GUID-mode `TableReference` (the same path the game's own UI
+  takes), **throws** on an unusable table so Build fails into the counted
+  retry instead of poisoning the spawner far from the cause, and injection
+  defers (uncounted, one log line) until `LocalizationSettings`
+  InitializationOperation completes. Build scripts gained the
+  game-provided `Unity.ResourceManager.dll` reference the handle type lives
+  in. Labels resolve per-locale as before (L10n translation where a lang
+  file provides one, English otherwise).
+
 ## [1.13.1] — 2026-11-21
 
 ### Added (2026-11-21 — the shopping district + body-size-aware navigation)

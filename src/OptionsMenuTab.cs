@@ -20,11 +20,20 @@
 //   4. a cloned "Button - Graphics" per category wired to hide-then-show,
 //      registered on the panel's HideAllViews so every OTHER tab hides ours.
 //
-// Labels resolve through the game's own localization table ("GUID" — the name
-// every in-game LocalizeStringEvent references): entries are added to the
-// loaded StringTable at runtime and the LocalizedString points at them, so
-// the spawner's label code just works. Build is best-effort: any failure
-// logs once and the tab simply doesn't appear (the WebUI remains).
+// Labels resolve through the game's own localization table — the string
+// collection actually NAMED "StringDatabase" (SharedData asset
+// "NewStringDatabase Shared Data", asset GUID 7b0547fe1d039e3448e29797d2fc4463).
+// The game's LocalizeStringEvents serialize that as "m_TableCollectionName:
+// GUID:7b0547…" — a GUID-MODE reference the original port misread as a table
+// named "GUID", so GetTable("GUID") returned null forever; swallowing that
+// produced an EMPTY LocalizedString, and the game spawner's first CreateTitle
+// → GetLocalizedString() threw "Empty Table Reference", aborting the spawn
+// coroutine — her tabs rendered only the raw opaque "Label" title with zero
+// rows (convicted 2026-11-27 from the player log + package source; the VR
+// rig's port shipped the identical bug). Entries are added to the tables at
+// runtime and the LocalizedString points at them, so the spawner's label
+// code just works. Build is best-effort: any failure logs once and the tab
+// simply doesn't appear (the WebUI remains).
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -543,6 +552,20 @@ namespace KKLLMNPC
             catch (Exception) { return false; } // NRE when the singleton hasn't Awake'd
         }
 
+        // Injection must WAIT for the localization system (2026-11-27): building
+        // before InitializationOperation completes used to be survivable — the
+        // old Loc() swallowed a null table into an empty LocalizedString — but
+        // that empty reference detonates later inside the game's spawner, killing
+        // the settings rows. Defer uncounted (this gate doesn't burn the retry
+        // budget) until init is done, then Build for real.
+        private static bool _locWaitLogged;
+
+        private static bool LocalizationReady()
+        {
+            try { return LocalizationSettings.InitializationOperation.IsDone; }
+            catch (Exception) { return true; } // API shape changed — let Loc() try and fail loudly
+        }
+
         internal static void Tick()
         {
             // The mod doctor: runs whether or not the build succeeded — the
@@ -557,6 +580,15 @@ namespace KKLLMNPC
                 var menu = UnityEngine.Object.FindObjectOfType<MainMenu>();
                 if (menu == null) return;
                 if (!SettingsReady()) return;
+                if (!LocalizationReady())
+                {
+                    if (!_locWaitLogged)
+                    {
+                        _locWaitLogged = true;
+                        DumpLine("options menu: deferring tab injection until localization finishes initializing");
+                    }
+                    return;
+                }
                 Build(menu);
                 _built = true;
                 L10n.WriteEnTemplate(AllStrings()); // translator template lands on disk once the key inventory is known
@@ -866,20 +898,38 @@ namespace KKLLMNPC
         // The enum proxy takes ConfigEntryBase directly (one class serves every
         // enum key through BoxedValue — no per-enum generic dance).
 
-        // Labels resolve through the game's own localization table (named
-        // "GUID" — what every in-game LocalizeStringEvent references): add a
-        // runtime entry, point the LocalizedString at it. The text is injected
-        // into EVERY available locale's table — L10n's translation where a
-        // lang file provides one, English otherwise — so the game's own
-        // LocalizeStringEvent machinery re-renders the label when the player
-        // switches language. Failure = blank label, tab still functional.
+        // Labels resolve through the game's own localization table. Its
+        // SharedData asset is "NewStringDatabase Shared Data" with
+        // TableCollectionName "StringDatabase" (asset GUID
+        // 7b0547fe1d039e3448e29797d2fc4463) — and the game's own
+        // LocalizeStringEvents reference it in GUID MODE: the serialized
+        // "m_TableCollectionName: GUID:7b0547…" that the port misread as a
+        // table NAMED "GUID". GetTable("GUID") therefore always returned null
+        // and the old swallow-into-empty-LocalizedString produced the spawner
+        // crash ("Empty Table Reference" at CreateTitle → "Label"-only tabs).
+        // Loc now THROWS on an unusable table — Build fails → the counted
+        // retry handles it — instead of handing the spawner a poisoned
+        // reference that detonates far from its cause.
+        private static readonly Guid LocTableGuid =
+            new Guid("7b0547fe1d039e3448e29797d2fc4463");
+
         private static LocalizedString Loc(string text)
         {
-            var ls = new LocalizedString();
+            if (!TryLoc(text, out LocalizedString ls))
+                throw new Exception("localization table 'StringDatabase' unavailable (deferred)");
+            return ls;
+        }
+
+        private static bool TryLoc(string text, out LocalizedString ls)
+        {
+            ls = new LocalizedString();
             try
             {
-                var table = LocalizationSettings.StringDatabase.GetTable("GUID");
-                if (table == null || table.SharedData == null) return ls;
+                var op = LocalizationSettings.InitializationOperation;
+                if (!op.IsDone) op.WaitForCompletion(); // main-thread block — once, at Build time
+                TableReference tableRef = LocTableGuid; // implicit Guid → GUID-mode reference, same as the game's own UI
+                var table = LocalizationSettings.StringDatabase.GetTable(tableRef);
+                if (table == null || table.SharedData == null) return false;
                 var keyEntry = table.SharedData.AddKey();
                 var localeProvider = LocalizationSettings.AvailableLocales;
                 var locales = localeProvider != null ? localeProvider.Locales : null;
@@ -889,17 +939,23 @@ namespace KKLLMNPC
                     {
                         try
                         {
-                            var tbl = LocalizationSettings.StringDatabase.GetTable("GUID", loc);
+                            // GetTable(TableReference, Locale) blocks until that
+                            // locale's table is loaded (GetTableAsync.WaitForCompletion
+                            // inside), so every available locale gets the entry —
+                            // L10n's translation where a lang file provides one,
+                            // English otherwise — and the game's own
+                            // LocalizeStringEvent machinery re-renders on language switch.
+                            var tbl = LocalizationSettings.StringDatabase.GetTable(tableRef, loc);
                             if (tbl != null)
                                 tbl.AddEntry(keyEntry.Key, L10n.T(text, loc != null ? loc.Identifier.Code : null));
                         }
                         catch (Exception) { }
                     }
                 }
-                ls.SetReference("GUID", keyEntry.Key);
+                ls.SetReference(tableRef, keyEntry.Key);
+                return true;
             }
-            catch (Exception) { }
-            return ls;
+            catch (Exception) { return false; }
         }
 
         // The full English string inventory (translator template source).
